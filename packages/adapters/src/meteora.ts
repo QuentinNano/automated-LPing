@@ -194,7 +194,7 @@ function unwrapList(payload: unknown, url: string): { items: unknown[]; total?: 
     for (const key of ["data", "pairs", "pools", "groups", "items", "results"]) {
       const value = payload[key];
       if (Array.isArray(value)) {
-        const total = pickNumber(payload, ["total", "total_count", "count"]);
+        const total = pickNumber([payload], ["total", "total_count", "count"]);
         return { items: value, ...(total !== undefined ? { total } : {}) };
       }
     }
@@ -216,29 +216,46 @@ function unwrapSingle(payload: unknown): unknown {
 export function normalizeMeteoraPair(raw: unknown): PoolMetrics | null {
   if (!isRecord(raw)) return null;
 
-  const poolAddress = pickString(raw, ["address", "pool_address", "pubkey", "lb_pair", "lbPair"]);
-  const mintX = pickMint(raw, ["mint_x", "mintX", "token_x_mint", "token_x", "tokenX", "base_mint"]);
-  const mintY = pickMint(raw, ["mint_y", "mintY", "token_y_mint", "token_y", "tokenY", "quote_mint"]);
-  const binStep = pickNumber(raw, ["bin_step", "binStep"]);
+  // Meteora markiert problematische Pools selbst — die überspringen wir sofort.
+  if (raw["is_blacklisted"] === true) return null;
+
+  const scopes = scopesOf(raw);
+
+  const poolAddress = pickString(scopes, ["address", "pool_address", "pubkey", "lb_pair", "lbPair"]);
+  const mintX = pickMint(scopes, ["token_x", "mint_x", "mintX", "token_x_mint", "tokenX", "base_mint"]);
+  const mintY = pickMint(scopes, ["token_y", "mint_y", "mintY", "token_y_mint", "tokenY", "quote_mint"]);
+  const binStep = pickNumber(scopes, ["bin_step", "binStep"]);
 
   if (poolAddress === undefined || mintX === undefined || mintY === undefined || binStep === undefined) {
     return null;
   }
 
-  const tvlUsd = pickNumber(raw, ["liquidity", "tvl", "tvl_usd", "liquidity_usd"]);
-  const volume24hUsd = pickNumber(raw, ["trade_volume_24h", "volume_24h", "volume24h", "volume"]);
-  const fees24hUsd = pickNumber(raw, ["fees_24h", "fee_24h", "fees24h"]);
-  const feeTvl24hPct =
-    tvlUsd !== undefined && tvlUsd > 0 && fees24hUsd !== undefined
-      ? (fees24hUsd / tvlUsd) * 100
-      : undefined;
+  const tvlUsd = pickNumber(scopes, ["tvl", "liquidity", "tvl_usd", "liquidity_usd"]);
+  const volume24hUsd = pickNumber(scopes, ["volume", "trade_volume_24h", "volume_24h", "volume24h"]);
+  const fees24hUsd = pickNumber(scopes, ["fees", "fees_24h", "fee_24h", "fees24h"]);
 
-  const name = pickString(raw, ["name", "pair_name", "symbol"]);
-  const baseFeePct = pickNumber(raw, ["base_fee_percentage", "base_fee_pct", "base_fee"]);
-  const maxFeePct = pickNumber(raw, ["max_fee_percentage", "max_fee_pct", "max_fee"]);
-  const priceNative = pickNumber(raw, ["current_price", "price", "price_native"]);
-  const apr = pickNumber(raw, ["apr", "apr_24h"]);
-  const apy = pickNumber(raw, ["apy", "apy_24h"]);
+  // Die API liefert das Fee/TVL-Verhältnis teils fertig; sonst selbst rechnen.
+  const reportedRatio = pickNumber(scopes, ["fee_tvl_ratio", "fee_tvl_ratio_24h"]);
+  const feeTvl24hPct =
+    reportedRatio ??
+    (tvlUsd !== undefined && tvlUsd > 0 && fees24hUsd !== undefined
+      ? (fees24hUsd / tvlUsd) * 100
+      : undefined);
+
+  const name = pickString(scopes, ["name", "pair_name", "symbol"]);
+  const baseFeePct = pickNumber(scopes, [
+    "base_fee_pct",
+    "base_fee_percentage",
+    "base_fee",
+    // Fällt die Basisgebühr aus, ist die aktuelle dynamische Gebühr die beste
+    // verfügbare Näherung für die Ertragskraft des Pools.
+    "dynamic_fee_pct",
+    "current_fee_pct",
+  ]);
+  const maxFeePct = pickNumber(scopes, ["max_fee_pct", "max_fee_percentage", "max_fee"]);
+  const priceNative = pickNumber(scopes, ["current_price", "price", "price_native"]);
+  const apr = pickNumber(scopes, ["apr", "apr_24h"]);
+  const apy = pickNumber(scopes, ["apy", "apy_24h"]);
 
   return {
     poolAddress,
@@ -260,39 +277,97 @@ export function normalizeMeteoraPair(raw: unknown): PoolMetrics | null {
   };
 }
 
+/**
+ * Kennzahlen liegen je nach Schnittstelle flach (`volume_24h: 1234`) oder als
+ * Objekt mit Zeitfenstern (`volume: { hour_1: …, hour_24: … }`). Diese Liste
+ * deckt die gebräuchlichen Schreibweisen des 24-Stunden-Fensters ab.
+ */
+const WINDOW_24H_KEYS = [
+  "hour_24",
+  "h24",
+  "24h",
+  "hour24",
+  "last_24h",
+  "day_1",
+  "d1",
+  "min_1440",
+];
+
+/**
+ * Verschachtelte Container, in denen Felder ebenfalls stehen können —
+ * `bin_step` und die Basisgebühr liegen bei der aktuellen API in `pool_config`.
+ */
+const NESTED_SCOPES = ["pool_config", "config", "pair", "pool", "metrics"];
+
+/** Der Datensatz selbst plus seine bekannten Unter-Container. */
+function scopesOf(raw: Record<string, unknown>): Record<string, unknown>[] {
+  const scopes = [raw];
+  for (const key of NESTED_SCOPES) {
+    const value = raw[key];
+    if (isRecord(value)) scopes.push(value);
+  }
+  return scopes;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function pickString(raw: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = raw[key];
-    if (typeof value === "string" && value.length > 0) return value;
+function toNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  // Beide Schnittstellen liefern Zahlen teils als Strings.
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
   }
   return undefined;
 }
 
-function pickNumber(raw: Record<string, unknown>, keys: string[]): number | undefined {
+// Wichtig bei allen drei Zugriffen: die **Schlüssel-Reihenfolge** hat Vorrang
+// vor dem Container. Sonst gewönne z. B. das oberflächlich liegende
+// `dynamic_fee_pct` gegen das präzisere `base_fee_pct` aus `pool_config`.
+
+function pickString(scopes: Record<string, unknown>[], keys: string[]): string | undefined {
   for (const key of keys) {
-    const value = raw[key];
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-    // Beide Schnittstellen liefern Zahlen teils als Strings.
-    if (typeof value === "string" && value.trim() !== "") {
-      const parsed = Number(value);
-      if (Number.isFinite(parsed)) return parsed;
+    for (const scope of scopes) {
+      const value = scope[key];
+      if (typeof value === "string" && value.length > 0) return value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Zahl aus einem der Container lesen — direkt, oder aus dem 24-Stunden-Fenster
+ * eines Kennzahlen-Objekts.
+ */
+function pickNumber(scopes: Record<string, unknown>[], keys: string[]): number | undefined {
+  for (const key of keys) {
+    for (const scope of scopes) {
+      const value = scope[key];
+      const direct = toNumber(value);
+      if (direct !== undefined) return direct;
+      if (isRecord(value)) {
+        for (const window of WINDOW_24H_KEYS) {
+          const windowed = toNumber(value[window]);
+          if (windowed !== undefined) return windowed;
+        }
+      }
     }
   }
   return undefined;
 }
 
 /** Mint-Adresse, auch wenn sie in einem Token-Objekt steckt. */
-function pickMint(raw: Record<string, unknown>, keys: string[]): string | undefined {
+function pickMint(scopes: Record<string, unknown>[], keys: string[]): string | undefined {
   for (const key of keys) {
-    const value = raw[key];
-    if (typeof value === "string" && value.length > 0) return value;
-    if (isRecord(value)) {
-      const nested = pickString(value, ["address", "mint", "mint_address"]);
-      if (nested !== undefined) return nested;
+    for (const scope of scopes) {
+      const value = scope[key];
+      if (typeof value === "string" && value.length > 0) return value;
+      if (isRecord(value)) {
+        const nested = pickString([value], ["address", "mint", "mint_address", "mint_x", "mint_y"]);
+        if (nested !== undefined) return nested;
+      }
     }
   }
   return undefined;
