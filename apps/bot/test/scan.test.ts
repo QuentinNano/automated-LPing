@@ -137,4 +137,42 @@ describe("runScan", () => {
     expect(table).toContain("✗ raus");
     expect(table).toContain("akzeptiert 1");
   });
+
+  it("zählt die Ausschlussgründe des Vor-Filters", async () => {
+    const summary = await runScan(buildDeps([]), config, { pages: 1 });
+    // USDC-Pool (nicht SOL-quotiert) und Mini-TVL-Pool fallen bei jedem Preset raus.
+    for (const preset of ["degen", "balanced", "konservativ"]) {
+      const reasons = summary.prefilterReasons[preset]?.map(([kind]) => kind) ?? [];
+      expect(reasons, preset).toContain("nicht");
+    }
+  });
+
+  it("erklärt eine leere Trefferliste, statt nur eine leere Tabelle zu zeigen", async () => {
+    const deps = buildDeps([]);
+    // Nur Pools, die an der TVL-Schwelle scheitern.
+    deps.meteora = {
+      async getPairsPage() {
+        return { pairs: [buildPool({ tvlUsd: 100 })], skipped: 0 };
+      },
+    };
+    const summary = await runScan(deps, config, { pages: 1 });
+
+    expect(summary.rows).toHaveLength(0);
+    const output = formatScanTable(summary);
+    expect(output).toContain("Kein Pool hat den Vor-Filter passiert");
+    expect(output).toContain("TVL");
+    expect(output).toContain("api:check");
+  });
+
+  it("weist darauf hin, wenn gar keine Pools geladen wurden", async () => {
+    const deps = buildDeps([]);
+    deps.meteora = {
+      async getPairsPage() {
+        return { pairs: [], skipped: 0 };
+      },
+    };
+    const output = formatScanTable(await runScan(deps, config, { pages: 1 }));
+    expect(output).toContain("gar keine Pools");
+    expect(output).toContain("api:check");
+  });
 });

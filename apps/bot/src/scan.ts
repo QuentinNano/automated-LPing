@@ -62,6 +62,8 @@ export interface ScanRow {
 export interface ScanSummary {
   poolsScanned: number;
   shortlisted: Record<PresetKind, number>;
+  /** Häufigste Ausschlussgründe des Vor-Filters je Preset (absteigend). */
+  prefilterReasons: Record<PresetKind, [string, number][]>;
   accepted: number;
   rejected: number;
   persisted: number;
@@ -103,13 +105,37 @@ export async function runScan(
   // 2) Vor-Filter + Shortlist je Preset (billig, rein lokal).
   const presetIds = activePresetIds(config);
   const shortlists: Record<PresetKind, PoolMetrics[]> = {};
+  const prefilterReasons: Record<PresetKind, [string, number][]> = {};
+
   for (const id of presetIds) {
     const preset = config.presets[id]!;
-    const eligible = pools.filter((pool) => classifyForPreset(pool, preset).eligible);
+    const eligible: PoolMetrics[] = [];
+    // Ausschlussgründe zählen: eine leere Shortlist muss sich selbst erklären,
+    // sonst steht man vor einem stummen "0 Kandidaten".
+    const reasonCounts = new Map<string, number>();
+
+    for (const pool of pools) {
+      const result = classifyForPreset(pool, preset);
+      if (result.eligible) {
+        eligible.push(pool);
+        continue;
+      }
+      for (const reason of result.reasons) {
+        const kind = reason.split(" ")[0] ?? reason;
+        reasonCounts.set(kind, (reasonCounts.get(kind) ?? 0) + 1);
+      }
+    }
+
     shortlists[id] = eligible
       .sort((a, b) => shortlistRank(b) - shortlistRank(a))
       .slice(0, topPerPreset);
+    prefilterReasons[id] = [...reasonCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4);
+
     log(`Shortlist ${id}: ${shortlists[id]!.length} von ${eligible.length} Kandidaten`);
+    if (eligible.length === 0 && pools.length > 0) {
+      const summary = prefilterReasons[id]!.map(([kind, count]) => `${kind} (${count}×)`).join(", ");
+      log(`  → kein Pool passt zu "${id}". Häufigste Ausschlussgründe: ${summary || "keine"}`);
+    }
   }
 
   // 3) Enrichment je Token (dedupliziert; sequenziell wegen Rate-Limits).
@@ -197,6 +223,7 @@ export async function runScan(
   return {
     poolsScanned: pools.length,
     shortlisted,
+    prefilterReasons,
     accepted: rows.filter((r) => r.screening.verdict === "accepted").length,
     rejected: rows.filter((r) => r.screening.verdict === "rejected").length,
     persisted,
@@ -205,6 +232,32 @@ export async function runScan(
 }
 
 export function formatScanTable(summary: ScanSummary): string {
+  if (summary.rows.length === 0) {
+    const lines = [
+      `Kein Pool hat den Vor-Filter passiert (${summary.poolsScanned} Pools geladen).`,
+      "",
+    ];
+    if (summary.poolsScanned === 0) {
+      lines.push(
+        "Es kamen gar keine Pools an — die Datenquelle prüfen:",
+        "  pnpm --filter @lping/bot api:check",
+      );
+    } else {
+      lines.push("Häufigste Ausschlussgründe je Preset:");
+      for (const [preset, reasons] of Object.entries(summary.prefilterReasons)) {
+        const summaryText = reasons.map(([kind, count]) => `${kind} (${count}×)`).join(", ");
+        lines.push(`  ${preset.padEnd(12)} ${summaryText || "—"}`);
+      }
+      lines.push(
+        "",
+        "Das kann normal sein (die Filter sind bewusst streng) oder daran liegen,",
+        "dass ein Feld aus der API nicht gelesen wird. Zum Nachsehen:",
+        "  pnpm --filter @lping/bot api:check",
+      );
+    }
+    return lines.join("\n");
+  }
+
   const header = [
     pad("Preset", 12),
     pad("Pool", 22),

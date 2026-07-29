@@ -43,7 +43,9 @@ function assert(condition: boolean, label: string): void {
   console.log(`  ✓ ${label}`);
 }
 
-const TEST_POOL = `RoundtripTestPool${Date.now()}`;
+/** Erkennungszeichen der Testdaten — danach wird am Ende aufgeräumt. */
+const TEST_PREFIX = "RoundtripTestPool";
+const TEST_POOL = `${TEST_PREFIX}${Date.now()}`;
 
 function testPool(): PoolMetrics {
   return {
@@ -132,7 +134,33 @@ async function main(): Promise<void> {
 
     console.log("\nDB-Roundtrip OK ✔");
   } finally {
+    await cleanup(prisma);
     await prisma.$disconnect();
+  }
+}
+
+/**
+ * Entfernt alle Spuren des Selbsttests.
+ *
+ * Der Test schreibt bewusst in die echte Datenbank — nur so beweist er, dass
+ * Schreiben, Deduplizieren und Shadow-Tracking wirklich funktionieren. Ohne
+ * Aufräumen tauchten die Testdaten aber im Scanner der Oberfläche auf, als
+ * wären es entdeckte Pools. Läuft in `finally`, damit auch ein abgebrochener
+ * Lauf nichts zurücklässt.
+ */
+async function cleanup(client: ReturnType<typeof createPrisma>): Promise<void> {
+  try {
+    await client.poolSnapshot.deleteMany({ where: { poolAddress: { startsWith: TEST_PREFIX } } });
+    await client.poolCandidate.deleteMany({ where: { poolAddress: { startsWith: TEST_PREFIX } } });
+    // Die vom Test erzeugte Config-Version zurücknehmen, damit die Historie
+    // in der Oberfläche nur echte Änderungen zeigt.
+    await client.configVersion.deleteMany({ where: { actor: "db:check" } });
+  } catch (error) {
+    console.warn(
+      `Hinweis: Testdaten konnten nicht vollständig entfernt werden (${
+        error instanceof Error ? error.message : String(error)
+      }).`,
+    );
   }
 }
 
