@@ -47,6 +47,7 @@ export interface MarketPairSnapshot {
     h6?: { buys: number; sells: number };
     h24?: { buys: number; sells: number };
   };
+  priceChange?: { m5?: number; h1?: number; h6?: number; h24?: number };
   fdvUsd?: number;
   marketCapUsd?: number;
   pairCreatedAt?: Date;
@@ -67,6 +68,7 @@ export interface TokenRiskReport {
   topHolders: { address: string; pct: number; insider: boolean }[];
   top10HolderPct: number | null;
   insiderPct: number | null;
+  totalHolders: number | null;
   totalMarketLiquidityUsd: number | null;
   fetchedAt: Date;
   source: "rugcheck";

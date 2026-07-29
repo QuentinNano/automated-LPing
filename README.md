@@ -39,16 +39,29 @@ pnpm test                     # Vitest (fixture-basiert, ohne Netzwerk)
 
 pnpm --filter @lping/bot validate  # Default-Config prüfen
 pnpm --filter @lping/bot health    # Adapter-Erreichbarkeit testen (Netzwerk nötig)
+pnpm --filter @lping/db db:check   # DB-Roundtrip prüfen (nach db:migrate)
 
-# Fabriq-Endpoint prüfen (URL aus den Browser-Entwicklertools, siehe SPIKE.md):
+# Scanner: Discovery → Screening → Score-Tabelle (Netzwerk nötig).
+# Persistiert Kandidaten + Snapshots, wenn DATABASE_URL gesetzt ist:
+pnpm --filter @lping/bot scan
+pnpm --filter @lping/bot scan -- --pages 4 --top 8   # kleinerer/schnellerer Lauf
+pnpm --filter @lping/bot scan -- --no-db             # ohne Persistenz
+
+# Fabriq-Endpoint prüfen (optional, URL aus den Browser-Entwicklertools, siehe SPIKE.md):
 pnpm --filter @lping/bot fabriq:check "https://…"
 ```
 
 ## Stand & nächste Schritte
 
-Umgesetzt sind Schritt 1 und 2 der Umsetzungsreihenfolge (KONZEPT.md, Abschnitt 16):
-Monorepo-Gerüst, DB-Schema, versionierter Config-Service sowie die Daten-Adapter
-inkl. Fabriq-Spike (Endpoint-Verifikation offen, siehe
-`packages/adapters/src/fabriq/SPIKE.md`). Es findet noch **kein** Handel statt;
-`paperTrading` ist fest auf `true` gesetzt, bis Screening/Scoring und die
-Paper-Trading-Engine (Schritte 3–4) stehen.
+Umgesetzt sind Schritte 1–3 der Umsetzungsreihenfolge (KONZEPT.md, Abschnitt 16):
+
+1. ✅ Monorepo-Gerüst, DB-Schema, versionierter Config-Service
+2. ✅ Daten-Adapter (Meteora, DexScreener, RugCheck, Jupiter) + Fabriq-Spike.
+   Spike-Ergebnis: kein stabiler Fabriq-Endpoint auffindbar → **eigene
+   Degen/Multiday-Replikation ist die primäre Discovery-Quelle** (KONZEPT.md 4.1).
+3. ✅ Screening-Pipeline: Vor-Filter (Replikation) → Enrichment → Hard Filters
+   (fail-closed) → Score 0–100 → Kandidaten-Persistenz mit Shadow-Tracking.
+   Sichtbar über `pnpm --filter @lping/bot scan`.
+
+Als Nächstes (Schritt 4): Paper-Trading-Engine + Scanner-/Dashboard-UI. Es findet
+noch **kein** Handel statt; `paperTrading` ist fest auf `true` gesetzt.

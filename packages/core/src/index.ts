@@ -3,6 +3,7 @@ export {
   GlobalConfigSchema,
   PresetConfigSchema,
   ScreeningConfigSchema,
+  DiscoveryConfigSchema,
   FeeHarvestConfigSchema,
   RebalanceConfigSchema,
   EmergencyConfigSchema,
@@ -54,3 +55,27 @@ export type {
   FabriqStatus,
   FabriqTrendingResult,
 } from "./domain/types";
+
+export { WSOL_MINT, USDC_MINT, LAMPORTS_PER_SOL } from "./domain/constants";
+
+export {
+  aggregateMarket,
+  tokenSideOf,
+  poolPriceInSol,
+  priceDivergencePct,
+} from "./screening/aggregate";
+export { runHardFilters } from "./screening/filters";
+export { computeScore } from "./screening/score";
+export { screenCandidate } from "./screening/screen";
+export type {
+  MarketAggregates,
+  ScreeningInput,
+  ScreeningResult,
+  FilterCheck,
+  CheckStatus,
+  ScoreBreakdown,
+  ScoreComponent,
+} from "./screening/types";
+
+export { classifyForPreset, shortlistRank } from "./discovery/replicate";
+export type { ClassifyResult } from "./discovery/replicate";

@@ -14,8 +14,11 @@
     "minHolders": 1000,
     "maxPriceDivergencePct": 2,
     "maxPoolShareOfTvlPct": 1,
-    "maxSingleLpDominancePct": 80
+    "maxSingleLpDominancePct": 80,
+    "maxNormalizedRiskScore": 30,
+    "maxAvgTradeUsd": 10000
   },
+  "discovery": { "minBinStep": 20, "minBaseFeePct": 0.1 },
   "strategy": { "type": "Curve", "sided": "balanced" },
   "binRange": { "min": 60, "max": 69 },
   "feeHarvest": {

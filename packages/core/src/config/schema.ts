@@ -53,6 +53,16 @@ export const ScreeningConfigSchema = z.object({
   maxPriceDivergencePct: pct(0.1, 20),
   maxPoolShareOfTvlPct: pct(0.1, 20),
   maxSingleLpDominancePct: pct(10, 100),
+  /** RugCheck-normalisierter Risiko-Score (0–100, höher = riskanter). */
+  maxNormalizedRiskScore: z.number().min(0).max(100),
+  /** Wash-Trading-Heuristik: maximale plausible Durchschnitts-Trade-Größe. */
+  maxAvgTradeUsd: z.number().positive(),
+});
+
+/** Vor-Filter der Discovery-Replikation (KONZEPT.md Abschnitt 4.1, Weg 2). */
+export const DiscoveryConfigSchema = z.object({
+  minBinStep: z.number().int().min(1).max(400),
+  minBaseFeePct: z.number().min(0).max(15),
 });
 
 export const FeeHarvestConfigSchema = z.object({
@@ -99,6 +109,7 @@ export const PresetConfigSchema = z
       .object({ min: z.number().min(0), max: z.number().positive() })
       .refine((v) => v.max > v.min, { message: "volTvlBounds.max muss größer als min sein" }),
     screening: ScreeningConfigSchema,
+    discovery: DiscoveryConfigSchema,
     strategy: StrategyConfigSchema,
     binRange: z
       .object({ min: z.number().int().min(1).max(400), max: z.number().int().min(1).max(400) })

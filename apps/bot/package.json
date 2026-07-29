@@ -7,11 +7,13 @@
     "start": "tsx src/main.ts",
     "validate": "tsx src/main.ts validate",
     "health": "tsx src/main.ts health",
+    "scan": "tsx src/main.ts scan",
     "fabriq:check": "tsx src/main.ts fabriq:check"
   },
   "dependencies": {
     "@lping/adapters": "workspace:*",
     "@lping/core": "workspace:*",
+    "@lping/db": "workspace:*",
     "dotenv": "^16.4.7"
   },
   "devDependencies": {

@@ -38,6 +38,15 @@ const DexPairSchema = z
       .partial()
       .passthrough()
       .optional(),
+    priceChange: z
+      .object({
+        m5: z.coerce.number().optional(),
+        h1: z.coerce.number().optional(),
+        h6: z.coerce.number().optional(),
+        h24: z.coerce.number().optional(),
+      })
+      .partial()
+      .optional(),
     fdv: z.coerce.number().optional(),
     marketCap: z.coerce.number().optional(),
     /** Epoch-Millisekunden. */
@@ -129,6 +138,16 @@ export function normalizeDexPair(raw: DexPairRaw): MarketPairSnapshot {
     if (value !== undefined) volume[window] = value;
   }
 
+  const priceChange: NonNullable<MarketPairSnapshot["priceChange"]> = {};
+  let hasPriceChange = false;
+  for (const window of ["m5", "h1", "h6", "h24"] as const) {
+    const value = raw.priceChange?.[window];
+    if (value !== undefined) {
+      priceChange[window] = value;
+      hasPriceChange = true;
+    }
+  }
+
   return {
     pairAddress: raw.pairAddress,
     baseToken: {
@@ -147,6 +166,7 @@ export function normalizeDexPair(raw: DexPairRaw): MarketPairSnapshot {
     ...(raw.priceUsd !== undefined ? { priceUsd: raw.priceUsd } : {}),
     ...(raw.priceNative !== undefined ? { priceNative: raw.priceNative } : {}),
     ...(raw.liquidity?.usd !== undefined ? { liquidityUsd: raw.liquidity.usd } : {}),
+    ...(hasPriceChange ? { priceChange } : {}),
     ...(raw.fdv !== undefined ? { fdvUsd: raw.fdv } : {}),
     ...(raw.marketCap !== undefined ? { marketCapUsd: raw.marketCap } : {}),
     ...(raw.pairCreatedAt !== undefined ? { pairCreatedAt: new Date(raw.pairCreatedAt) } : {}),

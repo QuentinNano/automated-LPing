@@ -1,6 +1,8 @@
 import { PrismaClient } from "@prisma/client";
 
 export { PrismaConfigStore } from "./configStore";
+export { ScanRepo } from "./scanRepo";
+export type { RecordedCandidate, ScanRecordInput } from "./scanRepo";
 export { PrismaClient };
 
 /**

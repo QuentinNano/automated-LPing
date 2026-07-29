@@ -178,6 +178,15 @@ Beide Quellen speisen dieselbe Kandidaten-Pipeline; jeder Kandidat trägt seine 
 (`source: fabriq_degen | fabriq_multiday | replicated_degen | replicated_multiday`) —
 das Dashboard weist später aus, welche Quelle die besseren Positionen liefert.
 
+> **Spike-Ergebnis (Juli 2026):** Die Trending-Seite liefert ihre Pool-Daten nicht
+> über einfach abgreifbare XHR-JSON-Endpoints (sichtbar waren nur Tracking-Calls;
+> Auslieferung vermutlich im Seitendokument oder per WebSocket). Ein Zugriff über
+> Session-Cookies wurde bewertet und verworfen: regelmäßige manuelle Token-Erneuerung,
+> Kontozugangs-Schlüssel im Klartext auf dem Server, ToS-Risiko. **Entscheidung:
+> Weg 2 (eigene Replikation) ist die primäre Discovery-Quelle.** Der defensive
+> Fabriq-Adapter bleibt im Code und kann jederzeit aktiviert werden, falls ein
+> stabiler Endpoint gefunden wird (`packages/adapters/src/fabriq/SPIKE.md`).
+
 ### 4.2 Ablauf
 
 - Poll-Zyklus: Degen alle 60 s, Multiday alle 10 min (konfigurierbar).
@@ -571,7 +580,8 @@ Position gilt erst als profitabel, wenn sie ihre eigenen Kosten verdient hat.
 
 **Zu klären (blockiert Phase 1 nicht):**
 
-1. Fabriq: interne API identifizieren, Stabilität/ToS bewerten → Entscheidung Adapter vs. nur Replikation.
+1. ~~Fabriq: interne API identifizieren, Stabilität/ToS bewerten → Entscheidung Adapter vs. nur Replikation.~~
+   **Entschieden (Juli 2026): eigene Replikation ist primär** — Spike-Ergebnis siehe Abschnitt 4.1.
 2. RugCheck-Rate-Limits/API-Key-Bedarf prüfen; ggf. Birdeye-Paid-Tier als zweite Quelle.
 3. Jito-Bundles ab Phase 2 oder 3.
 4. Devnet-Probelauf der Execution-Pfade vs. direkt Mainnet-Mikrobeträge (Empfehlung: beides, Devnet nur für Tx-Mechanik).

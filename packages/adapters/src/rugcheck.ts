@@ -38,6 +38,7 @@ const RugcheckReportSchema = z
       .nullable()
       .optional(),
     topHolders: z.array(HolderSchema).optional(),
+    totalHolders: z.coerce.number().optional(),
     totalMarketLiquidity: z.coerce.number().optional(),
   })
   .passthrough();
@@ -147,6 +148,7 @@ export function normalizeRugcheckReport(mint: string, raw: RugcheckReportRaw): T
     topHolders: holders,
     top10HolderPct,
     insiderPct,
+    totalHolders: raw.totalHolders ?? null,
     totalMarketLiquidityUsd: raw.totalMarketLiquidity ?? null,
     fetchedAt: new Date(),
     source: "rugcheck",
