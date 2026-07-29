@@ -1,0 +1,44 @@
+{
+  "total": 4821,
+  "pages": 2411,
+  "current_page": 1,
+  "page_size": 2,
+  "data": [
+    {
+      "address": "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y",
+      "name": "WIF-SOL",
+      "token_x": {
+        "address": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+        "symbol": "WIF",
+        "decimals": 6
+      },
+      "token_y": {
+        "address": "So11111111111111111111111111111111111111112",
+        "symbol": "SOL",
+        "decimals": 9
+      },
+      "bin_step": 100,
+      "base_fee_percentage": 1,
+      "max_fee_percentage": 10,
+      "tvl": 250000.42,
+      "volume_24h": 1250000.75,
+      "fees_24h": 12500.5,
+      "price": 0.0000214,
+      "apr": 5.0,
+      "apy": 120.5
+    },
+    {
+      "address": "9d9mb8kooFfaD3SctgZtkxQypkshx6ezhbKio89ixyy2",
+      "name": "BONK-SOL",
+      "token_x": {
+        "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+        "symbol": "BONK"
+      },
+      "token_y": { "address": "So11111111111111111111111111111111111111112", "symbol": "SOL" },
+      "bin_step": 80,
+      "tvl": "812000",
+      "volume_24h": "2100000",
+      "fees_24h": "8120"
+    }
+  ]
+}

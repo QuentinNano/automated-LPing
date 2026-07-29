@@ -14,6 +14,7 @@ import {
 } from "@lping/adapters";
 import { loadDefaultsFromDir } from "./loadConfig";
 import { cmdFabriqCheck } from "./fabriqCheck";
+import { cmdApiCheck } from "./apiCheck";
 import { formatScanTable, runScan, type ScanDeps } from "./scan";
 import {
   formatComparison,
@@ -38,6 +39,8 @@ async function main(): Promise<number> {
       return cmdValidate();
     case "health":
       return cmdHealth();
+    case "api:check":
+      return cmdApiCheck();
     case "fabriq:check":
       return cmdFabriqCheck(process.argv[3]);
     case "scan":
@@ -47,7 +50,7 @@ async function main(): Promise<number> {
     default:
       console.error(
         `Unbekanntes Kommando: ${command}\n` +
-          `Verfügbar: validate | health | scan | paper | fabriq:check <URL>`,
+          `Verfügbar: validate | health | scan | paper | api:check | fabriq:check <URL>`,
       );
       return 2;
   }
