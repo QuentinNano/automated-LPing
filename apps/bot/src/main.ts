@@ -406,6 +406,14 @@ async function cmdTrack(args: string[]): Promise<number> {
 
 /** Übersetzt technische Fehler in eine Meldung, mit der man etwas anfangen kann. */
 function explainFailure(error: unknown): string {
+  if (isDatabaseUnreachable(error)) {
+    return (
+      "Zyklus abgebrochen: Die Datenbank ist nicht erreichbar.\n" +
+      "  → Läuft Docker Desktop? (Wal-Symbol in der Menüleiste)\n" +
+      "  → Datenbank starten:  docker compose up -d\n" +
+      "  Bereits gesammelte Daten bleiben dabei erhalten."
+    );
+  }
   if (error instanceof AdapterError) {
     const host = safeHost(error.meta.url);
     const base = `Zyklus abgebrochen: ${host} nicht erreichbar (${error.kind}).`;
@@ -426,6 +434,18 @@ function explainFailure(error: unknown): string {
     }
   }
   return `Zyklus fehlgeschlagen: ${error instanceof Error ? error.message : String(error)}`;
+}
+
+/**
+ * Erkennt eine nicht erreichbare Datenbank. Bewusst über Name und Text statt
+ * über Prisma-Typen: Der Bot soll nicht direkt von @prisma/client abhängen.
+ */
+function isDatabaseUnreachable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name.includes("PrismaClientInitialization") ||
+    /Can't reach database server|ECONNREFUSED|Connection refused/i.test(error.message)
+  );
 }
 
 function safeHost(url: string): string {

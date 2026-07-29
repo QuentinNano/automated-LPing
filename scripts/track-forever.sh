@@ -45,6 +45,39 @@ cleanup() {
 }
 trap cleanup INT TERM
 
+## Datenbank bereitstellen ----------------------------------------------------
+# Häufigster Stolperstein: Nach einem Neustart des Macs läuft der Container
+# nicht, und die Aufzeichnung scheitert sofort. Statt das dem Benutzer zu
+# überlassen, wird er hier gestartet — das ist der Zweck eines Startbefehls.
+ensure_database() {
+  command -v docker >/dev/null 2>&1 || return 0
+
+  if ! docker info >/dev/null 2>&1; then
+    log "Docker läuft nicht. Bitte Docker Desktop öffnen (Wal-Symbol in der Menüleiste)."
+    return 1
+  fi
+
+  if docker compose ps --status running postgres 2>/dev/null | grep -q postgres; then
+    return 0
+  fi
+
+  log "Datenbank läuft nicht — starte sie."
+  docker compose up -d postgres >/dev/null 2>&1 || {
+    log "Der Datenbank-Container ließ sich nicht starten."
+    return 1
+  }
+
+  for _ in $(seq 1 40); do
+    if docker compose exec -T postgres pg_isready -U lping -d lping >/dev/null 2>&1; then
+      log "Datenbank ist bereit."
+      return 0
+    fi
+    sleep 1
+  done
+  log "Datenbank antwortet nicht rechtzeitig."
+  return 1
+}
+
 log "Start. Intervall ${INTERVAL_MIN} min, Protokoll: $LOG_FILE"
 log "Beenden mit Strg+C."
 
@@ -52,6 +85,14 @@ ATTEMPT=0
 while true; do
   ATTEMPT=$((ATTEMPT + 1))
   [ "$ATTEMPT" -gt 1 ] && log "Neustart Nr. $((ATTEMPT - 1))."
+
+  # Vor jedem Versuch sicherstellen, dass die Datenbank erreichbar ist —
+  # auch nach einem Neustart des Rechners oder von Docker Desktop.
+  if ! ensure_database; then
+    log "Warte ${RESTART_DELAY}s und versuche es erneut."
+    sleep "$RESTART_DELAY"
+    continue
+  fi
 
   pnpm --filter @lping/bot track -- --interval "$INTERVAL_MIN" 2>&1 | tee -a "$LOG_FILE"
 
