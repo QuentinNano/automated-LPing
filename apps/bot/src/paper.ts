@@ -151,7 +151,18 @@ export async function tickOpenPositions(
   const open = await deps.store.listOpen();
   if (open.length === 0) return { ticked, closed, notes };
 
-  const solPriceUsd = await deps.getSolPriceUsd();
+  // Ohne SOL-Preis lassen sich TVL/Volumen nicht in SOL umrechnen — dann wird
+  // dieser Durchgang übersprungen statt mit falschen Zahlen zu rechnen.
+  let solPriceUsd: number;
+  try {
+    solPriceUsd = await deps.getSolPriceUsd();
+  } catch (error) {
+    notes.push(
+      `SOL-Preis nicht abrufbar (${message(error)}) — Positionen bleiben unverändert.`,
+    );
+    return { ticked, closed, notes };
+  }
+
   const poolCache = new Map<string, PoolMetrics | null>();
 
   for (const position of open) {

@@ -1,6 +1,7 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { config as loadEnv } from "dotenv";
 import {
   ConfigService,
   parseBotConfig,
@@ -20,17 +21,21 @@ import { PrismaConfigStore, ScanRepo, createPrisma } from "../src/index";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
+// Wie bei Bot und Web: die .env liegt im Projektwurzelverzeichnis, das Skript
+// startet aber aus packages/db.
+loadEnv({ path: path.join(repoRoot, ".env") });
+
 function loadDefaults(): unknown {
+  const configDir = path.join(repoRoot, "config");
   const read = (name: string) =>
-    JSON.parse(readFileSync(path.join(repoRoot, "config", name), "utf8")) as unknown;
-  return {
-    global: read("global.json"),
-    presets: {
-      konservativ: read("konservativ.json"),
-      balanced: read("balanced.json"),
-      degen: read("degen.json"),
-    },
-  };
+    JSON.parse(readFileSync(path.join(configDir, name), "utf8")) as unknown;
+
+  const presets: Record<string, unknown> = {};
+  for (const file of readdirSync(configDir).sort()) {
+    if (file === "global.json" || !file.endsWith(".json")) continue;
+    presets[path.basename(file, ".json")] = read(file);
+  }
+  return { global: read("global.json"), presets };
 }
 
 function assert(condition: boolean, label: string): void {

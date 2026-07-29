@@ -1,8 +1,9 @@
-import "dotenv/config";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { config as loadEnv } from "dotenv";
 import { ConfigValidationError, type AdapterHealth, type BotConfig } from "@lping/core";
 import {
+  AdapterError,
   DexScreenerAdapter,
   FabriqAdapter,
   JupiterAdapter,
@@ -25,6 +26,10 @@ import {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const configDir = path.join(repoRoot, "config");
+
+// Die .env liegt im Projektwurzelverzeichnis, der Bot startet aber aus
+// apps/bot — ohne expliziten Pfad würde dotenv sie nicht finden.
+loadEnv({ path: path.join(repoRoot, ".env") });
 
 async function main(): Promise<number> {
   const command = process.argv[2] ?? "validate";
@@ -239,7 +244,14 @@ async function cmdPaper(args: string[]): Promise<number> {
     console.log("\n" + formatComparison(await store.performance(labels)));
   };
 
-  await runCycle();
+  try {
+    await runCycle();
+  } catch (error) {
+    console.error("\n" + explainFailure(error));
+    // Im Dauerbetrieb ist ein gescheiterter Zyklus kein Grund aufzuhören —
+    // API-Ausfälle sind vorübergehend.
+    if (intervalMin === 0) return 1;
+  }
 
   if (intervalMin > 0) {
     console.log(`\nLaufender Betrieb: nächster Zyklus in ${intervalMin} min (Abbruch mit Strg+C).`);
@@ -250,12 +262,44 @@ async function cmdPaper(args: string[]): Promise<number> {
       try {
         await runCycle();
       } catch (error) {
-        console.error(`Zyklus fehlgeschlagen: ${error instanceof Error ? error.message : String(error)}`);
+        console.error("\n" + explainFailure(error));
       }
     }
   }
 
   return 0;
+}
+
+/** Übersetzt technische Fehler in eine Meldung, mit der man etwas anfangen kann. */
+function explainFailure(error: unknown): string {
+  if (error instanceof AdapterError) {
+    const host = safeHost(error.meta.url);
+    const base = `Zyklus abgebrochen: ${host} nicht erreichbar (${error.kind}).`;
+    switch (error.kind) {
+      case "network":
+      case "timeout":
+        return `${base}\n  → Internetverbindung prüfen und erneut versuchen.`;
+      case "http":
+        return error.meta.status === 429
+          ? `${base}\n  → Zu viele Anfragen. Ein paar Minuten warten, dann erneut versuchen.`
+          : `${base} HTTP ${error.meta.status ?? "?"}\n  → Dienst antwortet gerade nicht; später erneut versuchen.`;
+      case "validation":
+      case "parse":
+        return (
+          `${base}\n  → Die API hat ein unerwartetes Format geliefert; vermutlich hat sie sich geändert.\n` +
+          `     Bitte diese Meldung melden: ${error.message}`
+        );
+    }
+  }
+  return `Zyklus fehlgeschlagen: ${error instanceof Error ? error.message : String(error)}`;
+}
+
+function safeHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 function intFlag(args: string[], name: string): number | undefined {
