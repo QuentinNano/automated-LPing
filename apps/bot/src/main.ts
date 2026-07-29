@@ -8,10 +8,20 @@ import {
   JupiterAdapter,
   MeteoraAdapter,
   RugcheckAdapter,
+  WSOL_MINT,
+  sleep,
 } from "@lping/adapters";
 import { loadDefaultsFromDir } from "./loadConfig";
 import { cmdFabriqCheck } from "./fabriqCheck";
 import { formatScanTable, runScan, type ScanDeps } from "./scan";
+import {
+  formatComparison,
+  openFromScan,
+  presetLabels,
+  tickOpenPositions,
+  type PaperDeps,
+  type PaperStore,
+} from "./paper";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const configDir = path.join(repoRoot, "config");
@@ -27,9 +37,12 @@ async function main(): Promise<number> {
       return cmdFabriqCheck(process.argv[3]);
     case "scan":
       return cmdScan(process.argv.slice(3));
+    case "paper":
+      return cmdPaper(process.argv.slice(3));
     default:
       console.error(
-        `Unbekanntes Kommando: ${command}\nVerfügbar: validate | health | scan | fabriq:check <URL>`,
+        `Unbekanntes Kommando: ${command}\n` +
+          `Verfügbar: validate | health | scan | paper | fabriq:check <URL>`,
       );
       return 2;
   }
@@ -52,12 +65,13 @@ function cmdValidate(): number {
   console.log(`  killSwitch:          ${config.global.killSwitch}`);
   console.log(`  maxTotalExposureSol: ${config.global.maxTotalExposureSol}`);
   console.log(`  Verlustlimits:       ${config.global.dailyLossLimitPct}% Tag / ${config.global.hardLossLimitPct}% hart`);
-  for (const kind of ["degen", "multiday"] as const) {
-    const preset = config.presets[kind];
+  console.log(`  Paper-Kapital:       ${config.global.paper.capitalPerPresetSol} SOL je Preset\n`);
+  for (const [id, preset] of Object.entries(config.presets)) {
     console.log(
-      `  ${kind.padEnd(8)}: ${preset.enabled ? "aktiv" : "aus"}, ` +
-        `${preset.capitalSharePct}% Kapital, max ${preset.maxPositions} Positionen, ` +
-        `${preset.strategy.type}/${preset.strategy.sided}, SL ${preset.stopLossPct}%`,
+      `  ${id.padEnd(12)}: ${preset.enabled ? "aktiv" : "aus  "}, ` +
+        `${String(preset.capitalSharePct).padStart(3)}% Kapital, max ${preset.maxPositions} Positionen, ` +
+        `${preset.strategy.type}/${preset.strategy.sided}, SL ${preset.stopLossPct}%, ` +
+        `Halten max ${preset.maxHoldHours}h`,
     );
   }
   if (!config.global.paperTrading) {
@@ -130,6 +144,117 @@ async function cmdScan(args: string[]): Promise<number> {
   console.log(`Scan gestartet (pages=${pages}, top=${top} je Preset)…\n`);
   const summary = await runScan(deps, config, { pages, topPerPreset: top });
   console.log("\n" + formatScanTable(summary));
+  return 0;
+}
+
+/**
+ * Paper-Trading: alle aktiven Presets laufen gleichzeitig auf denselben
+ * Marktdaten. Ein Zyklus = offene Positionen aktualisieren, danach optional
+ * neue Kandidaten aus einem frischen Scan eröffnen.
+ */
+async function cmdPaper(args: string[]): Promise<number> {
+  let config: BotConfig;
+  try {
+    config = loadDefaultsFromDir(configDir);
+  } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      console.error(error.message);
+      return 1;
+    }
+    throw error;
+  }
+
+  const databaseUrl = process.env["DATABASE_URL"];
+  if (databaseUrl === undefined || databaseUrl === "") {
+    console.error(
+      "paper benötigt eine Datenbank (Positionen müssen Neustarts überleben).\n" +
+        "Setup: docker compose up -d && pnpm db:generate && pnpm db:migrate,\n" +
+        "danach DATABASE_URL in .env eintragen.",
+    );
+    return 1;
+  }
+
+  let store: PaperStore;
+  try {
+    const { createPrisma, PaperRepo } = await import("@lping/db");
+    store = new PaperRepo(createPrisma());
+  } catch (error) {
+    console.error(`Datenbank nicht verfügbar: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
+
+  const intervalMin = intFlag(args, "--interval") ?? 0;
+  const pages = intFlag(args, "--pages") ?? 4;
+  const top = intFlag(args, "--top") ?? 8;
+  const tickOnly = args.includes("--tick-only");
+
+  const meteora = new MeteoraAdapter();
+  const dexscreener = new DexScreenerAdapter();
+  const jupiter = new JupiterAdapter();
+  const labels = presetLabels(config);
+
+  const paperDeps: PaperDeps = {
+    store,
+    getPool: (address) => meteora.getPair(address),
+    getSolPriceUsd: async () => {
+      // SOL/USDC-Referenz über DexScreener; nur zur Umrechnung von TVL/Volumen.
+      const { pairs } = await dexscreener.getPairsForToken(WSOL_MINT);
+      const withPrice = pairs.find((p) => p.priceUsd !== undefined && p.priceUsd > 0);
+      if (withPrice?.priceUsd === undefined) throw new Error("SOL-Preis nicht ermittelbar");
+      return withPrice.priceUsd;
+    },
+    log: (line) => console.log(`  ${line}`),
+  };
+
+  const runCycle = async (): Promise<void> => {
+    console.log(`\n=== Zyklus ${new Date().toISOString()} ===`);
+
+    console.log("Offene Positionen aktualisieren…");
+    const ticked = await tickOpenPositions(paperDeps, config);
+    console.log(`  ${ticked.ticked} aktualisiert, ${ticked.closed} geschlossen`);
+    for (const note of ticked.notes) console.log(`  ! ${note}`);
+
+    if (!tickOnly) {
+      console.log("Neue Kandidaten suchen…");
+      const summary = await runScan(
+        {
+          meteora,
+          dexscreener,
+          rugcheck: new RugcheckAdapter(),
+          jupiter,
+          persist: new (await import("@lping/db")).ScanRepo(
+            (await import("@lping/db")).createPrisma(),
+          ),
+          log: () => {},
+        },
+        config,
+        { pages, topPerPreset: top },
+      );
+      console.log(`  ${summary.accepted} akzeptiert von ${summary.rows.length} geprüften`);
+      const opened = await openFromScan(paperDeps, config, summary.rows);
+      console.log(`  ${opened.opened} Positionen eröffnet`);
+      for (const note of opened.notes) console.log(`  ! ${note}`);
+    }
+
+    console.log("\n" + formatComparison(await store.performance(labels)));
+  };
+
+  await runCycle();
+
+  if (intervalMin > 0) {
+    console.log(`\nLaufender Betrieb: nächster Zyklus in ${intervalMin} min (Abbruch mit Strg+C).`);
+    // Kein setInterval: der nächste Zyklus startet erst, wenn der vorige fertig
+    // ist — sonst überlappen sich API-Aufrufe bei langsamen Antworten.
+    for (;;) {
+      await sleep(intervalMin * 60_000);
+      try {
+        await runCycle();
+      } catch (error) {
+        console.error(`Zyklus fehlgeschlagen: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
   return 0;
 }
 

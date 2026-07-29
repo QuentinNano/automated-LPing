@@ -25,5 +25,8 @@
     "packages/**/*.ts",
     "vitest.config.ts"
   ],
-  "exclude": ["**/node_modules", "**/dist"]
+  // apps/web hat eine eigene tsconfig (JSX, Next-Plugin, "@/*"-Alias) und wird
+  // über `next build` typgeprüft — hier ausgeschlossen, um Doppelprüfung mit
+  // abweichenden Optionen zu vermeiden.
+  "exclude": ["**/node_modules", "**/dist", "apps/web"]
 }

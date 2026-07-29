@@ -11,17 +11,33 @@ Parametersteuerung und Analyse-Dashboard.
 
 ```
 apps/
-  bot/            # CLI/Runtime: validate, health (später: Discovery→Execution-Loop)
-  web/            # Platzhalter für die Next.js-UI (Schritt 3/4)
+  bot/            # CLI: validate, health, scan, paper (später: Execution-Loop)
+  web/            # Next.js-UI: Preset-Vergleich, Positionen, Scanner, Parameter
 packages/
   core/           # Pure Domänenlogik: Config-Schemas + versionierter ConfigService,
-                  # Positions-Lebenszyklus (Zustandsmaschine), Domänentypen
+                  # Screening/Scoring, Paper-Trading-Engine (Bin-Modell, Fees,
+                  # PnL, HODL-Benchmark), Positions-Lebenszyklus
   adapters/       # Meteora-API, DexScreener, RugCheck, Jupiter (+ Fabriq-Spike),
                   # HTTP-Infra: Retry/Backoff, Rate-Limiting, zod-Validierung
   db/             # Prisma-Schema (8 Tabellen aus KONZEPT.md 10.2), Migrationen,
                   # PrismaConfigStore
-config/           # Default-Parameter (global.json, degen.json, multiday.json)
+config/           # global.json + ein JSON je Preset (konservativ, balanced, degen)
 ```
+
+## Presets
+
+Ausgeliefert werden drei Risikoprofile, die im Paper-Trading **gleichzeitig** auf
+denselben Marktdaten und mit demselben virtuellen Kapital laufen — Unterschiede in
+den Ergebnissen stammen damit ausschließlich aus den Parametern:
+
+| Preset | Token-Alter | Min. TVL | Strategie | Stop-Loss | Haltedauer | Rebalancing |
+|---|---|---|---|---|---|---|
+| **Konservativ** | ≥ 7 Tage | 250 k$ | Curve, 50/50 | 15 % | ≤ 14 Tage | ja |
+| **Balanced** | ≥ 2 Tage | 120 k$ | Curve, 50/50 | 20 % | ≤ 4 Tage | ja |
+| **Degen** | 1–48 h | 50 k$ | BidAsk, nur SOL | 15 % | ≤ 24 h | nein |
+
+Ein weiteres Profil entsteht durch eine zusätzliche Datei in `config/` (z. B.
+`degen_eng.json`) — sie erscheint automatisch in UI und Vergleich.
 
 ## Setup
 
@@ -47,21 +63,43 @@ pnpm --filter @lping/bot scan
 pnpm --filter @lping/bot scan -- --pages 4 --top 8   # kleinerer/schnellerer Lauf
 pnpm --filter @lping/bot scan -- --no-db             # ohne Persistenz
 
+# Paper-Trading: alle Presets parallel simulieren (benötigt Datenbank).
+pnpm --filter @lping/bot paper                       # ein Zyklus
+pnpm --filter @lping/bot paper -- --interval 15      # dauerhaft, alle 15 min
+pnpm --filter @lping/bot paper -- --tick-only        # nur bestehende Positionen
+
+# Oberfläche (http://localhost:3000)
+pnpm --filter @lping/web dev
+
 # Fabriq-Endpoint prüfen (optional, URL aus den Browser-Entwicklertools, siehe SPIKE.md):
 pnpm --filter @lping/bot fabriq:check "https://…"
 ```
 
+## Oberfläche
+
+| Seite | Inhalt |
+|---|---|
+| **Vergleich** | PnL je Preset, davon Fees, On-Chain-Kosten, Trefferquote, Zeit in Range und der Vergleich gegen reines Halten |
+| **Positionen** | Bin-Range mit Preis-Marker, Einsatz, aktueller Wert, Fees, Kosten, PnL, Zeit in Range; geschlossene Positionen mit Ausstiegsgrund |
+| **Scanner** | Entdeckte Pools mit Score und ausformulierter Begründung, warum ein Kandidat abgelehnt wurde |
+| **Parameter** | Alle Werte editierbar; jede Änderung wird validiert und versioniert, ungültige Eingaben ändern nichts |
+
 ## Stand & nächste Schritte
 
-Umgesetzt sind Schritte 1–3 der Umsetzungsreihenfolge (KONZEPT.md, Abschnitt 16):
+Umgesetzt sind Schritte 1–4 der Umsetzungsreihenfolge (KONZEPT.md, Abschnitt 16):
 
 1. ✅ Monorepo-Gerüst, DB-Schema, versionierter Config-Service
 2. ✅ Daten-Adapter (Meteora, DexScreener, RugCheck, Jupiter) + Fabriq-Spike.
    Spike-Ergebnis: kein stabiler Fabriq-Endpoint auffindbar → **eigene
-   Degen/Multiday-Replikation ist die primäre Discovery-Quelle** (KONZEPT.md 4.1).
-3. ✅ Screening-Pipeline: Vor-Filter (Replikation) → Enrichment → Hard Filters
-   (fail-closed) → Score 0–100 → Kandidaten-Persistenz mit Shadow-Tracking.
-   Sichtbar über `pnpm --filter @lping/bot scan`.
+   Replikation ist die primäre Discovery-Quelle** (KONZEPT.md 4.1).
+3. ✅ Screening-Pipeline: Vor-Filter → Enrichment → Hard Filters (fail-closed)
+   → Score 0–100 → Kandidaten-Persistenz mit Shadow-Tracking.
+4. ✅ Paper-Trading-Engine (bin-genaues DLMM-Modell, Fee-Akkrual, On-Chain-Kosten,
+   HODL-Benchmark, Exit-Regeln) mit Multi-Preset-Vergleich, plus Web-UI.
 
-Als Nächstes (Schritt 4): Paper-Trading-Engine + Scanner-/Dashboard-UI. Es findet
-noch **kein** Handel statt; `paperTrading` ist fest auf `true` gesetzt.
+Damit läuft **Phase 1** des Rollout-Plans: beobachten und belegen, dass die
+Strategie auf dem Papier trägt. Es findet **kein** echter Handel statt — es gibt
+noch keine Signier- oder Sende-Logik, und `paperTrading` steht auf `true`.
+
+Als Nächstes (Schritt 5): Execution Engine (Transaktionsbau, Simulation vor dem
+Senden, Reconciliation nach Neustart, RPC-Failover) und Telegram-Alerts.

@@ -8,6 +8,7 @@
     "validate": "tsx src/main.ts validate",
     "health": "tsx src/main.ts health",
     "scan": "tsx src/main.ts scan",
+    "paper": "tsx src/main.ts paper",
     "fabriq:check": "tsx src/main.ts fabriq:check"
   },
   "dependencies": {

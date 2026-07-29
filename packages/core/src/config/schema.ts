@@ -13,6 +13,33 @@ const pct = (min: number, max: number) => z.number().min(min).max(max);
 export const KillSwitchSchema = z.enum(["off", "pause", "flatten"]);
 export type KillSwitch = z.infer<typeof KillSwitchSchema>;
 
+/**
+ * Annahmen der Paper-Simulation. Bewusst NUR On-Chain-Kosten: Infrastruktur
+ * (VPS, RPC-Tarife) ist monatlicher Fixaufwand und keiner einzelnen Position
+ * zurechenbar — sie würde den Preset-Vergleich verzerren statt ihn zu schärfen.
+ */
+export const PaperConfigSchema = z.object({
+  /**
+   * Virtuelles Kapital je Preset. Bewusst für alle Presets gleich, damit der
+   * Vergleich fair ist (capitalSharePct steuert erst die spätere Live-Allokation).
+   */
+  capitalPerPresetSol: z.number().positive().max(10_000),
+  costs: z.object({
+    /** Geschätzte Priority Fee je Transaktion (Open/Claim/Rebalance/Close/Swap). */
+    priorityFeeSol: z.number().min(0).max(0.5),
+    /** Angenommener Slippage-/Preis-Impact-Verlust je Swap. */
+    swapSlippagePct: pct(0, 10),
+  }),
+  /**
+   * Sicherheitsabschlag auf den geschätzten Fee-Anteil: Wir kennen die
+   * Liquiditätsverteilung anderer LPs nicht, deshalb wird der eigene Anteil
+   * am Fee-Fluss konservativ nach unten korrigiert.
+   */
+  feeShareHaircutPct: pct(0, 90),
+});
+
+export type PaperConfig = z.infer<typeof PaperConfigSchema>;
+
 export const GlobalConfigSchema = z
   .object({
     /** Paper-Trading ist der sichere Default; Live erst nach Phase 1. */
@@ -25,6 +52,7 @@ export const GlobalConfigSchema = z
     hardLossLimitPct: pct(1, 80).default(10),
     priorityFeeCapLamports: z.number().int().min(0).max(1_000_000_000).default(2_000_000),
     profitSweepThresholdSol: z.number().min(0).default(5),
+    paper: PaperConfigSchema,
   })
   .superRefine((val, ctx) => {
     if (val.hardLossLimitPct <= val.dailyLossLimitPct) {
@@ -94,6 +122,8 @@ export const EmergencyConfigSchema = z.object({
 
 export const PresetConfigSchema = z
   .object({
+    /** Anzeigename in der UI (der Objekt-Schlüssel ist die technische ID). */
+    label: z.string().min(1).max(40),
     enabled: z.boolean().default(true),
     capitalSharePct: pct(0, 100),
     positionSizePct: pct(0.05, 10),
@@ -135,35 +165,55 @@ export const PresetConfigSchema = z
 
 export type PresetConfig = z.infer<typeof PresetConfigSchema>;
 
-export const PRESET_KINDS = ["degen", "multiday"] as const;
-export type PresetKind = (typeof PRESET_KINDS)[number];
+/**
+ * Preset-IDs sind frei wählbar (Default: konservativ, balanced, degen) —
+ * so lassen sich beliebig viele Risikoprofile parallel im Paper-Trading
+ * gegeneinander testen.
+ */
+export type PresetKind = string;
+
+const PRESET_ID_RE = /^[a-z][a-z0-9_]{1,23}$/;
 
 export const BotConfigSchema = z
   .object({
     global: GlobalConfigSchema,
-    presets: z.object({
-      degen: PresetConfigSchema,
-      multiday: PresetConfigSchema,
-    }),
+    presets: z.record(z.string(), PresetConfigSchema),
   })
   .superRefine((val, ctx) => {
-    const share = val.presets.degen.capitalSharePct + val.presets.multiday.capitalSharePct;
+    const entries = Object.entries(val.presets);
+    if (entries.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["presets"],
+        message: "Mindestens ein Preset erforderlich",
+      });
+      return;
+    }
+
+    let share = 0;
+    for (const [id, preset] of entries) {
+      if (!PRESET_ID_RE.test(id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["presets", id],
+          message: "Preset-ID muss aus Kleinbuchstaben/Ziffern/_ bestehen (2–24 Zeichen)",
+        });
+      }
+      if (preset.enabled) share += preset.capitalSharePct;
+      if (preset.maxPositions > val.global.maxOpenPositions) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["presets", id, "maxPositions"],
+          message: "Preset-maxPositions darf global.maxOpenPositions nicht überschreiten",
+        });
+      }
+    }
     if (share > 100) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["presets"],
-        message: `Summe der capitalSharePct (${share}) darf 100 nicht überschreiten`,
+        message: `Summe der capitalSharePct aktiver Presets (${share}) darf 100 nicht überschreiten`,
       });
-    }
-    for (const kind of PRESET_KINDS) {
-      const preset = val.presets[kind];
-      if (preset.maxPositions > val.global.maxOpenPositions) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["presets", kind, "maxPositions"],
-          message: "Preset-maxPositions darf global.maxOpenPositions nicht überschreiten",
-        });
-      }
     }
   });
 

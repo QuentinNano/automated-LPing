@@ -1,6 +1,7 @@
 {
+  "label": "Degen",
   "enabled": true,
-  "capitalSharePct": 30,
+  "capitalSharePct": 25,
   "positionSizePct": 1,
   "maxPositions": 5,
   "minScore": 65,

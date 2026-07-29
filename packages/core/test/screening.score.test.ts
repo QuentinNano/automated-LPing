@@ -35,9 +35,9 @@ describe("Score-Engine", () => {
     expect(byId.get("momentum")?.points).toBe(0);
   });
 
-  it("Fabriq-bestätigte Kandidaten bekommen den vollen Quellen-Bonus", () => {
+  it("extern bestätigte Kandidaten bekommen den vollen Quellen-Bonus", () => {
     const replicated = computeScore(buildInput("degen", config));
-    const fabriq = computeScore(buildInput("degen", config, { source: "fabriq_degen" }));
+    const fabriq = computeScore(buildInput("degen", config, { source: "fabriq" }));
     expect(fabriq.total - replicated.total).toBeCloseTo(5, 1);
   });
 

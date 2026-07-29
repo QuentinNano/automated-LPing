@@ -8,16 +8,17 @@ export {
   RebalanceConfigSchema,
   EmergencyConfigSchema,
   StrategyConfigSchema,
+  PaperConfigSchema,
   KillSwitchSchema,
   parseBotConfig,
   ConfigValidationError,
-  PRESET_KINDS,
 } from "./config/schema";
 export type {
   BotConfig,
   GlobalConfig,
   PresetConfig,
   PresetKind,
+  PaperConfig,
   KillSwitch,
 } from "./config/schema";
 
@@ -79,3 +80,29 @@ export type {
 
 export { classifyForPreset, shortlistRank } from "./discovery/replicate";
 export type { ClassifyResult } from "./discovery/replicate";
+
+export {
+  binPrice,
+  binIdFromPrice,
+  strategyWeights,
+  openBins,
+  applyPriceMove,
+  totalsOf,
+  isInRange,
+} from "./paper/bins";
+export {
+  openPaperPosition,
+  tickPaperPosition,
+  valuePosition,
+  closePaperPosition,
+} from "./paper/engine";
+export type {
+  SimBin,
+  PaperPositionState,
+  MarketTick,
+  PaperCloseReason,
+  PaperValuation,
+  PaperTickResult,
+  PresetPerformance,
+} from "./paper/types";
+export type { OpenPaperPositionParams, PaperCloseResult } from "./paper/engine";

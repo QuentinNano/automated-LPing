@@ -4,7 +4,6 @@ import {
   screenCandidate,
   shortlistRank,
   tokenSideOf,
-  PRESET_KINDS,
   type BotConfig,
   type CandidateSource,
   type MarketAggregates,
@@ -69,6 +68,13 @@ export interface ScanSummary {
   rows: ScanRow[];
 }
 
+/** IDs der aktiven Presets in Konfigurationsreihenfolge. */
+export function activePresetIds(config: BotConfig): PresetKind[] {
+  return Object.entries(config.presets)
+    .filter(([, preset]) => preset.enabled)
+    .map(([id]) => id);
+}
+
 interface Enrichment {
   market: MarketAggregates | null;
   risk: TokenRiskReport | null;
@@ -95,22 +101,21 @@ export async function runScan(
   log(`Discovery: ${pools.length} Pools geladen`);
 
   // 2) Vor-Filter + Shortlist je Preset (billig, rein lokal).
-  const shortlists = {} as Record<PresetKind, PoolMetrics[]>;
-  for (const kind of PRESET_KINDS) {
-    const preset = config.presets[kind];
-    const eligible = preset.enabled
-      ? pools.filter((pool) => classifyForPreset(pool, kind, preset).eligible)
-      : [];
-    shortlists[kind] = eligible
+  const presetIds = activePresetIds(config);
+  const shortlists: Record<PresetKind, PoolMetrics[]> = {};
+  for (const id of presetIds) {
+    const preset = config.presets[id]!;
+    const eligible = pools.filter((pool) => classifyForPreset(pool, preset).eligible);
+    shortlists[id] = eligible
       .sort((a, b) => shortlistRank(b) - shortlistRank(a))
       .slice(0, topPerPreset);
-    log(`Shortlist ${kind}: ${shortlists[kind].length} von ${eligible.length} Kandidaten`);
+    log(`Shortlist ${id}: ${shortlists[id]!.length} von ${eligible.length} Kandidaten`);
   }
 
   // 3) Enrichment je Token (dedupliziert; sequenziell wegen Rate-Limits).
   const tokens = new Map<string, Enrichment>();
-  for (const kind of PRESET_KINDS) {
-    for (const pool of shortlists[kind]) {
+  for (const id of presetIds) {
+    for (const pool of shortlists[id]!) {
       const mint = tokenSideOf(pool);
       if (mint !== null && !tokens.has(mint)) tokens.set(mint, { market: null, risk: null, sellability: null });
     }
@@ -141,14 +146,14 @@ export async function runScan(
   const rows: ScanRow[] = [];
   let persisted = 0;
   let persistWarned = false;
-  for (const kind of PRESET_KINDS) {
-    for (const pool of shortlists[kind]) {
+  const source: CandidateSource = "replicated";
+  for (const id of presetIds) {
+    for (const pool of shortlists[id]!) {
       const tokenMint = tokenSideOf(pool);
       const enrichment = tokenMint !== null ? tokens.get(tokenMint) : undefined;
-      const source: CandidateSource = kind === "degen" ? "replicated_degen" : "replicated_multiday";
       const screening = screenCandidate({
-        presetKind: kind,
-        preset: config.presets[kind],
+        presetKind: id,
+        preset: config.presets[id]!,
         global: config.global,
         source,
         pool,
@@ -157,13 +162,13 @@ export async function runScan(
         risk: enrichment?.risk ?? null,
         sellability: enrichment?.sellability ?? null,
       });
-      rows.push({ preset: kind, pool, tokenMint: tokenMint ?? "-", screening });
+      rows.push({ preset: id, pool, tokenMint: tokenMint ?? "-", screening });
 
       if (deps.persist != null) {
         try {
           await deps.persist.recordScreened({
             poolAddress: pool.poolAddress,
-            preset: kind,
+            preset: id,
             source,
             pool,
             screening,
@@ -186,9 +191,12 @@ export async function runScan(
     return b.screening.score.total - a.screening.score.total;
   });
 
+  const shortlisted: Record<PresetKind, number> = {};
+  for (const id of presetIds) shortlisted[id] = shortlists[id]!.length;
+
   return {
     poolsScanned: pools.length,
-    shortlisted: { degen: shortlists.degen.length, multiday: shortlists.multiday.length },
+    shortlisted,
     accepted: rows.filter((r) => r.screening.verdict === "accepted").length,
     rejected: rows.filter((r) => r.screening.verdict === "rejected").length,
     persisted,
@@ -198,7 +206,7 @@ export async function runScan(
 
 export function formatScanTable(summary: ScanSummary): string {
   const header = [
-    pad("Preset", 8),
+    pad("Preset", 12),
     pad("Pool", 22),
     pad("TVL $", 12),
     pad("Vol/TVL", 8),
@@ -222,7 +230,7 @@ export function formatScanTable(summary: ScanSummary): string {
         : "";
     lines.push(
       [
-        pad(row.preset, 8),
+        pad(row.preset, 12),
         pad(pool.name ?? pool.poolAddress.slice(0, 10) + "…", 22),
         pad(formatUsd(pool.tvlUsd), 12),
         pad(volTvl, 8),
@@ -234,11 +242,14 @@ export function formatScanTable(summary: ScanSummary): string {
     );
   }
 
+  const shortlist = Object.entries(summary.shortlisted)
+    .map(([id, count]) => `${id} ${count}`)
+    .join(", ");
   lines.push(
     "",
-    `Pools: ${summary.poolsScanned} gescannt | Shortlist degen ${summary.shortlisted.degen}, ` +
-      `multiday ${summary.shortlisted.multiday} | akzeptiert ${summary.accepted}, ` +
-      `abgelehnt ${summary.rejected} | persistiert ${summary.persisted}`,
+    `Pools: ${summary.poolsScanned} gescannt | Shortlist ${shortlist} | ` +
+      `akzeptiert ${summary.accepted}, abgelehnt ${summary.rejected} | ` +
+      `persistiert ${summary.persisted}`,
   );
   return lines.join("\n");
 }

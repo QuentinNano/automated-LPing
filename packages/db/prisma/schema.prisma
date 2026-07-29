@@ -11,15 +11,8 @@ datasource db {
 }
 
 enum CandidateSource {
-  FABRIQ_DEGEN
-  FABRIQ_MULTIDAY
-  REPLICATED_DEGEN
-  REPLICATED_MULTIDAY
-}
-
-enum PresetKind {
-  DEGEN
-  MULTIDAY
+  FABRIQ
+  REPLICATED
 }
 
 enum LifecycleState {
@@ -63,10 +56,11 @@ enum BlacklistKind {
 /// Shadow-Tracking (Filter-Kalibrierung) weiterverfolgt.
 model PoolCandidate {
   id              String          @id @default(cuid())
-  poolAddress     String          @map("pool_address")
-  source          CandidateSource
-  preset          PresetKind
-  status          LifecycleState  @default(DISCOVERED)
+  poolAddress String          @map("pool_address")
+  source      CandidateSource
+  /// Preset-ID aus der Konfiguration (frei benennbar, z. B. "konservativ").
+  preset      String
+  status      LifecycleState  @default(DISCOVERED)
   score           Decimal?        @db.Decimal(6, 2)
   rawMetrics      Json            @map("raw_metrics")
   filterResult    Json?           @map("filter_result")
@@ -88,18 +82,29 @@ model Position {
   poolAddress     String         @map("pool_address")
   /// On-Chain-Adresse des Positions-Accounts (nach OPENING bekannt).
   positionPubkey  String?        @unique @map("position_pubkey")
-  preset          PresetKind
+  /// Preset-ID aus der Konfiguration (frei benennbar).
+  preset          String
   state           LifecycleState @default(OPENING)
   strategyType    String         @map("strategy_type")
   sided           String
   minBinId        Int?           @map("min_bin_id")
   maxBinId        Int?           @map("max_bin_id")
+  binStep         Int?           @map("bin_step")
   mintX           String         @map("mint_x")
   mintY           String         @map("mint_y")
   depositSol      Decimal        @map("deposit_sol") @db.Decimal(20, 9)
   currentValueSol Decimal?       @map("current_value_sol") @db.Decimal(20, 9)
   realizedPnlSol  Decimal        @default(0) @map("realized_pnl_sol") @db.Decimal(20, 9)
   feesEarnedSol   Decimal        @default(0) @map("fees_earned_sol") @db.Decimal(20, 9)
+  costsSol        Decimal        @default(0) @map("costs_sol") @db.Decimal(20, 9)
+  /// Wert bei reinem Halten (HODL-Benchmark) zum letzten Tick.
+  hodlValueSol    Decimal?       @map("hodl_value_sol") @db.Decimal(20, 9)
+  timeInRangePct  Decimal?       @map("time_in_range_pct") @db.Decimal(6, 2)
+  entryPrice      Decimal?       @map("entry_price") @db.Decimal(30, 15)
+  lastPrice       Decimal?       @map("last_price") @db.Decimal(30, 15)
+  closeReason     String?        @map("close_reason")
+  /// Serialisierter Simulationszustand der Paper-Engine (PaperPositionState).
+  simState        Json?          @map("sim_state")
   paper           Boolean        @default(true)
   openedAt        DateTime?      @map("opened_at")
   closedAt        DateTime?      @map("closed_at")
@@ -111,6 +116,7 @@ model Position {
 
   @@index([state])
   @@index([poolAddress])
+  @@index([preset, state])
   @@map("positions")
 }
 

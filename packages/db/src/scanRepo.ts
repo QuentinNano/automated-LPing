@@ -41,7 +41,7 @@ export class ScanRepo {
     const existing = await this.prisma.poolCandidate.findFirst({
       where: {
         poolAddress: input.poolAddress,
-        preset: presetToDb(input.preset),
+        preset: input.preset,
         status: { in: ["DISCOVERED", "REJECTED"] },
         discoveredAt: { gte: dedupeSince },
       },
@@ -68,8 +68,8 @@ export class ScanRepo {
       const row = await this.prisma.poolCandidate.create({
         data: {
           poolAddress: input.poolAddress,
-          source: sourceToDb(input.source),
-          preset: presetToDb(input.preset),
+          source: input.source === "fabriq" ? "FABRIQ" : "REPLICATED",
+          preset: input.preset,
           ...data,
         },
         select: { id: true },
@@ -99,25 +99,6 @@ export class ScanRepo {
       where: { status: "REJECTED", shadowUntil: { gte: now } },
       orderBy: { discoveredAt: "desc" },
     });
-  }
-}
-
-function presetToDb(preset: PresetKind): "DEGEN" | "MULTIDAY" {
-  return preset === "degen" ? "DEGEN" : "MULTIDAY";
-}
-
-function sourceToDb(
-  source: CandidateSource,
-): "FABRIQ_DEGEN" | "FABRIQ_MULTIDAY" | "REPLICATED_DEGEN" | "REPLICATED_MULTIDAY" {
-  switch (source) {
-    case "fabriq_degen":
-      return "FABRIQ_DEGEN";
-    case "fabriq_multiday":
-      return "FABRIQ_MULTIDAY";
-    case "replicated_degen":
-      return "REPLICATED_DEGEN";
-    case "replicated_multiday":
-      return "REPLICATED_MULTIDAY";
   }
 }
 

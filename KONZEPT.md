@@ -258,7 +258,18 @@ datengetrieben statt gefühlt nachjustiert.
 
 ---
 
-## 6. Strategy Engine: Presets Degen & Multiday
+## 6. Strategy Engine: Risikoprofil-Presets
+
+> **Umsetzungsstand (Juli 2026):** Presets sind frei benennbar; ausgeliefert
+> werden drei Risikoprofile — **Konservativ**, **Balanced**, **Degen**. Sie laufen
+> im Paper-Trading **gleichzeitig auf denselben Marktdaten und mit demselben
+> virtuellen Kapital**, sodass Ergebnisunterschiede ausschließlich von den
+> Parametern stammen (kontrolliertes Experiment statt Vergleich von Äpfeln mit
+> Birnen). Weitere Profile lassen sich durch eine zusätzliche Datei in `config/`
+> ergänzen. Die folgenden Abschnitte 6.1/6.2 beschreiben die beiden Endpunkte des
+> Spektrums; „Balanced" liegt dazwischen.
+
+
 
 Ein Preset bündelt Discovery-Fenster, Filter-Schwellen, Einstiegsform, Range-Design,
 Rebalance- und Exit-Regeln. Beide Presets laufen parallel mit getrennten Kapitaltöpfen.
@@ -482,6 +493,35 @@ Totalverlust tragbar ist.
 
 ## 13. Test- und Rollout-Plan
 
+### Paper-Trading-Modell (umgesetzt)
+
+Die Simulation bildet die DLMM-Mechanik bin-genau ab: Bin-Preise nach
+`(1 + binStep/10000)^i`, Liquiditätsverteilung je Strategie (Spot/Curve/BidAsk),
+und beim Überqueren eines Bins wechselt dieser die Seite (fallender Preis: SOL
+kauft Token; steigender Preis: Token wird zu SOL). Wichtige Eigenschaft, die
+daraus folgt und getestet ist: **Bin-Übergänge sind wertneutral** — der LP-Gewinn
+stammt ausschließlich aus Gebühren, nicht aus dem Durchlaufen der Range.
+
+Bewusste Vereinfachungen (dokumentiert, weil sie die Ergebnisse beeinflussen):
+
+- **Fee-Anteil geschätzt:** Der eigene Anteil am Gebührenfluss wird über den
+  Anteil am Pool-TVL angenähert — die tatsächliche Liquiditätsverteilung anderer
+  LPs ist von außen nicht beobachtbar. Ein konfigurierbarer Abschlag
+  (`feeShareHaircutPct`, Default 30 %) korrigiert konservativ nach unten.
+- **Kosten nur On-Chain:** Priority Fees je Transaktion und Slippage je Swap.
+  Positions-Rent ist erstattungsfähig und damit gebundenes Kapital, kein Aufwand.
+  **Infrastrukturkosten (VPS, RPC-Tarife) bleiben außen vor** — monatlicher
+  Fixaufwand, keiner Position zurechenbar; sie würden den Preset-Vergleich
+  verzerren statt ihn zu schärfen. Für die Gesamtwirtschaftlichkeit sind sie
+  weiterhin in Abschnitt 15 zu berücksichtigen.
+- **Slippage innerhalb eines Bins** wird vernachlässigt (bei üblichen Bin-Steps
+  unter 1 % je Bin).
+
+Jede Position führt zusätzlich einen **HODL-Benchmark** mit: Was wäre der Einsatz
+wert, hätte man ihn in der Eröffnungszusammensetzung einfach gehalten? Das ist die
+eigentliche Frage an das LPing — Fee-Einnahmen allein sagen nichts, solange der
+Vergleich zum Halten nicht positiv ist.
+
 **Teststrategie**
 
 - Unit-Tests für Scoring, Filter, Strategie- und Risk-Regeln (pure Funktionen, Fixtures aus echten API-Antworten).
@@ -492,7 +532,7 @@ Totalverlust tragbar ist.
 
 | Phase | Inhalt | Go-Kriterium für nächste Phase |
 |---|---|---|
-| 1. Beobachten (1–2 Wo.) | Discovery + Screening + Dashboard live, **Paper-Trading** (simulierte Positionen auf echten Marktdaten inkl. simulierter Kosten) | Filter-Rug-Rate im Rahmen, Paper-PnL positiv über ≥ 2 Wochen, keine Pipeline-Bugs |
+| 1. Beobachten (1–2 Wo.) | Discovery + Screening + Dashboard live, **Paper-Trading** (simulierte Positionen auf echten Marktdaten inkl. simulierter On-Chain-Kosten), alle Presets parallel | Filter-Rug-Rate im Rahmen, Paper-PnL positiv über ≥ 2 Wochen, ≥ 20–30 geschlossene Positionen je Preset, keine Pipeline-Bugs |
 | 2. Klein & manuell (1–2 Wo.) | Echte Positionen mit Mikro-Caps (z. B. max. 0,5 SOL/Position), Entries erfordern 1-Klick-Freigabe in der UI | Tx-Erfolgsquote > 95 %, Ist-Kosten ≈ simulierte Kosten, Notausstieg 1× erfolgreich getestet |
 | 3. Vollautomatik klein | Auto-Entries beide Presets, Rebalancing aktiv, Circuit Breaker scharf | 4 Wochen netto-positiv nach Kosten, Drawdown < Limit |
 | 4. Skalierung & Tuning | Caps schrittweise erhöhen, Parameter datengetrieben nachziehen (Dashboard/Shadow-Tracking), optional: Backtesting-Modul auf gesammelten `pool_snapshots` | fortlaufend |

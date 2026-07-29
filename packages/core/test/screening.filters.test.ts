@@ -88,15 +88,31 @@ describe("Hard Filters", () => {
   });
 
   it("lehnt Token außerhalb des Preset-Altersfensters ab", () => {
+    // Degen akzeptiert nur 1–48h: 100h ist zu alt.
     const tooOld = checksById(
       buildInput("degen", config, { market: buildMarket({ tokenAgeHours: 100 }) }),
     );
     expect(tooOld.get("token_age")?.status).toBe("failed");
 
+    // Konservativ verlangt >= 168h: 24h ist zu jung.
     const tooYoung = checksById(
-      buildInput("multiday", config, { market: buildMarket({ tokenAgeHours: 24 }) }),
+      buildInput("konservativ", config, { market: buildMarket({ tokenAgeHours: 24 }) }),
     );
     expect(tooYoung.get("token_age")?.status).toBe("failed");
+  });
+
+  it("dasselbe Token kann je nach Preset akzeptiert oder abgelehnt werden", () => {
+    // Kern des Multi-Preset-Vergleichs: identische Marktdaten, andere Regeln.
+    const market = buildMarket({ tokenAgeHours: 24 });
+    expect(checksById(buildInput("degen", config, { market })).get("token_age")?.status).toBe(
+      "passed",
+    );
+    expect(checksById(buildInput("balanced", config, { market })).get("token_age")?.status).toBe(
+      "failed",
+    );
+    expect(
+      checksById(buildInput("konservativ", config, { market })).get("token_age")?.status,
+    ).toBe("failed");
   });
 
   it("lehnt Preis-Divergenz zwischen Pool und Markt ab", () => {
@@ -141,6 +157,6 @@ describe("Hard Filters", () => {
     expect(failedHard).toEqual([]);
     expect(result.verdict).toBe("rejected");
     expect(result.rejectedBy).toEqual(["min_score"]);
-    expect(result.score.total).toBeLessThan(config.presets.degen.minScore);
+    expect(result.score.total).toBeLessThan(config.presets["degen"]!.minScore);
   });
 });

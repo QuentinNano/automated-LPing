@@ -25,7 +25,11 @@ function loadDefaults(): unknown {
     JSON.parse(readFileSync(path.join(repoRoot, "config", name), "utf8")) as unknown;
   return {
     global: read("global.json"),
-    presets: { degen: read("degen.json"), multiday: read("multiday.json") },
+    presets: {
+      konservativ: read("konservativ.json"),
+      balanced: read("balanced.json"),
+      degen: read("degen.json"),
+    },
   };
 }
 
@@ -88,7 +92,7 @@ async function main(): Promise<void> {
     const first = await repo.recordScreened({
       poolAddress: TEST_POOL,
       preset: "degen",
-      source: "replicated_degen",
+      source: "replicated",
       pool: testPool(),
       screening: testScreening("accepted"),
     });
@@ -97,7 +101,7 @@ async function main(): Promise<void> {
     const second = await repo.recordScreened({
       poolAddress: TEST_POOL,
       preset: "degen",
-      source: "replicated_degen",
+      source: "replicated",
       pool: testPool(),
       screening: testScreening("rejected"),
     });

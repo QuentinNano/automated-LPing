@@ -11,16 +11,35 @@ function loadDefaults() {
     JSON.parse(readFileSync(path.join(repoRoot, "config", name), "utf8")) as unknown;
   return {
     global: read("global.json"),
-    presets: { degen: read("degen.json"), multiday: read("multiday.json") },
+    presets: {
+      konservativ: read("konservativ.json"),
+      balanced: read("balanced.json"),
+      degen: read("degen.json"),
+    },
   };
 }
 
 describe("BotConfigSchema", () => {
-  it("akzeptiert die eingecheckten Default-Konfigurationen", () => {
+  it("akzeptiert die eingecheckten Default-Konfigurationen (3 Presets)", () => {
     const config = parseBotConfig(loadDefaults());
     expect(config.global.paperTrading).toBe(true);
-    expect(config.presets.degen.strategy).toEqual({ type: "BidAsk", sided: "quote_only" });
-    expect(config.presets.multiday.rebalance.enabled).toBe(true);
+    expect(Object.keys(config.presets)).toEqual(["konservativ", "balanced", "degen"]);
+    expect(config.presets["degen"]!.strategy).toEqual({ type: "BidAsk", sided: "quote_only" });
+    expect(config.presets["konservativ"]!.rebalance.enabled).toBe(true);
+    expect(config.presets["balanced"]!.label).toBe("Balanced");
+  });
+
+  it("erlaubt frei benannte Presets", () => {
+    const raw = loadDefaults() as { presets: Record<string, unknown> };
+    raw.presets["experiment_a"] = { ...(raw.presets["degen"] as object), capitalSharePct: 0 };
+    const config = parseBotConfig(raw);
+    expect(config.presets["experiment_a"]).toBeDefined();
+  });
+
+  it("lehnt ungültige Preset-IDs ab", () => {
+    const raw = loadDefaults() as { presets: Record<string, unknown> };
+    raw.presets["Bad Name!"] = raw.presets["degen"];
+    expect(() => parseBotConfig(raw)).toThrowError(/Preset-ID/);
   });
 
   it("lehnt Kapitalanteile über 100 % ab", () => {
@@ -28,6 +47,15 @@ describe("BotConfigSchema", () => {
     raw.presets.degen.capitalSharePct = 80;
     expect(() => parseBotConfig(raw)).toThrowError(ConfigValidationError);
     expect(() => parseBotConfig(raw)).toThrowError(/capitalSharePct/);
+  });
+
+  it("zählt deaktivierte Presets nicht in die Kapitalsumme", () => {
+    const raw = loadDefaults() as {
+      presets: { degen: { capitalSharePct: number; enabled: boolean } };
+    };
+    raw.presets.degen.capitalSharePct = 80;
+    raw.presets.degen.enabled = false;
+    expect(() => parseBotConfig(raw)).not.toThrow();
   });
 
   it("lehnt hardLossLimit <= dailyLossLimit ab", () => {
@@ -38,10 +66,12 @@ describe("BotConfigSchema", () => {
 
   it("lehnt Compounding bei convertToSolPct=100 ab", () => {
     const raw = loadDefaults() as {
-      presets: { multiday: { compound: { enabled: boolean }; feeHarvest: { convertToSolPct: number } } };
+      presets: {
+        konservativ: { compound: { enabled: boolean }; feeHarvest: { convertToSolPct: number } };
+      };
     };
-    raw.presets.multiday.compound.enabled = true;
-    raw.presets.multiday.feeHarvest.convertToSolPct = 100;
+    raw.presets.konservativ.compound.enabled = true;
+    raw.presets.konservativ.feeHarvest.convertToSolPct = 100;
     expect(() => parseBotConfig(raw)).toThrowError(/Compounding/);
   });
 

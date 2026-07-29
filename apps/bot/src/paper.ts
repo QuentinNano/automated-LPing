@@ -1,0 +1,279 @@
+import {
+  closePaperPosition,
+  openPaperPosition,
+  poolPriceInSol,
+  tickPaperPosition,
+  valuePosition,
+  type BotConfig,
+  type MarketTick,
+  type PaperPositionState,
+  type PoolMetrics,
+  type PresetKind,
+  type PresetPerformance,
+} from "@lping/core";
+import type { ScanRow } from "./scan";
+
+/**
+ * Multi-Preset-Paper-Trading (KONZEPT.md Abschnitt 13, Phase 1).
+ *
+ * Alle aktiven Presets laufen gleichzeitig auf **denselben** Marktdaten und
+ * demselben Startkapital. Dadurch unterscheiden sich die Ergebnisse
+ * ausschließlich in den Parametern — ein kontrolliertes Experiment statt
+ * eines Vergleichs von Äpfeln mit Birnen.
+ */
+
+export interface PaperStore {
+  open(record: {
+    poolAddress: string;
+    preset: PresetKind;
+    strategyType: string;
+    sided: string;
+    mintX: string;
+    mintY: string;
+    binStep: number;
+    state: PaperPositionState;
+    openedAt: Date;
+  }): Promise<string>;
+  tick(record: {
+    positionId: string;
+    state: PaperPositionState;
+    valuation: ReturnType<typeof valuePosition>;
+  }): Promise<void>;
+  close(record: {
+    positionId: string;
+    state: PaperPositionState;
+    valuation: ReturnType<typeof valuePosition>;
+    reason: "stop_loss" | "take_profit" | "max_hold_time" | "out_of_range" | "manual";
+    realizedPnlSol: number;
+    closedAt: Date;
+  }): Promise<void>;
+  listOpen(preset?: PresetKind): Promise<
+    { id: string; poolAddress: string; preset: string; simState: PaperPositionState }[]
+  >;
+  countOpen(preset: PresetKind): Promise<number>;
+  hasOpenFor(preset: PresetKind, poolAddress: string): Promise<boolean>;
+  performance(labels?: Record<string, string>): Promise<PresetPerformance[]>;
+}
+
+export interface PaperDeps {
+  store: PaperStore;
+  /** Aktuelle Pool-Metriken für offene Positionen nachladen. */
+  getPool(poolAddress: string): Promise<PoolMetrics>;
+  /** SOL-Preis in USD (für die Umrechnung von TVL/Volumen). */
+  getSolPriceUsd(): Promise<number>;
+  log?: (line: string) => void;
+  now?: () => Date;
+}
+
+export interface PaperCycleResult {
+  opened: number;
+  ticked: number;
+  closed: number;
+  notes: string[];
+}
+
+/**
+ * Eröffnet neue Positionen für akzeptierte Scan-Kandidaten — je Preset
+ * getrennt, mit eigenem virtuellem Kapital und eigenen Limits.
+ */
+export async function openFromScan(
+  deps: PaperDeps,
+  config: BotConfig,
+  rows: ScanRow[],
+): Promise<{ opened: number; notes: string[] }> {
+  const log = deps.log ?? (() => {});
+  const now = (deps.now ?? (() => new Date()))();
+  const notes: string[] = [];
+  let opened = 0;
+
+  const accepted = rows.filter((row) => row.screening.verdict === "accepted");
+  for (const row of accepted) {
+    const preset = config.presets[row.preset];
+    if (preset === undefined || !preset.enabled) continue;
+
+    const openCount = await deps.store.countOpen(row.preset);
+    if (openCount >= preset.maxPositions) {
+      notes.push(`${row.preset}: Positions-Limit erreicht (${openCount}/${preset.maxPositions})`);
+      continue;
+    }
+    if (await deps.store.hasOpenFor(row.preset, row.pool.poolAddress)) continue;
+
+    const price = poolPriceInSol(row.pool);
+    if (price === null || price <= 0) {
+      notes.push(`${row.preset}: kein Preis für ${row.pool.poolAddress.slice(0, 8)}…`);
+      continue;
+    }
+
+    // Positionsgröße als Anteil des virtuellen Preset-Kapitals — für alle
+    // Presets identisch dimensioniert, damit der Vergleich fair bleibt.
+    const depositSol = (config.global.paper.capitalPerPresetSol * preset.positionSizePct) / 100;
+    const state = openPaperPosition({
+      preset,
+      global: config.global,
+      binStep: row.pool.binStep,
+      price,
+      depositSol,
+      at: now,
+    });
+
+    await deps.store.open({
+      poolAddress: row.pool.poolAddress,
+      preset: row.preset,
+      strategyType: preset.strategy.type,
+      sided: preset.strategy.sided,
+      mintX: row.pool.mintX,
+      mintY: row.pool.mintY,
+      binStep: row.pool.binStep,
+      state,
+      openedAt: now,
+    });
+    opened++;
+    log(
+      `+ ${row.preset}: ${row.pool.name ?? row.pool.poolAddress.slice(0, 10)} ` +
+        `${depositSol.toFixed(3)} SOL, Bins ${state.minBinId}…${state.maxBinId}, Score ${row.screening.score.total}`,
+    );
+  }
+
+  return { opened, notes };
+}
+
+/** Aktualisiert alle offenen Positionen mit frischen Marktdaten. */
+export async function tickOpenPositions(
+  deps: PaperDeps,
+  config: BotConfig,
+): Promise<{ ticked: number; closed: number; notes: string[] }> {
+  const log = deps.log ?? (() => {});
+  const now = (deps.now ?? (() => new Date()))();
+  const notes: string[] = [];
+  let ticked = 0;
+  let closed = 0;
+
+  const open = await deps.store.listOpen();
+  if (open.length === 0) return { ticked, closed, notes };
+
+  const solPriceUsd = await deps.getSolPriceUsd();
+  const poolCache = new Map<string, PoolMetrics | null>();
+
+  for (const position of open) {
+    const preset = config.presets[position.preset];
+    if (preset === undefined) {
+      notes.push(`Position ${position.id}: Preset "${position.preset}" existiert nicht mehr`);
+      continue;
+    }
+
+    let pool = poolCache.get(position.poolAddress);
+    if (pool === undefined) {
+      try {
+        pool = await deps.getPool(position.poolAddress);
+      } catch (error) {
+        pool = null;
+        notes.push(
+          `Pool ${position.poolAddress.slice(0, 8)}… nicht abrufbar: ${message(error)}`,
+        );
+      }
+      poolCache.set(position.poolAddress, pool);
+    }
+    if (pool === null) continue;
+
+    const price = poolPriceInSol(pool);
+    if (price === null || price <= 0) continue;
+
+    const tick: MarketTick = {
+      priceInSol: price,
+      poolTvlUsd: pool.tvlUsd ?? 0,
+      poolVolume24hUsd: pool.volume24hUsd ?? 0,
+      poolFeePct: pool.baseFeePct ?? 0,
+      solPriceUsd,
+      at: now,
+    };
+
+    const result = tickPaperPosition(position.simState, tick, preset, config.global);
+    ticked++;
+
+    if (result.closeReason === null) {
+      await deps.store.tick({
+        positionId: position.id,
+        state: result.state,
+        valuation: result.valuation,
+      });
+      continue;
+    }
+
+    const closeResult = closePaperPosition(result.state, price, config.global);
+    await deps.store.close({
+      positionId: position.id,
+      state: closeResult.state,
+      valuation: closeResult.valuation,
+      reason: result.closeReason,
+      realizedPnlSol: closeResult.realizedPnlSol,
+      closedAt: now,
+    });
+    closed++;
+    log(
+      `- ${position.preset}: ${position.poolAddress.slice(0, 10)}… geschlossen (${result.closeReason}), ` +
+        `PnL ${closeResult.realizedPnlSol >= 0 ? "+" : ""}${closeResult.realizedPnlSol.toFixed(4)} SOL`,
+    );
+  }
+
+  return { ticked, closed, notes };
+}
+
+export function presetLabels(config: BotConfig): Record<string, string> {
+  return Object.fromEntries(Object.entries(config.presets).map(([id, p]) => [id, p.label]));
+}
+
+/** Vergleichstabelle der Presets — das eigentliche Ergebnis von Phase 1. */
+export function formatComparison(rows: PresetPerformance[]): string {
+  if (rows.length === 0) return "Noch keine Paper-Positionen.";
+
+  const header = [
+    pad("Preset", 14),
+    pad("offen", 6),
+    pad("zu", 4),
+    pad("PnL SOL", 10),
+    pad("davon Fees", 11),
+    pad("Kosten", 9),
+    pad("Win%", 6),
+    pad("inRange%", 9),
+    "vs HODL",
+  ].join(" ");
+  const lines = [header, "-".repeat(header.length + 4)];
+
+  for (const row of [...rows].sort((a, b) => b.totalPnlSol - a.totalPnlSol)) {
+    lines.push(
+      [
+        pad(row.label, 14),
+        pad(String(row.openPositions), 6),
+        pad(String(row.closedPositions), 4),
+        pad(signed(row.totalPnlSol, 4), 10),
+        pad(row.feesEarnedSol.toFixed(4), 11),
+        pad(row.costsSol.toFixed(4), 9),
+        pad(row.winRatePct === null ? "–" : row.winRatePct.toFixed(0), 6),
+        pad(row.avgTimeInRangePct === null ? "–" : row.avgTimeInRangePct.toFixed(0), 9),
+        signed(row.vsHodlSol, 4),
+      ].join(" "),
+    );
+  }
+
+  const decided = rows.reduce((sum, r) => sum + r.closedPositions, 0);
+  if (decided < 20) {
+    lines.push(
+      "",
+      `Hinweis: erst ${decided} geschlossene Positionen — zu wenig für belastbare Aussagen.`,
+      "Statistisch tragfähig wird der Vergleich ab ca. 20–30 Positionen je Preset.",
+    );
+  }
+  return lines.join("\n");
+}
+
+function pad(value: string, width: number): string {
+  return value.length > width ? value.slice(0, width - 1) + "…" : value.padEnd(width);
+}
+
+function signed(value: number, digits: number): string {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

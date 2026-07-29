@@ -7,5 +7,13 @@
   "dailyLossLimitPct": 5,
   "hardLossLimitPct": 10,
   "priorityFeeCapLamports": 2000000,
-  "profitSweepThresholdSol": 5
+  "profitSweepThresholdSol": 5,
+  "paper": {
+    "capitalPerPresetSol": 10,
+    "costs": {
+      "priorityFeeSol": 0.0005,
+      "swapSlippagePct": 0.5
+    },
+    "feeShareHaircutPct": 30
+  }
 }

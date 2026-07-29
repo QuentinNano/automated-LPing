@@ -67,37 +67,39 @@ function buildDeps(records: unknown[]): ScanDeps {
 }
 
 describe("runScan", () => {
-  it("Discovery → Enrichment → Screening: gesunder Degen-Pool wird akzeptiert", async () => {
+  it("screent denselben Pool gegen alle aktiven Presets", async () => {
     const records: unknown[] = [];
     const summary = await runScan(buildDeps(records), config, { pages: 3 });
 
     // Nur 1 Seite geliefert (< limit) → keine weiteren Seiten angefragt.
     expect(summary.poolsScanned).toBe(3);
-    // USDC- und Mini-TVL-Pool fliegen im Vor-Filter raus.
-    expect(summary.shortlisted.degen).toBe(1);
-    expect(summary.shortlisted.multiday).toBe(1);
+    // USDC- und Mini-TVL-Pool fliegen im Vor-Filter raus; der gesunde Pool
+    // landet in der Shortlist jedes Presets.
+    expect(summary.shortlisted).toEqual({ konservativ: 1, balanced: 1, degen: 1 });
+    expect(summary.rows).toHaveLength(3);
 
+    // Degen akzeptiert den 24h alten Token …
     const degenRow = summary.rows.find((r) => r.preset === "degen");
     expect(degenRow?.screening.verdict).toBe("accepted");
     expect(degenRow?.screening.score.total).toBeGreaterThan(70);
 
-    // Multiday lehnt denselben Pool ab: Token ist erst 24h alt (>= 72h nötig).
-    const multidayRow = summary.rows.find((r) => r.preset === "multiday");
-    expect(multidayRow?.screening.verdict).toBe("rejected");
-    expect(multidayRow?.screening.rejectedBy).toContain("token_age");
+    // … die vorsichtigeren Presets lehnen ihn wegen des Alters ab.
+    for (const preset of ["balanced", "konservativ"]) {
+      const row = summary.rows.find((r) => r.preset === preset);
+      expect(row?.screening.verdict, preset).toBe("rejected");
+      expect(row?.screening.rejectedBy, preset).toContain("token_age");
+    }
 
     expect(summary.accepted).toBe(1);
-    expect(summary.rejected).toBe(1);
+    expect(summary.rejected).toBe(2);
   });
 
-  it("persistiert jede gescreente Zeile mit Quelle replicated_*", async () => {
+  it("persistiert jede gescreente Zeile mit Quelle und Preset", async () => {
     const records: { preset?: string; source?: string }[] = [];
     const summary = await runScan(buildDeps(records), config, { pages: 1 });
-    expect(summary.persisted).toBe(2);
-    expect(records.map((r) => r.source).sort()).toEqual([
-      "replicated_degen",
-      "replicated_multiday",
-    ]);
+    expect(summary.persisted).toBe(3);
+    expect(records.map((r) => r.preset).sort()).toEqual(["balanced", "degen", "konservativ"]);
+    expect(new Set(records.map((r) => r.source))).toEqual(new Set(["replicated"]));
   });
 
   it("Persistenz-Fehler stoppen den Scan nicht", async () => {
@@ -111,7 +113,7 @@ describe("runScan", () => {
     deps.log = (line) => logs.push(line);
     const summary = await runScan(deps, config, { pages: 1 });
     expect(summary.persisted).toBe(0);
-    expect(summary.rows.length).toBe(2);
+    expect(summary.rows.length).toBe(3);
     expect(logs.join("\n")).toContain("Persistenz fehlgeschlagen");
   });
 

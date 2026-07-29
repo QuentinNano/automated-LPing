@@ -11,7 +11,11 @@ function loadDefaults() {
     JSON.parse(readFileSync(path.join(repoRoot, "config", name), "utf8")) as unknown;
   return {
     global: read("global.json"),
-    presets: { degen: read("degen.json"), multiday: read("multiday.json") },
+    presets: {
+      konservativ: read("konservativ.json"),
+      balanced: read("balanced.json"),
+      degen: read("degen.json"),
+    },
   };
 }
 
@@ -43,9 +47,10 @@ describe("ConfigService", () => {
     );
 
     expect(stored.version).toBe(2);
-    expect(service.config.presets.degen.stopLossPct).toBe(12);
-    // Patch darf Nachbarwerte nicht anfassen:
-    expect(service.config.presets.degen.minScore).toBe(65);
+    expect(service.config.presets["degen"]!.stopLossPct).toBe(12);
+    // Patch darf Nachbarwerte und andere Presets nicht anfassen:
+    expect(service.config.presets["degen"]!.minScore).toBe(65);
+    expect(service.config.presets["konservativ"]!.stopLossPct).toBe(15);
     expect(seen).toEqual([2]);
 
     unsubscribe();
@@ -60,6 +65,68 @@ describe("ConfigService", () => {
     ).rejects.toThrowError(ConfigValidationError);
     expect(service.version).toBe(1);
     expect(service.config.global.dailyLossLimitPct).toBe(5);
+  });
+
+  it("migriert eine veraltete gespeicherte Config statt sie abzulehnen", async () => {
+    const store = new MemoryConfigStore();
+    // Stand aus einer früheren Schema-Version: alte Preset-Namen, kein
+    // paper-Block, keine labels — nur die getunten Werte sind interessant.
+    await store.append({
+      config: {
+        global: { maxTotalExposureSol: 42, dailyLossLimitPct: 3, hardLossLimitPct: 9 },
+        presets: {
+          degen: { stopLossPct: 11 },
+          multiday: { stopLossPct: 33 },
+        },
+      } as never,
+      actor: "test",
+      reason: "altes Schema",
+    });
+
+    const service = await ConfigService.init(store, loadDefaults());
+
+    // Migration ist als neue Version dokumentiert, nicht still überschrieben.
+    expect(service.version).toBe(2);
+    const history = await service.history();
+    expect(history[0]?.reason).toContain("Schema-Migration");
+
+    // Getunte Werte überleben …
+    expect(service.config.global.maxTotalExposureSol).toBe(42);
+    expect(service.config.presets["degen"]!.stopLossPct).toBe(11);
+    // … neue Pflichtfelder kommen aus den Defaults …
+    expect(service.config.global.paper.capitalPerPresetSol).toBe(10);
+    expect(service.config.presets["degen"]!.label).toBe("Degen");
+    // … und Presets, die es nicht mehr gibt, verschwinden.
+    expect(service.config.presets["multiday"]).toBeUndefined();
+    expect(Object.keys(service.config.presets)).toEqual([
+      "konservativ",
+      "balanced",
+      "degen",
+    ]);
+  });
+
+  it("fällt auf Defaults zurück, wenn die Zusammenführung widersprüchlich wäre", async () => {
+    const store = new MemoryConfigStore();
+    // Alter Kapitalanteil, der mit der neuen Preset-Aufteilung über 100 % käme.
+    await store.append({
+      config: {
+        global: { maxTotalExposureSol: 42 },
+        presets: { degen: { capitalSharePct: 90 } },
+      } as never,
+      actor: "test",
+      reason: "altes Schema",
+    });
+
+    const service = await ConfigService.init(store, loadDefaults());
+
+    // Startfähig statt korrekt-aber-tot …
+    expect(service.version).toBe(2);
+    expect(service.config.presets["degen"]!.capitalSharePct).toBe(25);
+    expect(service.config.global.maxTotalExposureSol).toBe(20);
+    // … und der Verlust der getunten Werte ist in der Historie dokumentiert.
+    const history = await service.history();
+    expect(history[0]?.reason).toContain("Defaults wiederhergestellt");
+    expect(history[0]?.reason).toContain("capitalSharePct");
   });
 
   it("liefert die Historie neueste zuerst", async () => {
