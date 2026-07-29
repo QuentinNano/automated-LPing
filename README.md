@@ -6,6 +6,8 @@ Risiko-Filterung, automatisches Eröffnen/Rebalancen/Schließen von Positionen, 
 Parametersteuerung und Analyse-Dashboard.
 
 ➡️ **[KONZEPT.md](./KONZEPT.md)** — vollständiges Umsetzungs- und Risikokonzept.
+➡️ **[KONZEPT-ML.md](./KONZEPT-ML.md)** — datengetriebene Optimierung von Parametern
+und Indikatoren (Planung, noch nicht umgesetzt).
 
 ## Projektstruktur (Monorepo, pnpm)
 
