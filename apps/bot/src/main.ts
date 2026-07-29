@@ -16,7 +16,7 @@ import {
 import { loadDefaultsFromDir } from "./loadConfig";
 import { cmdFabriqCheck } from "./fabriqCheck";
 import { cmdApiCheck } from "./apiCheck";
-import { formatTrackStatus, runTrackCycle, type TrackDeps } from "./track";
+import { formatHealthReport, formatTrackStatus, runTrackCycle, type TrackDeps } from "./track";
 import { formatScanTable, runScan, type ScanDeps } from "./scan";
 import {
   formatComparison,
@@ -319,6 +319,27 @@ async function cmdTrack(args: string[]): Promise<number> {
   const scanEvery = args.includes("--no-scan") ? 0 : (intFlag(args, "--scan-every") ?? 4);
   const pages = intFlag(args, "--pages") ?? 4;
   const top = intFlag(args, "--top") ?? 12;
+
+  // Prüfbericht: beurteilt die Aufzeichnung, statt nur Zahlen zu zeigen.
+  if (args.includes("--check")) {
+    console.log("Prüfe die Aufzeichnung…\n");
+    try {
+      const metrics = await store.healthMetrics(new Date());
+      console.log(formatHealthReport(metrics));
+      console.log("\n" + formatTrackStatus(await store.stats()));
+
+      // Der Bericht selbst ist das Ergebnis — deshalb standardmäßig
+      // Rückgabewert 0, sonst überdeckt pnpm ihn mit Fehlerrauschen, das wie
+      // ein Absturz aussieht. `--strict` liefert einen Rückgabewert für
+      // automatisierte Auswertung.
+      if (!args.includes("--strict")) return 0;
+      const { evaluateTrackHealth, overallHealth } = await import("@lping/core");
+      return overallHealth(evaluateTrackHealth(metrics)) === "fail" ? 1 : 0;
+    } catch (error) {
+      console.error(explainFailure(error));
+      return 1;
+    }
+  }
 
   if (statusOnly) {
     console.log(formatTrackStatus(await store.stats()));

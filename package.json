@@ -15,7 +15,8 @@
     "db:generate": "pnpm --filter @lping/db db:generate",
     "db:migrate": "pnpm --filter @lping/db db:migrate",
     "aufzeichnen": "bash scripts/track-forever.sh",
-    "sichern": "bash scripts/backup.sh sichern"
+    "sichern": "bash scripts/backup.sh sichern",
+    "pruefen": "pnpm --filter @lping/bot exec tsx src/main.ts track --check"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

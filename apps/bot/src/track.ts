@@ -1,4 +1,10 @@
-import type { PoolMetrics } from "@lping/core";
+import {
+  evaluateTrackHealth,
+  overallHealth,
+  type HealthCheck,
+  type PoolMetrics,
+  type TrackHealthInput,
+} from "@lping/core";
 
 /**
  * Aufzeichnungsdienst für die Strategie-Optimierung (KONZEPT-ML.md, M1).
@@ -137,6 +143,57 @@ export function formatTrackStatus(
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Prüfbericht: beantwortet „läuft die Aufzeichnung wie erwartet?" mit einem
+ * Urteil je Aspekt statt mit Zahlen, die man selbst deuten müsste.
+ */
+export function formatHealthReport(metrics: TrackHealthInput): string {
+  const checks = evaluateTrackHealth(metrics);
+  const overall = overallHealth(checks);
+  const lines: string[] = [];
+
+  const width = Math.max(...checks.map((c) => c.label.length), 20);
+  for (const check of checks) {
+    lines.push(`  ${symbol(check)} ${check.label.padEnd(width)}  ${check.detail}`);
+    if (check.hint !== undefined) lines.push(`      → ${check.hint}`);
+  }
+
+  lines.push("");
+  switch (overall) {
+    case "ok":
+      lines.push("Die Aufzeichnung läuft wie erwartet.");
+      break;
+    case "warn":
+      lines.push(
+        "Die Aufzeichnung läuft, aber mit Einschränkungen (siehe ! oben).",
+        "Sie ist nutzbar — behebe die Punkte, wenn sie bestehen bleiben.",
+      );
+      break;
+    case "fail":
+      lines.push(
+        "Die Aufzeichnung arbeitet NICHT wie erwartet (siehe ✗ oben).",
+        "In diesem Zustand entstehen unbrauchbare oder verzerrte Daten.",
+      );
+      break;
+    default:
+      break;
+  }
+  return lines.join("\n");
+}
+
+function symbol(check: HealthCheck): string {
+  switch (check.status) {
+    case "ok":
+      return "✓";
+    case "warn":
+      return "!";
+    case "fail":
+      return "✗";
+    default:
+      return "·";
+  }
 }
 
 function message(error: unknown): string {

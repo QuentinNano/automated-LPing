@@ -117,6 +117,9 @@ pnpm --filter @lping/bot paper -- --tick-only        # nur bestehende Positionen
 # selbst neu, hält den Mac wach, protokolliert nach logs/track.log:
 pnpm aufzeichnen
 
+# Prüfen, ob die Aufzeichnung wie erwartet arbeitet (Urteil je Aspekt):
+pnpm pruefen
+
 # Einzelne Durchgänge / Statusabfrage:
 pnpm --filter @lping/bot track                       # ein Durchgang
 pnpm --filter @lping/bot track -- --status           # Fortschritt
