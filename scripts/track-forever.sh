@@ -18,7 +18,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-INTERVAL_MIN="${INTERVAL_MIN:-15}"
+INTERVAL_MIN="${INTERVAL_MIN:-5}"
 LOG_DIR="logs"
 LOG_FILE="$LOG_DIR/track.log"
 RESTART_DELAY=30
