@@ -258,7 +258,7 @@ Rebalance- und Exit-Regeln. Beide Presets laufen parallel mit getrennten Kapital
 
 - **Kapital:** eigener Topf, z. B. 30 % des Bot-Kapitals; Positionsgröße 0,5–1 % des Gesamtkapitals, hartes Cap in SOL.
 - **Einstieg:** **einseitig SOL** unterhalb des aktiven Bins (BidAsk-Verteilung, Konzentration nahe am aktiven Bin), Range ~20–40 Bins. Logik: Fees verdienen, sobald der Preis in die Range handelt; Token-Exposure entsteht nur durch echte Fills („DCA in the dip"), kein sofortiger 50/50-Kauf eines Degen-Tokens.
-- **Fee-Claim:** alle 30 min oder ab Schwellwert; geclaimte Token-Fees sofort in SOL swappen (Gewinnsicherung).
+- **Fee-Claim:** alle 30 min oder ab Schwellwert; geclaimte Token-Fees sofort in SOL swappen (Gewinnsicherung, Details: Abschnitt 8.3).
 - **Exit:** Stop-Loss −15 % Positionswert (in SOL), Take-Profit-Ziel, Max-Haltezeit 12–24 h, Notausstieg bei Rug-Signalen (Abschnitt 9).
 - **Kein klassisches Recentering nach oben:** Läuft der Preis über die Range (Position vollständig in SOL + Fees realisiert), wird die Position geschlossen und der Pool neu bewertet — nachjagen ist ein bewusster, separater Entscheid der Engine, kein Automatismus.
 
@@ -292,7 +292,7 @@ X mit Parametern Y").
 
 ---
 
-## 8. Positions-Monitoring & Rebalancing
+## 8. Positions-Monitoring, Fee-Management & Rebalancing
 
 ### 8.1 Monitoring
 
@@ -308,6 +308,56 @@ X mit Parametern Y").
 - **Ablauf:** Fees claimen → `simulateRebalancePosition()` → wenn ok: `rebalancePosition()` (nativer SDK-Pfad); Fallback klassisch: remove → swap auf Zielverhältnis → re-add. Danach neue Range um aktiven Bin.
 - **Richtungs-Asymmetrie:** Rebalance nach unten (Preis fällt) ist zugleich ein Stop-Loss-Check — bei Abwärts-Rebalance wird zuerst die Exit-Logik (Abschnitt 9) ausgewertet; nie „in den fallenden Preis" nachzentrieren, wenn SL-Nähe besteht.
 - **Degen-Positionen rebalancen nicht** — sie werden geschlossen und ggf. neu eröffnet (einfacher, weniger Fehlerpfade, klare PnL-Attribution).
+
+### 8.3 Fee-Claiming & Konvertierung (Token-Fees → SOL)
+
+**Mechanik-Grundlage:** DLMM erhebt die Swap-Gebühr auf den **Input-Token** jedes Trades.
+In einem X/SOL-Pool fallen Fees daher immer gemischt an: Käufe (SOL→Token) zahlen Fees in
+SOL, Verkäufe (Token→SOL) in Token. Eine einseitige SOL-Bid-Position (Degen-Preset) wird
+gefüllt, während Verkäufer in sie hineinhandeln — sie verdient also überwiegend
+**Token-Fees**. Fee-Konvertierung ist damit integraler Teil der Gewinnsicherung, kein
+Nebenaspekt.
+
+**Warum keine Beschränkung auf „Pools mit nur-SOL-Fees":** Einen solchen Modus gibt es
+bei DLMM nicht — die Fee-Währung folgt der Handelsrichtung, nicht der Pool-Konfiguration.
+Faktisch wäre die Beschränkung nur erreichbar über reine Ask-Seiten-Positionen (Token
+oberhalb des Preises platzieren, Käufer zahlen SOL-Fees); das erfordert aber den
+vorherigen Kauf des Tokens = *mehr* Inventarrisiko, nicht weniger. Quote-only-Fees
+existieren als creator-seitige Pool-Option (`collect fee mode: OnlyB`) nur bei
+**DAMM v2** — solche Pools können in einer späteren Ausbaustufe als eigene Kategorie
+evaluiert werden (siehe Nicht-Ziele v1). Empfehlung: DLMM-Universum nicht künstlich
+einschränken, sondern Token-Fees systematisch ernten und konvertieren:
+
+**Claim-Politik**
+
+- Trigger: Preset-Intervall (Degen 30 min, Multiday 4–6 h) **oder** Wert-Schwelle:
+  unclaimed Fees ≥ max(`minClaimValueSOL`, `claimCostFactor` × geschätzte Tx-Kosten).
+- Pflicht-Claims: vor jedem Rebalance, vor jedem Close, im Notausstieg.
+- Batching: ein Scheduler-Lauf claimt alle fälligen Positionen (`claimAllSwapFee`),
+  anschließend werden Konvertierungen **pro Token über alle Positionen aggregiert**
+  → Fixkosten (Priority Fees) amortisieren sich.
+- Farming-/LM-Rewards (falls der Pool Rewards in Dritt-Token zahlt): gleiche Pipeline
+  via `claimAllRewards`; Reward-Token werden wie Fee-Token behandelt.
+
+**Konvertierungs-Politik (via Jupiter)**
+
+- **Degen: 100 % der Token-Fees sofort nach Claim → SOL.** Slippage-Cap 3 %,
+  Preis-Impact-Cap; wenn nicht ausführbar → als Dust vormerken, mit Backoff erneut
+  versuchen, spätestens beim Exit mitverkaufen.
+- **Multiday:** `convertFeesToSol`-Quote (Default 50 %) → SOL; Rest optional
+  **Compounding** (Wiederanlage via `addLiquidityByStrategy`), aber nur wenn die
+  Position gesund ist (Score über Schwelle, Time-in-Range ok) und der Betrag
+  ≥ `compound.minSOL` — sonst ebenfalls konvertieren.
+- **Dust-Schwelle:** Swaps erst ab `dustThresholdSOL` (Default 0,02 SOL-Gegenwert);
+  kleinere Beträge sammeln sich in einem Dust-Ledger und laufen beim nächsten
+  Claim/Exit mit — verhindert, dass Gas den Ertrag frisst.
+- MEV-Schutz: harte Slippage-Caps, optional Jito-Bundle.
+
+**Risiko-Sicht:** Unclaimte bzw. unkonvertierte Token-Fees sind offenes Token-Exposure.
+Im Rug-Fall sind bereits konvertierte SOL-Fees gesichert, Token-Fees folgen dem Token
+gegen null — daraus leitet sich die kurze Degen-Claim-Kadenz ab. Buchhaltung: Fees
+werden zum Claim-Zeitpunkt in SOL bewertet, Konvertierungskosten (Impact/Slippage)
+separat erfasst; das Dashboard zeigt Brutto-Fee-Ertrag vs. Netto nach Konvertierung.
 
 ---
 
@@ -451,14 +501,73 @@ Totalverlust tragbar ist.
 (1 / 3), `maxPositions` (5 / 5), `minScore` (65 / 60), `minTvlUsd` (50 k / 150 k),
 `tokenAgeWindow` (1–48 h / ≥ 72 h), `volTvlBounds`, `strategyType` (BidAsk einseitig /
 Curve 50-50), `binRange` (20–40 / ~69), `feeClaimInterval` (30 min / 4 h),
-`convertFeesToSol` (true / 50 %), `stopLossPct` (15 / 25), `takeProfitPct`,
+`convertFeesToSol` (100 % / 50 %), `minClaimValueSOL` (0,01), `claimCostFactor` (10),
+`dustThresholdSOL` (0,02), `compound.enabled` (– / false), `compound.minSOL` (– / 0,1),
+`stopLossPct` (15 / 25), `takeProfitPct`,
 `maxHoldHours` (24 / 336), `rebalance.enabled` (false / true), `rebalance.bufferPct`,
 `rebalance.cooldownMin` (– / 120), `rebalance.maxPerDay` (– / 4), `rebalance.minEvFactor`
 (– / 2), `slippageCapPct` (3 / 1), Notfall-Trigger-Schwellen (Abschnitt 9).
 
 ---
 
-## 15. Offene Entscheidungen & nächste Schritte
+## 15. Kosten & Infrastruktur
+
+Alle Preisangaben sind Richtwerte zum Konzeptzeitpunkt — vor Projektstart aktuelle
+Tarife prüfen. Grundprinzip: **Phase 1 (Paper-Trading) läuft fast vollständig auf
+Free-Tiers**; bezahlte Tiers erst, wenn echtes Kapital arbeitet.
+
+### 15.1 Infrastruktur & monatliche Fixkosten
+
+| Komponente | Zweck | Option | Richtwert/Monat |
+|---|---|---|---|
+| VPS (Docker: Bot + PostgreSQL + UI) | 24/7-Betrieb | Hetzner CPX21–CPX31 (4–8 GB RAM) o. ä. | 9–15 € |
+| Solana-RPC primär (inkl. WebSocket + Priority-Fee-Schätzung) | alle Chain-Reads/Writes | Helius: Free-Tier (Phase 1) → Developer-Tier (live) | 0 → ~45–50 $ |
+| RPC-Fallback | Failover | QuickNode kleiner Plan oder Free-Tier eines Zweitanbieters | 0–15 $ |
+| Meteora DLMM API | Pool-Metriken | öffentlich | 0 |
+| DexScreener API | Markt-Querschnitt, Preis-Checks | öffentlich (Rate-Limits beachten) | 0 |
+| RugCheck API | Token-Risiko-Reports | Free-Tier; Paid nur bei Limit-Problemen | 0 (– ~50 $) |
+| Jupiter Swap API | Quotes & Swaps | Free-Tier; Pro nur bei hohem Durchsatz | 0 (– ~50 $) |
+| Birdeye (optional) | zweite Datenquelle zur Absicherung | Free-Tier; Standard ab ~99 $ | 0 (optional) |
+| Fabriq | Discovery | interner Endpoint, kostenlos; Ausfall-Fallback eingeplant | 0 |
+| Telegram-Alerts | Benachrichtigung | Bot-API | 0 |
+| Monitoring | Uptime/Fehler | Uptime Kuma self-hosted, Sentry/Grafana Free-Tier | 0 |
+| Backups | DB-Dumps + Snapshots | VPS-Snapshots oder S3-kompatibel | 1–5 € |
+| Zugriffsschutz UI | kein öffentliches Interface | Tailscale/WireGuard (empfohlen) statt Domain+TLS | 0 |
+| Hardware-Wallet (Cold-Storage) | Gewinn-Sweep-Ziel | Ledger/Trezor, **einmalig** | 60–150 € einmalig |
+
+**Summen:** Phase 1 (Paper): **~10–20 €/Monat**. Live-Betrieb empfohlen (Phase 2+):
+**~60–130 €/Monat** (VPS + Helius Developer + Fallback + Backups; Birdeye/Paid-Tiers
+nur bei Bedarf).
+
+### 15.2 Variable On-Chain-Kosten
+
+| Kostenart | Größenordnung | Eigenschaft |
+|---|---|---|
+| Position-Rent (Positionskonto) | ~0,057 SOL pro Position | **erstattet beim Schließen** → gebundenes Kapital, kein Aufwand (solange Positionen sauber geschlossen werden) |
+| Bin-Array-Initialisierung | ~0,07–0,08 SOL je neuem Bin-Array | **nicht erstattet**; fällt nur an, wenn der Preisbereich im Pool noch nie Liquidität hatte — in Trending-Pools meist schon vorhanden. Execution prüft den Bedarf vor Entry und rechnet ihn in den EV-Check ein |
+| Basis-Tx-Fee | 0,000005 SOL/Signatur | vernachlässigbar |
+| Priority Fees | ~0,0001–0,005 SOL pro Tx (congestion-abhängig, Cap per Parameter) | Positions-Lebenszyklus ≈ 8–15 Txs (Open, Claims, Rebalances, Close, Swaps) → ~0,005–0,05 SOL |
+| Jito-Tip (optional) | ~0,0001–0,001 SOL pro Bundle | nur für sandwich-gefährdete Swaps |
+| Swap-Kosten (Entry/Exit/Fee-Konvertierung) | Preis-Impact + Slippage ~0,3–2 % des Swap-Betrags bei Degen-Token | größter variabler Posten; bei kleinen Fee-Konvertierungen absolut gering, bei Exits relevant |
+
+**Faustregel fürs EV-Modell:** Betriebskosten ~0,01–0,05 SOL pro Degen-Position zzgl.
+Swap-Impact. Das Dashboard rechnet PnL grundsätzlich **netto** nach diesen Kosten; eine
+Position gilt erst als profitabel, wenn sie ihre eigenen Kosten verdient hat.
+
+### 15.3 Betriebskapital
+
+- **Hot-Wallet:** LP-Einsatzkapital (Startgröße frei, z. B. 20–50 SOL) + Puffer:
+  `minSolReserve` (0,5 SOL) für Gas/Swaps **plus** Rent-Bindung ~0,06 SOL je offener
+  Position (bei 10 Positionen ≈ 0,6 SOL gebunden, kommt beim Schließen zurück).
+- **Cold-Wallet (Hardware):** Ziel des automatischen Gewinn-Sweeps; hält nie Keys auf
+  dem Server.
+- **Dimensionierung:** Kapital so wählen, dass die monatlichen Fixkosten < 10 % des
+  realistisch erwarteten Monatsertrags bleiben — sonst Paper-Phase verlängern und auf
+  Free-Tiers bleiben.
+
+---
+
+## 16. Offene Entscheidungen & nächste Schritte
 
 **Zu klären (blockiert Phase 1 nicht):**
 
