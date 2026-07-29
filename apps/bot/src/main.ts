@@ -324,7 +324,7 @@ async function cmdTrack(args: string[]): Promise<number> {
   if (args.includes("--check")) {
     console.log("Prüfe die Aufzeichnung…\n");
     try {
-      const metrics = await store.healthMetrics(new Date());
+      const metrics = await store.healthMetrics(new Date(), intervalMin > 0 ? Math.min(15, intervalMin) : 15);
       console.log(formatHealthReport(metrics));
       console.log("\n" + formatTrackStatus(await store.stats()));
 
@@ -376,6 +376,11 @@ async function cmdTrack(args: string[]): Promise<number> {
     log: () => {},
   };
 
+  // Messraster je Pool: folgt dem Zyklus-Intervall, aber nie grober als 15 min.
+  // Wer den Zyklus verkürzt, will feiner auflösen — sonst liefen die zusätzlichen
+  // Durchgänge ins Leere.
+  const denseIntervalMin = intervalMin > 0 ? Math.min(15, intervalMin) : 15;
+
   let cycle = 0;
   const runCycle = async (): Promise<void> => {
     console.log(`\n=== Aufzeichnung ${new Date().toISOString()} ===`);
@@ -397,7 +402,7 @@ async function cmdTrack(args: string[]): Promise<number> {
     cycle++;
 
     // Verfolgung: Messpunkte der bekannten Pools schreiben.
-    const result = await runTrackCycle(deps, { limit });
+    const result = await runTrackCycle(deps, { limit, denseIntervalMin });
     for (const note of result.notes) console.log(`  ! ${note}`);
     console.log("\n" + formatTrackStatus(await store.stats()));
   };

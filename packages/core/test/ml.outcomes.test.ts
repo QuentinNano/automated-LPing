@@ -116,3 +116,24 @@ describe("trackingIntervalSec", () => {
     expect(trackingIntervalSec(120)).toBe(60 * 60);
   });
 });
+
+describe("trackingIntervalSec mit Zyklus-Intervall", () => {
+  it("folgt einem verkürzten Zyklus-Intervall in der Frühphase", () => {
+    // Wer alle 5 Minuten läuft, will auch alle 5 Minuten messen — sonst
+    // liefen zwei von drei Durchgängen ins Leere.
+    expect(trackingIntervalSec(1, 5)).toBe(5 * 60);
+    expect(trackingIntervalSec(47, 5)).toBe(5 * 60);
+  });
+
+  it("wird nach 48 Stunden gröber, aber nie feiner als die Frühphase", () => {
+    expect(trackingIntervalSec(72, 15)).toBe(60 * 60);
+    // Bei sehr dichtem Zyklus bleibt die Spätphase mindestens stündlich.
+    expect(trackingIntervalSec(72, 5)).toBe(60 * 60);
+    // Ein sehr grobes Wunschraster gewinnt auch spät.
+    expect(trackingIntervalSec(72, 120)).toBe(120 * 60);
+  });
+
+  it("verhindert ein unsinnig kleines Raster", () => {
+    expect(trackingIntervalSec(1, 0)).toBe(60);
+  });
+});
