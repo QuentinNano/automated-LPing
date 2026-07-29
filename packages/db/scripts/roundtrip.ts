@@ -90,7 +90,9 @@ async function main(): Promise<void> {
       { global: { profitSweepThresholdSol: 4 } },
       { actor: "db:check", reason: "roundtrip" },
     );
-    assert(service.version === startVersion + 1, "Update erzeugt neue Version");
+    // Versionsnummern sind fortlaufende Kennungen, keine lückenlose Folge:
+    // gelöschte Versionen (etwa die dieses Selbsttests) hinterlassen Lücken.
+    assert(service.version > startVersion, "Update erzeugt eine neue, höhere Version");
     assert(
       service.config.global.profitSweepThresholdSol === 4,
       "Patch angekommen (profitSweepThresholdSol=4)",
@@ -205,10 +207,27 @@ async function main(): Promise<void> {
       "Noch nicht verstrichener Horizont bleibt offen",
     );
 
-    const dataset = await track.exportDataset(24);
+    const dataset = await track.exportDataset(24, { minCoverageRatio: 0.1 });
     assert(
       dataset.some((row) => row.features["bin_step"] === 100),
       "Datensatz-Export liefert Merkmale samt Label",
+    );
+    assert(
+      dataset.every((row) => row.outcome.observations > 0 && row.outcome.coveredHours > 0),
+      "Labels tragen ihre Qualitätsangaben mit",
+    );
+
+    // Der Verlauf deckt 26 von 168 Stunden ab: Für den 7-Tage-Horizont ist das
+    // zu wenig, und genau das muss der Export erkennen — sonst trainiert man
+    // später auf Labels, die eine Aufzeichnungslücke sind.
+    const strict = await track.exportDataset(24, { minCoverageRatio: 0.95 });
+    assert(strict.length <= dataset.length, "Strengere Abdeckungsforderung filtert stärker");
+
+    const quality = await track.datasetQuality([1, 24, 168]);
+    const weekly = quality.find((q) => q.horizonHours === 168);
+    assert(
+      weekly !== undefined && weekly.usable === 0,
+      "Lückenhaft belegte Horizonte gelten als unbrauchbar",
     );
 
     const stats = await track.stats();

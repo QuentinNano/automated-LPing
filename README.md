@@ -113,9 +113,13 @@ pnpm --filter @lping/bot paper -- --interval 15      # dauerhaft, alle 15 min
 pnpm --filter @lping/bot paper -- --tick-only        # nur bestehende Positionen
 
 # Datenaufzeichnung für die spätere Strategie-Optimierung (KONZEPT-ML.md).
-# Muss möglichst lückenlos laufen — am besten dauerhaft:
+# Empfohlen: startet nach Abstürzen von selbst neu, hält den Mac wach,
+# protokolliert nach logs/track.log:
+pnpm aufzeichnen
+
+# Einzelne Durchgänge / Statusabfrage:
 pnpm --filter @lping/bot track -- --interval 15
-pnpm --filter @lping/bot track -- --status           # Fortschritt anzeigen
+pnpm --filter @lping/bot track -- --status
 
 # Oberfläche (http://localhost:3000)
 pnpm --filter @lping/web dev

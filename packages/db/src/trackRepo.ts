@@ -27,6 +27,24 @@ export interface DuePool {
   lastTrackedAt: Date | null;
 }
 
+/** Eine Zeile des Trainingsdatensatzes: Merkmale + Label eines Horizonts. */
+export interface DatasetRow {
+  features: FeatureVector;
+  preset: string;
+  verdict: string;
+  capturedAt: Date;
+  featureVersion: number;
+  outcome: {
+    priceChangePct: number | null;
+    tvlChangePct: number | null;
+    feeYieldPct: number | null;
+    maxDrawdownPct: number | null;
+    rugged: boolean;
+    observations: number;
+    coveredHours: number;
+  };
+}
+
 /**
  * Aufzeichnung für die Strategie-Optimierung (KONZEPT-ML.md Abschnitt 3).
  *
@@ -237,24 +255,40 @@ export class TrackRepo {
     };
   }
 
-  /** Trainingsdatensatz: Merkmale samt Labels eines Horizonts. */
-  async exportDataset(horizonHours: number): Promise<
-    { features: FeatureVector; preset: string; verdict: string; capturedAt: Date; outcome: {
-      priceChangePct: number | null;
-      tvlChangePct: number | null;
-      feeYieldPct: number | null;
-      maxDrawdownPct: number | null;
-      rugged: boolean;
-    } }[]
-  > {
+  /**
+   * Trainingsdatensatz: Merkmale samt Labels eines Horizonts.
+   *
+   * Die Qualitätsangaben (`observations`, `coveredHours`) werden mitgegeben,
+   * damit lückenhaft belegte Labels vor dem Training aussortiert werden können.
+   * Ein 24-Stunden-Label, das nur drei Stunden abdeckt, ist kein 24-Stunden-Label
+   * — bei zeitweise unterbrochener Aufzeichnung ist das der Regelfall.
+   *
+   * `minCoverageRatio` verlangt einen Mindestanteil des Horizonts (Default 0,7).
+   */
+  async exportDataset(
+    horizonHours: number,
+    options: { minCoverageRatio?: number; minObservations?: number } = {},
+  ): Promise<DatasetRow[]> {
+    const minCoverage = (options.minCoverageRatio ?? 0.7) * horizonHours;
+    const minObservations = options.minObservations ?? 2;
+
     const rows = await this.prisma.candidateFeature.findMany({
-      where: { outcomes: { some: { horizonHours } } },
+      where: {
+        outcomes: {
+          some: {
+            horizonHours,
+            coveredHours: { gte: minCoverage },
+            observations: { gte: minObservations },
+          },
+        },
+      },
       orderBy: { capturedAt: "asc" },
       select: {
         features: true,
         preset: true,
         verdict: true,
         capturedAt: true,
+        featureVersion: true,
         outcomes: { where: { horizonHours }, take: 1 },
       },
     });
@@ -268,6 +302,7 @@ export class TrackRepo {
           preset: row.preset,
           verdict: row.verdict,
           capturedAt: row.capturedAt,
+          featureVersion: row.featureVersion,
           outcome: {
             priceChangePct: outcome.priceChangePct === null ? null : Number(outcome.priceChangePct),
             tvlChangePct: outcome.tvlChangePct === null ? null : Number(outcome.tvlChangePct),
@@ -275,9 +310,36 @@ export class TrackRepo {
             maxDrawdownPct:
               outcome.maxDrawdownPct === null ? null : Number(outcome.maxDrawdownPct),
             rugged: outcome.rugged,
+            observations: outcome.observations,
+            coveredHours: Number(outcome.coveredHours),
           },
         },
       ];
     });
+  }
+
+  /**
+   * Wie viele Labels je Horizont sind vollständig genug zum Trainieren?
+   * Macht sichtbar, was Aufzeichnungslücken tatsächlich gekostet haben.
+   */
+  async datasetQuality(
+    horizons: readonly number[],
+    minCoverageRatio = 0.7,
+  ): Promise<{ horizonHours: number; total: number; usable: number }[]> {
+    const result: { horizonHours: number; total: number; usable: number }[] = [];
+    for (const horizonHours of horizons) {
+      const [total, usable] = await Promise.all([
+        this.prisma.candidateOutcome.count({ where: { horizonHours } }),
+        this.prisma.candidateOutcome.count({
+          where: {
+            horizonHours,
+            coveredHours: { gte: minCoverageRatio * horizonHours },
+            observations: { gte: 2 },
+          },
+        }),
+      ]);
+      result.push({ horizonHours, total, usable });
+    }
+    return result;
   }
 }

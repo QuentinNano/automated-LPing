@@ -418,6 +418,22 @@ Tagesstunden kennt, lernt eine Marktrealität, die es so nicht gibt.
 Das `track --status`-Kommando meldet erkannte Lücken ausdrücklich, damit ein
 verzerrter Datensatz nicht unbemerkt zur Grundlage einer Optimierung wird.
 
+### Unterbrechungen sind unkritisch für den Bestand
+
+Jeder Messpunkt wird sofort als eigene Transaktion in die Datenbank geschrieben —
+nichts wird im Arbeitsspeicher gepuffert. Ein Absturz, ein Neustart oder ein
+zugeklappter Deckel kosten daher nur die Zeit der Unterbrechung, nie bereits
+gesammelte Daten. Nach dem Neustart sind alle verfolgten Pools sofort wieder
+fällig, und die Aufzeichnung setzt fort.
+
+Was eine Lücke jedoch beschädigt, sind die **Labels**, deren Horizont in sie
+fällt. Deshalb führt jedes Label seine Abdeckung mit (`observations`,
+`coveredHours`), und der Datensatz-Export verlangt standardmäßig 70 % Abdeckung
+des Horizonts. Ein 24-Stunden-Label, das nur drei Stunden abdeckt, wird
+aussortiert statt stillschweigend mittrainiert. `datasetQuality()` weist je
+Horizont aus, wie viele Labels verwertbar sind — die ehrliche Rechnung dessen,
+was Unterbrechungen tatsächlich gekostet haben.
+
 ---
 
 ## 12. Ehrliche Erwartungshaltung
