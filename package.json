@@ -19,13 +19,5 @@
     "@types/node": "^22.10.0",
     "typescript": "^5.6.3",
     "vitest": "^3.2.4"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@prisma/client",
-      "@prisma/engines",
-      "prisma",
-      "esbuild"
-    ]
   }
 }

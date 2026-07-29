@@ -10,6 +10,7 @@
   "dependencies": {
     "@lping/core": "workspace:*",
     "@lping/db": "workspace:*",
+    "dotenv": "^16.4.7",
     "next": "^15.5.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
