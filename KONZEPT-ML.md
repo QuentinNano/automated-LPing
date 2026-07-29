@@ -388,7 +388,7 @@ kurzfristig als ertragsmindernd erkennen würde.
 
 | Phase | Inhalt | Aufwand | Kalenderzeit |
 |---|---|---|---|
-| **M1 — Aufzeichnung** | `pool_tracks`, `candidate_features`, `candidate_outcomes`; Tracking-Dienst; Jupiter-Token-API-Adapter (Organic Score); Datenqualitäts-Prüfungen | überschaubar | **sofort starten** |
+| **M1 — Aufzeichnung** ✅ | `tracked_pools`, `candidate_features`, `candidate_outcomes`; `track`-Kommando; Jupiter-Token-API-Adapter (Organic Score); Fortschritts- und Lückenüberwachung | umgesetzt | **läuft** |
 | **M2 — Replay** | Tick-Reader, Einstiege an beliebigen Zeitpunkten, Determinismus, Gleichheitstest Replay ↔ Live | mittel | parallel zu M1 |
 | **M3 — Sensitivität** | Einzelparameter-Analyse, Auswahl der 5–10 relevanten, Bericht | gering | nach ~1 Woche Daten |
 | **M4 — Suche** | Zufallssuche + Verfeinerung, Zielfunktion, Plateau-Bewertung | mittel | nach M3 |
@@ -400,6 +400,23 @@ kurzfristig als ertragsmindernd erkennen würde.
 Aufzeichnung starten — sie ist die einzige Komponente, deren Wert von der
 verstrichenen Zeit abhängt. M2 lässt sich parallel bauen, während die Daten
 auflaufen. Erst danach lohnt der Optimierer.
+
+### Betriebsanforderung: lückenlose Laufzeit
+
+Die Aufzeichnung braucht einen **dauerhaft laufenden Rechner**. Ein zugeklappter
+Laptop schläft und zeichnet nichts auf — und die Lücken sind nicht nur fehlende
+Daten, sondern **systematisch verzerrte**: Es fehlen genau die Nachtstunden, in
+denen Memecoin-Märkte oft am stärksten schwanken. Ein Modell, das nur
+Tagesstunden kennt, lernt eine Marktrealität, die es so nicht gibt.
+
+| Betriebsart | Eignung | Anmerkung |
+|---|---|---|
+| **Kleiner VPS** (~9–15 €/Monat) | **empfohlen** | Läuft durch, unabhängig vom Laptop; entspricht der Infrastrukturplanung in KONZEPT.md Abschnitt 15 |
+| Laptop dauerhaft wach (`caffeinate`) | Notlösung | Nur am Netzteil und mit offenem Deckel; jeder Neustart erzeugt eine Lücke |
+| Laptop im normalen Alltagsbetrieb | **ungeeignet** | Erzeugt genau die systematischen Lücken, die den Datensatz entwerten |
+
+Das `track --status`-Kommando meldet erkannte Lücken ausdrücklich, damit ein
+verzerrter Datensatz nicht unbemerkt zur Grundlage einer Optimierung wird.
 
 ---
 

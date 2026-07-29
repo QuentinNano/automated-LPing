@@ -99,6 +99,27 @@ export interface SellabilityCheck {
   checkedAt: Date;
 }
 
+/**
+ * Token-Kennzahlen aus der Jupiter Token API v2. `null` heißt durchgängig
+ * "nicht bekannt", nie "unbedenklich".
+ */
+export interface TokenOrganics {
+  mint: string;
+  /** 0–100; höher = organischere Aktivität. */
+  organicScore: number | null;
+  organicScoreLabel: "high" | "medium" | "low" | null;
+  holderCount: number | null;
+  isVerified: boolean | null;
+  mintAuthorityDisabled: boolean | null;
+  freezeAuthorityDisabled: boolean | null;
+  topHoldersPct: number | null;
+  fdvUsd: number | null;
+  liquidityUsd: number | null;
+  tags: string[];
+  fetchedAt: Date;
+  source: "jupiter-tokens";
+}
+
 export interface AdapterHealth {
   adapter: string;
   ok: boolean;

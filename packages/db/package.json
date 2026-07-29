@@ -7,9 +7,10 @@
   "types": "./src/index.ts",
   "scripts": {
     "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate deploy",
-    "db:migrate:dev": "prisma migrate dev",
-    "db:studio": "prisma studio",
+    "//": "Das Prisma-CLI sucht die .env im Paketordner; sie liegt aber im Projektwurzelverzeichnis.",
+    "db:migrate": "dotenv -e ../../.env -- prisma migrate deploy",
+    "db:migrate:dev": "dotenv -e ../../.env -- prisma migrate dev",
+    "db:studio": "dotenv -e ../../.env -- prisma studio",
     "db:check": "tsx scripts/roundtrip.ts"
   },
   "dependencies": {
@@ -18,6 +19,7 @@
     "dotenv": "^16.4.7"
   },
   "devDependencies": {
+    "dotenv-cli": "^8.0.0",
     "prisma": "^6.16.2",
     "tsx": "^4.19.2"
   }

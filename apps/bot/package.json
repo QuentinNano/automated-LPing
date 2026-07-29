@@ -10,6 +10,7 @@
     "scan": "tsx src/main.ts scan",
     "paper": "tsx src/main.ts paper",
     "api:check": "tsx src/main.ts api:check",
+    "track": "tsx src/main.ts track",
     "fabriq:check": "tsx src/main.ts fabriq:check"
   },
   "dependencies": {
