@@ -3,8 +3,13 @@ export type { AdapterErrorKind, AdapterErrorMeta, FetchJsonOptions, FetchLike } 
 
 export { WSOL_MINT, USDC_MINT, LAMPORTS_PER_SOL } from "./constants";
 
-export { MeteoraAdapter, normalizeMeteoraPair } from "./meteora";
-export type { MeteoraAdapterOptions, MeteoraPairsPage, MeteoraSourceId } from "./meteora";
+export { MeteoraAdapter, normalizeMeteoraPair, MAX_POOL_PAGE_SIZE } from "./meteora";
+export type {
+  MeteoraAdapterOptions,
+  MeteoraListQuery,
+  MeteoraPairsPage,
+  MeteoraSourceId,
+} from "./meteora";
 
 export { DexScreenerAdapter, normalizeDexPair } from "./dexscreener";
 export type { DexScreenerAdapterOptions, DexPairRaw } from "./dexscreener";

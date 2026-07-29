@@ -16,6 +16,25 @@ export interface ClassifyResult {
   reasons: string[];
 }
 
+/**
+ * Nachlass, den der Vor-Filter gegenüber den Hard Filters gewährt. Wird auch
+ * für den serverseitigen Discovery-Filter benutzt — beide müssen denselben Wert
+ * verwenden, sonst siebt der Server Kandidaten aus, die das Screening noch
+ * sehen wollte.
+ */
+export const DISCOVERY_THRESHOLD_FACTOR = 0.5;
+
+/**
+ * Kleinster TVL, den irgendein aktives Preset noch betrachten würde. Grundlage
+ * des serverseitigen `filter_by` — großzügig genug, dass kein Preset dadurch
+ * Kandidaten verliert.
+ */
+export function minTvlAcrossPresets(presets: Record<string, PresetConfig>): number {
+  const active = Object.values(presets).filter((preset) => preset.enabled);
+  if (active.length === 0) return 0;
+  return Math.min(...active.map((preset) => preset.minTvlUsd * DISCOVERY_THRESHOLD_FACTOR));
+}
+
 export function classifyForPreset(pool: PoolMetrics, preset: PresetConfig): ClassifyResult {
   const reasons: string[] = [];
 
@@ -30,7 +49,7 @@ export function classifyForPreset(pool: PoolMetrics, preset: PresetConfig): Clas
     reasons.push(`baseFee ${baseFee}% < ${preset.discovery.minBaseFeePct}%`);
   }
 
-  const minTvl = preset.minTvlUsd * 0.5;
+  const minTvl = preset.minTvlUsd * DISCOVERY_THRESHOLD_FACTOR;
   if (pool.tvlUsd === undefined || pool.tvlUsd < minTvl) {
     reasons.push(`TVL ${pool.tvlUsd?.toFixed(0) ?? "?"} < ${minTvl}`);
   }
@@ -39,7 +58,7 @@ export function classifyForPreset(pool: PoolMetrics, preset: PresetConfig): Clas
     pool.tvlUsd !== undefined && pool.tvlUsd > 0 && pool.volume24hUsd !== undefined
       ? pool.volume24hUsd / pool.tvlUsd
       : null;
-  const minVolTvl = preset.volTvlBounds.min * 0.5;
+  const minVolTvl = preset.volTvlBounds.min * DISCOVERY_THRESHOLD_FACTOR;
   if (volTvl === null || volTvl < minVolTvl) {
     reasons.push(`vol/TVL ${volTvl?.toFixed(2) ?? "?"} < ${minVolTvl}`);
   }

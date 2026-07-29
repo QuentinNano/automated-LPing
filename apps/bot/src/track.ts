@@ -38,6 +38,8 @@ export interface TrackStore {
     firstCaptureAt: Date | null;
     recordingDays: number;
   }>;
+  /** Optional: Merkmalsschemata im Datensatz (nach Schema-Erweiterungen). */
+  featureVersions?(): Promise<FeatureVersionRow[]>;
 }
 
 export interface TrackDeps {
@@ -164,6 +166,43 @@ export function formatTrackStatus(
     );
   }
 
+  return lines.join("\n");
+}
+
+export interface FeatureVersionRow {
+  featureVersion: number;
+  count: number;
+  firstAt: Date;
+  lastAt: Date;
+}
+
+/**
+ * Weist aus, ob der Datensatz mehrere Merkmalsschemata enthält.
+ *
+ * Nach einer Schema-Erweiterung ist das der Normalfall und unproblematisch —
+ * aber nur, solange man es weiß: Zeilen verschiedener Versionen haben
+ * unterschiedliche Spalten und dürfen nicht gemeinsam trainiert werden.
+ */
+export function formatFeatureVersions(rows: FeatureVersionRow[]): string {
+  if (rows.length === 0) return "Merkmalsschema: noch keine Aufzeichnungen.";
+  if (rows.length === 1) {
+    const only = rows[0]!;
+    return `Merkmalsschema: v${only.featureVersion} (${only.count} Kandidaten).`;
+  }
+
+  const lines = ["Merkmalsschema: mehrere Versionen im Datensatz —"];
+  for (const row of rows) {
+    lines.push(
+      `  v${row.featureVersion}: ${row.count} Kandidaten ` +
+        `(${row.firstAt.toISOString().slice(0, 10)} bis ${row.lastAt.toISOString().slice(0, 10)})`,
+    );
+  }
+  const newest = rows[rows.length - 1]!;
+  lines.push(
+    `  Für die Optimierung eine Version wählen (jüngste: v${newest.featureVersion}).`,
+    "  Ältere Zeilen haben weniger Spalten; gemeinsam trainiert sähe das nach",
+    "  fehlenden Werten aus statt nach zwei Schemata.",
+  );
   return lines.join("\n");
 }
 

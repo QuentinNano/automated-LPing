@@ -338,14 +338,35 @@ gefüllt, während Verkäufer in sie hineinhandeln — sie verdient also überwi
 **Token-Fees**. Fee-Konvertierung ist damit integraler Teil der Gewinnsicherung, kein
 Nebenaspekt.
 
-**Warum keine Beschränkung auf „Pools mit nur-SOL-Fees":** Einen solchen Modus gibt es
-bei DLMM nicht — die Fee-Währung folgt der Handelsrichtung, nicht der Pool-Konfiguration.
+> **Korrektur (Juli 2026, nach Prüfung der Meteora-Doku):** Der folgende Absatz
+> war sachlich falsch und ist überholt. **DLMM hat einen Collect-Fee-Mode.**
+> `pool_config.collect_fee_mode` ist `0` = `InputOnly` (Gebühr im Input-Token,
+> folgt der Handelsrichtung) oder `1` = `OnlyY` (Gebühr **immer** in Token Y,
+> auch wenn Y der Output ist). Der Modus steht in jeder `/pools`-Antwort und ist
+> im SDK als `CollectFeeMode` exportiert.
+>
+> Folge: In einem X/SOL-Pool, in dem **SOL Token Y ist**, fallen bei `OnlyY`
+> sämtliche Gebühren in SOL an — das Token-Exposure geclaimter Gebühren
+> entfällt, und damit der größte Einzelrisikoposten des Degen-Presets. Der Modus
+> ist deshalb ein Discovery-Filter und ein Merkmal erster Güte, nicht eine
+> Fußnote.
+>
+> Wichtig ist die Seitenprüfung: `OnlyY` allein sagt nichts. Steht SOL auf der
+> X-Seite, kehrt derselbe Modus den Vorteil ins Gegenteil, weil dann alle
+> Gebühren im Memecoin anfallen. Maßgeblich ist `collect_fee_mode == 1 && mintY
+> == WSOL` (implementiert als `feeCurrencyOf()` in `packages/core`).
+>
+> Die unten beschriebene Claim- und Konvertierungspolitik bleibt richtig und
+> nötig — aber nur für `InputOnly`-Pools und für `OnlyY`-Pools mit SOL auf der
+> X-Seite. Für die verbleibenden Pools ist sie gegenstandslos.
+
+**Warum keine Beschränkung auf „Pools mit nur-SOL-Fees":** ~~Einen solchen Modus gibt es
+bei DLMM nicht — die Fee-Währung folgt der Handelsrichtung, nicht der Pool-Konfiguration.~~
 Faktisch wäre die Beschränkung nur erreichbar über reine Ask-Seiten-Positionen (Token
 oberhalb des Preises platzieren, Käufer zahlen SOL-Fees); das erfordert aber den
-vorherigen Kauf des Tokens = *mehr* Inventarrisiko, nicht weniger. Quote-only-Fees
+vorherigen Kauf des Tokens = *mehr* Inventarrisiko, nicht weniger. ~~Quote-only-Fees
 existieren als creator-seitige Pool-Option (`collect fee mode: OnlyB`) nur bei
-**DAMM v2** — solche Pools können in einer späteren Ausbaustufe als eigene Kategorie
-evaluiert werden (siehe Nicht-Ziele v1). Empfehlung: DLMM-Universum nicht künstlich
+**DAMM v2**.~~ Empfehlung: DLMM-Universum nicht künstlich
 einschränken, sondern Token-Fees systematisch ernten und konvertieren:
 
 **Claim-Politik**

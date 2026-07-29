@@ -1,4 +1,5 @@
 import { MeteoraAdapter, WSOL_MINT, DexScreenerAdapter, normalizeMeteoraPair } from "@lping/adapters";
+import { METRIC_WINDOWS, type WindowedMetric } from "@lping/core";
 
 /**
  * Prüft die externen Datenquellen und zeigt, was sie tatsächlich liefern.
@@ -132,6 +133,13 @@ function describeFirst(item: unknown): void {
       normalized.volume24hUsd === undefined ? "Volumen" : null,
       normalized.baseFeePct === undefined ? "Gebühr" : null,
       normalized.feeTvl24hPct === undefined ? "Fee/TVL" : null,
+      // Ab hier: Felder, die nicht den Filter, sondern die Aufzeichnung
+      // betreffen. Fallen sie aus, verarmt der Datensatz still — und
+      // aufgezeichnete Zeit lässt sich nicht nachholen.
+      normalized.dynamicFeePct === undefined ? "dynamische Gebühr" : null,
+      normalized.protocolFeePct === undefined ? "Protokollanteil" : null,
+      normalized.collectFeeMode === undefined ? "collect_fee_mode" : null,
+      normalized.poolCreatedAt === undefined ? "Pool-Alter" : null,
     ].filter((x): x is string => x !== null);
 
     console.log(
@@ -139,8 +147,23 @@ function describeFirst(item: unknown): void {
         `, TVL ${fmt(normalized.tvlUsd)}, Vol24h ${fmt(normalized.volume24hUsd)}` +
         `, Gebühr ${fmt(normalized.baseFeePct)}%, Fee/TVL ${fmt(normalized.feeTvl24hPct)}%`,
     );
+    console.log(
+      `        Gebührenstruktur: dynamisch ${fmt(normalized.dynamicFeePct)}%` +
+        `, max ${fmt(normalized.maxFeePct)}%, Protokollanteil ${fmt(normalized.protocolFeePct)}%` +
+        `, Modus ${normalized.collectFeeMode ?? "—"}`,
+    );
+    console.log(`        Zeitfenster Volumen: ${describeWindows(normalized.volumeUsd)}`);
+    console.log(`        Zeitfenster Fee/TVL: ${describeWindows(normalized.feeTvlPct)}`);
+
+    const windowCount = Object.keys(normalized.volumeUsd).length;
+    if (windowCount <= 1) {
+      console.log(
+        "      ! Nur ein Zeitfenster gelesen. Die Trend-Merkmale der Optimierung",
+        "\n        brauchen die kurzen Fenster — Feldnamen im Datensatz unten prüfen.",
+      );
+    }
     if (missing.length > 0) {
-      console.log(`      ! Nicht gelesen: ${missing.join(", ")} — diese Felder fehlen dem Filter.`);
+      console.log(`      ! Nicht gelesen: ${missing.join(", ")}`);
     }
   }
 
@@ -152,6 +175,13 @@ function describeFirst(item: unknown): void {
 
 function fmt(value: number | undefined): string {
   return value === undefined ? "—" : String(Math.round(value * 100) / 100);
+}
+
+/** Zeigt, welche Zeitfenster tatsächlich ankommen — nicht nur ob überhaupt. */
+function describeWindows(metric: WindowedMetric): string {
+  const present = METRIC_WINDOWS.filter((window) => metric[window] !== undefined);
+  if (present.length === 0) return "keine";
+  return present.map((window) => `${window}=${fmt(metric[window])}`).join("  ");
 }
 
 function indent(text: string, prefix: string): string {
