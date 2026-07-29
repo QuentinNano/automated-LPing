@@ -426,6 +426,14 @@ zugeklappter Deckel kosten daher nur die Zeit der Unterbrechung, nie bereits
 gesammelte Daten. Nach dem Neustart sind alle verfolgten Pools sofort wieder
 fällig, und die Aufzeichnung setzt fort.
 
+Die gesammelten Daten sind allerdings **nicht wiederbeschaffbar**: Es gibt keine
+Historie, die man im Nachhinein abrufen könnte — was nicht aufgezeichnet wurde,
+ist dauerhaft weg. Nach einigen Wochen steckt darin der gesamte Wert des
+Vorhabens. `pnpm sichern` legt deshalb eine komprimierte Sicherung an, prüft sie
+auf Vollständigkeit (eine leere Sicherung ist gefährlicher als keine, weil sie
+Sicherheit vortäuscht) und hält die letzten 14 vor. Vor dem Zurückspielen wird
+automatisch der Ist-Zustand gesichert.
+
 Was eine Lücke jedoch beschädigt, sind die **Labels**, deren Horizont in sie
 fällt. Deshalb führt jedes Label seine Abdeckung mit (`observations`,
 `coveredHours`), und der Datensatz-Export verlangt standardmäßig 70 % Abdeckung

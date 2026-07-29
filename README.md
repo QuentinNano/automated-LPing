@@ -121,6 +121,11 @@ pnpm aufzeichnen
 pnpm --filter @lping/bot track -- --interval 15
 pnpm --filter @lping/bot track -- --status
 
+# Datensicherung (die Aufzeichnung ist nicht wiederbeschaffbar!):
+pnpm sichern                                    # Sicherung anlegen
+bash scripts/backup.sh liste                    # vorhandene anzeigen
+bash scripts/backup.sh zurueck backups/DATEI    # einspielen
+
 # Oberfläche (http://localhost:3000)
 pnpm --filter @lping/web dev
 
