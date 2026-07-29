@@ -1,0 +1,206 @@
+// Datenmodell gemäß KONZEPT.md Abschnitt 10.2.
+// Alle Geldwerte in SOL als Decimal; Roh-Token-Beträge als String (Basiseinheiten).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum CandidateSource {
+  FABRIQ_DEGEN
+  FABRIQ_MULTIDAY
+  REPLICATED_DEGEN
+  REPLICATED_MULTIDAY
+}
+
+enum PresetKind {
+  DEGEN
+  MULTIDAY
+}
+
+enum LifecycleState {
+  DISCOVERED
+  REJECTED
+  QUEUED
+  OPENING
+  ACTIVE
+  REBALANCING
+  CLOSING
+  CLOSED
+  FAILED
+}
+
+enum TxKind {
+  OPEN
+  ADD_LIQUIDITY
+  CLAIM
+  REBALANCE
+  REMOVE_LIQUIDITY
+  CLOSE
+  SWAP
+  SWEEP
+}
+
+enum TxStatus {
+  PENDING
+  SENT
+  CONFIRMED
+  FAILED
+  EXPIRED
+}
+
+enum BlacklistKind {
+  MINT
+  DEPLOYER
+  POOL
+}
+
+/// Entdeckte Pools inkl. Filter-Ergebnis; abgelehnte Kandidaten werden für das
+/// Shadow-Tracking (Filter-Kalibrierung) weiterverfolgt.
+model PoolCandidate {
+  id              String          @id @default(cuid())
+  poolAddress     String          @map("pool_address")
+  source          CandidateSource
+  preset          PresetKind
+  status          LifecycleState  @default(DISCOVERED)
+  score           Decimal?        @db.Decimal(6, 2)
+  rawMetrics      Json            @map("raw_metrics")
+  filterResult    Json?           @map("filter_result")
+  rejectionReason String?         @map("rejection_reason")
+  shadowUntil     DateTime?       @map("shadow_until")
+  discoveredAt    DateTime        @default(now()) @map("discovered_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+  positions       Position[]
+
+  @@index([poolAddress])
+  @@index([status, discoveredAt])
+  @@map("pool_candidates")
+}
+
+model Position {
+  id              String         @id @default(cuid())
+  candidateId     String?        @map("candidate_id")
+  candidate       PoolCandidate? @relation(fields: [candidateId], references: [id])
+  poolAddress     String         @map("pool_address")
+  /// On-Chain-Adresse des Positions-Accounts (nach OPENING bekannt).
+  positionPubkey  String?        @unique @map("position_pubkey")
+  preset          PresetKind
+  state           LifecycleState @default(OPENING)
+  strategyType    String         @map("strategy_type")
+  sided           String
+  minBinId        Int?           @map("min_bin_id")
+  maxBinId        Int?           @map("max_bin_id")
+  mintX           String         @map("mint_x")
+  mintY           String         @map("mint_y")
+  depositSol      Decimal        @map("deposit_sol") @db.Decimal(20, 9)
+  currentValueSol Decimal?       @map("current_value_sol") @db.Decimal(20, 9)
+  realizedPnlSol  Decimal        @default(0) @map("realized_pnl_sol") @db.Decimal(20, 9)
+  feesEarnedSol   Decimal        @default(0) @map("fees_earned_sol") @db.Decimal(20, 9)
+  paper           Boolean        @default(true)
+  openedAt        DateTime?      @map("opened_at")
+  closedAt        DateTime?      @map("closed_at")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  events          PositionEvent[]
+  transactions    Transaction[]
+  feeClaims       FeeClaim[]
+
+  @@index([state])
+  @@index([poolAddress])
+  @@map("positions")
+}
+
+/// Audit-Trail: jeder Zustandsübergang mit Auslöser und Kontext.
+model PositionEvent {
+  id         String          @id @default(cuid())
+  positionId String          @map("position_id")
+  position   Position        @relation(fields: [positionId], references: [id])
+  fromState  LifecycleState? @map("from_state")
+  toState    LifecycleState  @map("to_state")
+  trigger    String
+  context    Json?
+  createdAt  DateTime        @default(now()) @map("created_at")
+
+  @@index([positionId, createdAt])
+  @@map("position_events")
+}
+
+model Transaction {
+  id                  String    @id @default(cuid())
+  positionId          String?   @map("position_id")
+  position            Position? @relation(fields: [positionId], references: [id])
+  signature           String?   @unique
+  kind                TxKind
+  status              TxStatus  @default(PENDING)
+  priorityFeeLamports BigInt?   @map("priority_fee_lamports")
+  feeLamports         BigInt?   @map("fee_lamports")
+  slot                BigInt?
+  error               String?
+  payload             Json?
+  createdAt           DateTime  @default(now()) @map("created_at")
+  confirmedAt         DateTime? @map("confirmed_at")
+
+  @@index([positionId])
+  @@index([status])
+  @@map("transactions")
+}
+
+model FeeClaim {
+  id                      String   @id @default(cuid())
+  positionId              String   @map("position_id")
+  position                Position @relation(fields: [positionId], references: [id])
+  claimTransactionId      String?  @map("claim_transaction_id")
+  amountXRaw              String   @map("amount_x_raw")
+  amountYRaw              String   @map("amount_y_raw")
+  valueSolAtClaim         Decimal  @map("value_sol_at_claim") @db.Decimal(20, 9)
+  convertedSol            Decimal? @map("converted_sol") @db.Decimal(20, 9)
+  conversionTransactionId String?  @map("conversion_transaction_id")
+  claimedAt               DateTime @default(now()) @map("claimed_at")
+
+  @@index([positionId])
+  @@map("fee_claims")
+}
+
+/// Zeitreihe für aktive UND geschattete Pools (Scoring, Backtesting, Dashboard).
+model PoolSnapshot {
+  id           String   @id @default(cuid())
+  poolAddress  String   @map("pool_address")
+  ts           DateTime @default(now())
+  tvlUsd       Decimal? @map("tvl_usd") @db.Decimal(20, 2)
+  volume24hUsd Decimal? @map("volume_24h_usd") @db.Decimal(20, 2)
+  fees24hUsd   Decimal? @map("fees_24h_usd") @db.Decimal(20, 2)
+  feeTvl24hPct Decimal? @map("fee_tvl_24h_pct") @db.Decimal(10, 4)
+  priceNative  Decimal? @map("price_native") @db.Decimal(30, 15)
+  binStep      Int?     @map("bin_step")
+  extra        Json?
+
+  @@index([poolAddress, ts])
+  @@map("pool_snapshots")
+}
+
+/// Append-only Konfigurations-Historie (ConfigService-Persistenz).
+model ConfigVersion {
+  version   Int      @id @default(autoincrement())
+  config    Json
+  actor     String
+  reason    String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("config_versions")
+}
+
+model BlacklistEntry {
+  id        String        @id @default(cuid())
+  kind      BlacklistKind
+  address   String
+  reason    String
+  source    String        @default("auto")
+  createdAt DateTime      @default(now()) @map("created_at")
+
+  @@unique([kind, address])
+  @@map("blacklist")
+}

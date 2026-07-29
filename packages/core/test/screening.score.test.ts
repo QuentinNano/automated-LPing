@@ -1,0 +1,63 @@
+import { describe, expect, it } from "vitest";
+import { computeScore } from "@lping/core";
+import { buildInput, buildMarket, loadDefaultConfig } from "./builders";
+
+const config = loadDefaultConfig();
+
+describe("Score-Engine", () => {
+  it("bewertet einen gesunden Degen-Kandidaten hoch (>= 75)", () => {
+    const score = computeScore(buildInput("degen", config));
+    expect(score.total).toBeGreaterThanOrEqual(75);
+    expect(score.total).toBeLessThanOrEqual(100);
+  });
+
+  it("Komponenten summieren zum Total und respektieren ihre Maxima", () => {
+    const score = computeScore(buildInput("degen", config));
+    const sum = score.components.reduce((acc, c) => acc + c.points, 0);
+    expect(score.total).toBeCloseTo(sum, 1);
+    expect(score.components.map((c) => [c.id, c.max])).toEqual([
+      ["fee_yield", 35],
+      ["market_quality", 25],
+      ["safety_margin", 20],
+      ["momentum", 10],
+      ["source_bonus", 10],
+    ]);
+    for (const component of score.components) {
+      expect(component.points).toBeGreaterThanOrEqual(0);
+      expect(component.points).toBeLessThanOrEqual(component.max);
+    }
+  });
+
+  it("ohne Marktdaten fallen Markt-Qualität und Momentum auf 0", () => {
+    const score = computeScore(buildInput("degen", config, { market: null }));
+    const byId = new Map(score.components.map((c) => [c.id, c]));
+    expect(byId.get("market_quality")?.points).toBe(0);
+    expect(byId.get("momentum")?.points).toBe(0);
+  });
+
+  it("Fabriq-bestätigte Kandidaten bekommen den vollen Quellen-Bonus", () => {
+    const replicated = computeScore(buildInput("degen", config));
+    const fabriq = computeScore(buildInput("degen", config, { source: "fabriq_degen" }));
+    expect(fabriq.total - replicated.total).toBeCloseTo(5, 1);
+  });
+
+  it("parabolisches Momentum wird abgewertet statt belohnt", () => {
+    const moderate = computeScore(
+      buildInput("degen", config, { market: buildMarket({ priceChangeH6Pct: 40 }) }),
+    );
+    const parabolic = computeScore(
+      buildInput("degen", config, { market: buildMarket({ priceChangeH6Pct: 200 }) }),
+    );
+    const points = (s: typeof moderate) =>
+      s.components.find((c) => c.id === "momentum")?.points ?? -1;
+    expect(points(moderate)).toBeGreaterThan(points(parabolic));
+    expect(points(parabolic)).toBe(2);
+  });
+
+  it("negatives Momentum gibt 0 Punkte", () => {
+    const score = computeScore(
+      buildInput("degen", config, { market: buildMarket({ priceChangeH6Pct: -20 }) }),
+    );
+    expect(score.components.find((c) => c.id === "momentum")?.points).toBe(0);
+  });
+});
