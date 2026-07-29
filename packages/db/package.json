@@ -6,9 +6,12 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
+    "//1": "Nach jedem Install neu erzeugen, damit der Zugriffscode nie hinter dem Schema zurückbleibt.",
+    "postinstall": "prisma generate",
     "db:generate": "prisma generate",
-    "//": "Das Prisma-CLI sucht die .env im Paketordner; sie liegt aber im Projektwurzelverzeichnis.",
-    "db:migrate": "dotenv -e ../../.env -- prisma migrate deploy",
+    "//2": "Das Prisma-CLI sucht die .env im Paketordner; sie liegt aber im Projektwurzelverzeichnis.",
+    "//3": "generate vor deploy: Schema-Änderung und Zugriffscode dürfen nicht auseinanderlaufen.",
+    "db:migrate": "prisma generate && dotenv -e ../../.env -- prisma migrate deploy",
     "db:migrate:dev": "dotenv -e ../../.env -- prisma migrate dev",
     "db:studio": "dotenv -e ../../.env -- prisma studio",
     "db:check": "tsx scripts/roundtrip.ts"
