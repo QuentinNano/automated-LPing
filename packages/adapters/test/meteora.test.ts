@@ -14,16 +14,44 @@ const datapiPage = JSON.parse(
 const fastLimiter = () => new TokenBucket(1000);
 
 describe("normalizeMeteoraPair", () => {
-  it("liest das Format der aktuellen datapi-Schnittstelle (verschachtelte Token)", () => {
+  it("liest das Format der aktuellen datapi-Schnittstelle", () => {
     const pool = normalizeMeteoraPair(datapiPage.data[0]);
     expect(pool).not.toBeNull();
     expect(pool!.poolAddress).toBe("BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y");
+    // Mints stecken in token_x/token_y-Objekten …
     expect(pool!.mintX).toBe("EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm");
     expect(pool!.mintY).toBe("So11111111111111111111111111111111111111112");
+    // … bin_step und Basisgebühr in pool_config …
+    expect(pool!.binStep).toBe(100);
+    expect(pool!.baseFeePct).toBe(1);
+    expect(pool!.maxFeePct).toBe(10);
+    // … Volumen und Fees im 24-Stunden-Fenster verschachtelter Objekte.
     expect(pool!.tvlUsd).toBeCloseTo(250000.42);
     expect(pool!.volume24hUsd).toBeCloseTo(1250000.75);
-    expect(pool!.feeTvl24hPct).toBeCloseTo(5.0, 1);
+    expect(pool!.fees24hUsd).toBeCloseTo(12500.5);
     expect(pool!.priceNative).toBeCloseTo(0.0000214);
+  });
+
+  it("bevorzugt das von der API gelieferte Fee/TVL-Verhältnis", () => {
+    const pool = normalizeMeteoraPair(datapiPage.data[0]);
+    // fee_tvl_ratio.hour_24 = 5.0 (statt selbst gerechnet)
+    expect(pool!.feeTvl24hPct).toBe(5.0);
+  });
+
+  it("rechnet Fee/TVL selbst, wenn die API es nicht mitliefert", () => {
+    const pool = normalizeMeteoraPair(datapiPage.data[1]);
+    // 8120 / 812000 × 100 = 1 %
+    expect(pool!.feeTvl24hPct).toBeCloseTo(1);
+  });
+
+  it("überspringt von Meteora als problematisch markierte Pools", () => {
+    expect(normalizeMeteoraPair(datapiPage.data[2])).toBeNull();
+  });
+
+  it("nutzt die dynamische Gebühr, wenn keine Basisgebühr angegeben ist", () => {
+    const raw = JSON.parse(JSON.stringify(datapiPage.data[0])) as Record<string, unknown>;
+    delete (raw["pool_config"] as Record<string, unknown>)["base_fee_pct"];
+    expect(normalizeMeteoraPair(raw)!.baseFeePct).toBeCloseTo(1.42);
   });
 
   it("liest das ältere Format mit flachen mint_x/mint_y-Feldern", () => {
@@ -36,15 +64,29 @@ describe("normalizeMeteoraPair", () => {
     expect(pool!.volume24hUsd).toBeCloseTo(1250000.75);
   });
 
-  it("akzeptiert Zahlen, die als Strings geliefert werden", () => {
+  it("akzeptiert Zahlen, die als Strings geliefert werden — auch verschachtelt", () => {
     const pool = normalizeMeteoraPair(datapiPage.data[1]);
     expect(pool!.tvlUsd).toBe(812000);
     expect(pool!.volume24hUsd).toBe(2100000);
+    expect(pool!.baseFeePct).toBe(0.8);
+  });
+
+  it("erkennt verschiedene Schreibweisen des 24-Stunden-Fensters", () => {
+    const base = {
+      address: "A",
+      token_x: { address: "x" },
+      token_y: { address: "y" },
+      pool_config: { bin_step: 100 },
+    };
+    for (const key of ["hour_24", "h24", "24h", "day_1"]) {
+      const pool = normalizeMeteoraPair({ ...base, volume: { [key]: 42 } });
+      expect(pool!.volume24hUsd, key).toBe(42);
+    }
   });
 
   it("verwirft Datensätze ohne Pflichtangaben statt zu raten", () => {
-    expect(normalizeMeteoraPair({ address: "X", bin_step: 100 })).toBeNull();
-    expect(normalizeMeteoraPair({ mint_x: "a", mint_y: "b", bin_step: 100 })).toBeNull();
+    expect(normalizeMeteoraPair({ address: "X", pool_config: { bin_step: 100 } })).toBeNull();
+    expect(normalizeMeteoraPair({ mint_x: "a", mint_y: "b" })).toBeNull();
     expect(normalizeMeteoraPair(null)).toBeNull();
     expect(normalizeMeteoraPair("nope")).toBeNull();
   });

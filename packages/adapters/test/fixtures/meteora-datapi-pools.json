@@ -17,28 +17,66 @@
         "symbol": "SOL",
         "decimals": 9
       },
-      "bin_step": 100,
-      "base_fee_percentage": 1,
-      "max_fee_percentage": 10,
+      "reserve_x": "6Y1FPvdhkjrjmvvFtq6pxsF7XfLnrbrCXawnaAhiWjK1",
+      "reserve_y": "Bq5nFHRomekb4nHW6zSzLGfCEwYbFkS4tXqYCVSFo91g",
+      "token_x_amount": 123456789012,
+      "token_y_amount": 987654321098,
+      "created_at": "2026-07-28T09:00:00Z",
+      "reward_mint_x": "11111111111111111111111111111111",
+      "reward_mint_y": "11111111111111111111111111111111",
+      "pool_config": {
+        "bin_step": 100,
+        "base_fee_pct": 1,
+        "max_fee_pct": 10,
+        "protocol_fee_pct": 5
+      },
+      "dynamic_fee_pct": 1.42,
       "tvl": 250000.42,
-      "volume_24h": 1250000.75,
-      "fees_24h": 12500.5,
-      "price": 0.0000214,
+      "current_price": 0.0000214,
       "apr": 5.0,
-      "apy": 120.5
+      "apy": 120.5,
+      "has_farm": false,
+      "farm_apr": 0,
+      "farm_apy": 0,
+      "volume": {
+        "min_30": 4300.1,
+        "hour_1": 52000.9,
+        "hour_4": 210000.3,
+        "hour_24": 1250000.75
+      },
+      "fees": {
+        "min_30": 43.0,
+        "hour_1": 520.0,
+        "hour_4": 2100.0,
+        "hour_24": 12500.5
+      },
+      "protocol_fees": { "hour_24": 625.02 },
+      "fee_tvl_ratio": { "hour_1": 0.21, "hour_24": 5.0 },
+      "cumulative_metrics": { "volume": 98765432.1, "fees": 987654.32 },
+      "is_blacklisted": false,
+      "launchpad": null,
+      "tags": []
     },
     {
       "address": "9d9mb8kooFfaD3SctgZtkxQypkshx6ezhbKio89ixyy2",
       "name": "BONK-SOL",
-      "token_x": {
-        "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
-        "symbol": "BONK"
-      },
+      "token_x": { "address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "symbol": "BONK" },
       "token_y": { "address": "So11111111111111111111111111111111111111112", "symbol": "SOL" },
-      "bin_step": 80,
+      "pool_config": { "bin_step": 80, "base_fee_pct": "0.8" },
       "tvl": "812000",
-      "volume_24h": "2100000",
-      "fees_24h": "8120"
+      "volume": { "hour_24": "2100000" },
+      "fees": { "hour_24": "8120" },
+      "is_blacklisted": false
+    },
+    {
+      "address": "BadPool1111111111111111111111111111111111111",
+      "name": "SCAM-SOL",
+      "token_x": { "address": "Scam111111111111111111111111111111111111111" },
+      "token_y": { "address": "So11111111111111111111111111111111111111112" },
+      "pool_config": { "bin_step": 100 },
+      "tvl": 999999,
+      "volume": { "hour_24": 999999 },
+      "is_blacklisted": true
     }
   ]
 }

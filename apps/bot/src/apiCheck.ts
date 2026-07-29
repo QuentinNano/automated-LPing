@@ -122,11 +122,41 @@ function describeFirst(item: unknown): void {
   }
   const keys = Object.keys(item as Record<string, unknown>);
   console.log(`      Felder je Pool: ${keys.join(", ")}`);
+
   const normalized = normalizeMeteoraPair(item);
-  console.log(
-    normalized === null
-      ? "      ✗ Adapter kann daraus keine Pool-Metriken lesen — Feldnamen prüfen."
-      : `      ✓ Adapter liest: ${normalized.poolAddress.slice(0, 10)}…, binStep ${normalized.binStep}` +
-          `, TVL ${normalized.tvlUsd ?? "?"}, Vol24h ${normalized.volume24hUsd ?? "?"}`,
-  );
+  if (normalized === null) {
+    console.log("      ✗ Adapter kann daraus keine Pool-Metriken lesen.");
+  } else {
+    const missing = [
+      normalized.tvlUsd === undefined ? "TVL" : null,
+      normalized.volume24hUsd === undefined ? "Volumen" : null,
+      normalized.baseFeePct === undefined ? "Gebühr" : null,
+      normalized.feeTvl24hPct === undefined ? "Fee/TVL" : null,
+    ].filter((x): x is string => x !== null);
+
+    console.log(
+      `      ✓ Adapter liest: ${normalized.poolAddress.slice(0, 10)}…, binStep ${normalized.binStep}` +
+        `, TVL ${fmt(normalized.tvlUsd)}, Vol24h ${fmt(normalized.volume24hUsd)}` +
+        `, Gebühr ${fmt(normalized.baseFeePct)}%, Fee/TVL ${fmt(normalized.feeTvl24hPct)}%`,
+    );
+    if (missing.length > 0) {
+      console.log(`      ! Nicht gelesen: ${missing.join(", ")} — diese Felder fehlen dem Filter.`);
+    }
+  }
+
+  // Vollständiger Datensatz: die verschachtelten Werte (pool_config, volume,
+  // fees …) sind der einzige verlässliche Weg, die echten Feldnamen zu sehen.
+  console.log("\n      Erster Datensatz vollständig:");
+  console.log(indent(JSON.stringify(item, null, 2).slice(0, 4000), "      "));
+}
+
+function fmt(value: number | undefined): string {
+  return value === undefined ? "—" : String(Math.round(value * 100) / 100);
+}
+
+function indent(text: string, prefix: string): string {
+  return text
+    .split("\n")
+    .map((line) => prefix + line)
+    .join("\n");
 }
