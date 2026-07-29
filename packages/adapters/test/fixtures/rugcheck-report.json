@@ -1,0 +1,37 @@
+{
+  "mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+  "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  "token": {
+    "mintAuthority": null,
+    "supply": 998920000000000,
+    "decimals": 6,
+    "isInitialized": true,
+    "freezeAuthority": null
+  },
+  "tokenMeta": {
+    "name": "dogwifhat",
+    "symbol": "WIF",
+    "mutable": false,
+    "updateAuthority": "GdBqfWpNQPLmnN1x9VVWFxy9tXNfsCPzr6QYxgkGGrTe"
+  },
+  "risks": [
+    {
+      "name": "Top 10 holders high ownership",
+      "value": "",
+      "description": "The top 10 users hold more than 15% token supply",
+      "score": 5001,
+      "level": "warn"
+    }
+  ],
+  "score": 501,
+  "score_normalised": 6,
+  "topHolders": [
+    { "address": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", "amount": 52000000000000, "pct": 5.2, "insider": false },
+    { "address": "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm", "amount": 31000000000000, "pct": 3.1, "insider": true },
+    { "address": "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1", "amount": 21000000000000, "pct": 2.1, "insider": false }
+  ],
+  "graphInsidersDetected": 4,
+  "totalMarketLiquidity": 1834567.89,
+  "totalLPProviders": 213,
+  "rugged": false
+}

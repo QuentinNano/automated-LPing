@@ -1,0 +1,38 @@
+[
+  {
+    "chainId": "solana",
+    "dexId": "meteora",
+    "url": "https://dexscreener.com/solana/bgm1tav58ogcsqjehl9wxbfxf7d27vzskefj4xjkd5y",
+    "pairAddress": "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y",
+    "labels": ["DLMM"],
+    "baseToken": {
+      "address": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+      "name": "dogwifhat",
+      "symbol": "WIF"
+    },
+    "quoteToken": {
+      "address": "So11111111111111111111111111111111111111112",
+      "name": "Wrapped SOL",
+      "symbol": "SOL"
+    },
+    "priceNative": "0.0000214",
+    "priceUsd": "0.00389",
+    "txns": {
+      "m5": { "buys": 12, "sells": 9 },
+      "h1": { "buys": 140, "sells": 130 },
+      "h6": { "buys": 800, "sells": 760 },
+      "h24": { "buys": 3200, "sells": 3100 }
+    },
+    "volume": {
+      "h24": 1250000.75,
+      "h6": 310000.2,
+      "h1": 52000.9,
+      "m5": 4300.1
+    },
+    "priceChange": { "m5": 0.5, "h1": -1.2, "h6": 4.1, "h24": 12.3 },
+    "liquidity": { "usd": 250000.42, "base": 32000000, "quote": 680 },
+    "fdv": 3890000,
+    "marketCap": 3890000,
+    "pairCreatedAt": 1753600000000
+  }
+]

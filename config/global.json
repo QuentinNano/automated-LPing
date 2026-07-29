@@ -1,0 +1,11 @@
+{
+  "paperTrading": true,
+  "killSwitch": "off",
+  "maxTotalExposureSol": 20,
+  "minSolReserve": 0.5,
+  "maxOpenPositions": 10,
+  "dailyLossLimitPct": 5,
+  "hardLossLimitPct": 10,
+  "priorityFeeCapLamports": 2000000,
+  "profitSweepThresholdSol": 5
+}

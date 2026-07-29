@@ -1,0 +1,24 @@
+{
+  "meta": { "generatedAt": "2026-07-29T12:00:00Z", "category": "degen" },
+  "data": {
+    "trending": [
+      {
+        "poolAddress": "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y",
+        "name": "WIF-SOL",
+        "score": 312.4,
+        "tvl": 250000.42,
+        "volume24h": 1250000.75,
+        "binStep": 100
+      },
+      {
+        "poolAddress": "9d9mb8kooFfaD3SctgZtkxQypkshx6ezhbKio89ixyy2",
+        "name": "BONK-SOL",
+        "score": 187.2,
+        "tvl": 812000.0,
+        "volume24h": 2100000.0,
+        "binStep": 80
+      }
+    ],
+    "pagination": { "page": 1, "pageSize": 2 }
+  }
+}

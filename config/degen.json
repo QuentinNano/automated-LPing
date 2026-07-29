@@ -1,0 +1,45 @@
+{
+  "enabled": true,
+  "capitalSharePct": 30,
+  "positionSizePct": 1,
+  "maxPositions": 5,
+  "minScore": 65,
+  "minTvlUsd": 50000,
+  "tokenAgeHours": { "min": 1, "max": 48 },
+  "volTvlBounds": { "min": 2, "max": 50 },
+  "screening": {
+    "maxTop10HolderPct": 30,
+    "maxSingleHolderPct": 10,
+    "maxInsiderPct": 20,
+    "minHolders": 250,
+    "maxPriceDivergencePct": 2,
+    "maxPoolShareOfTvlPct": 1,
+    "maxSingleLpDominancePct": 80
+  },
+  "strategy": { "type": "BidAsk", "sided": "quote_only" },
+  "binRange": { "min": 20, "max": 40 },
+  "feeHarvest": {
+    "claimIntervalMin": 30,
+    "convertToSolPct": 100,
+    "minClaimValueSol": 0.01,
+    "claimCostFactor": 10,
+    "dustThresholdSol": 0.02
+  },
+  "compound": { "enabled": false, "minSol": 0.1 },
+  "stopLossPct": 15,
+  "takeProfitPct": 30,
+  "maxHoldHours": 24,
+  "rebalance": {
+    "enabled": false,
+    "bufferPct": 10,
+    "cooldownMin": 120,
+    "maxPerDay": 4,
+    "minEvFactor": 2
+  },
+  "slippageCapPct": 3,
+  "emergency": {
+    "priceDropPct5m": 30,
+    "tvlDropPct10m": 40,
+    "sellImpactMaxPct": 25
+  }
+}
