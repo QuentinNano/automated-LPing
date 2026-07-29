@@ -123,3 +123,5 @@ export {
   trackingIntervalSec,
 } from "./ml/outcomes";
 export type { OutcomeLabel, OutcomeHorizon, TrackPoint } from "./ml/outcomes";
+export { evaluateTrackHealth, overallHealth } from "./ml/health";
+export type { HealthCheck, HealthStatus, TrackHealthInput } from "./ml/health";

@@ -5,6 +5,7 @@ import {
   trackingIntervalSec,
   type FeatureVector,
   type PoolMetrics,
+  type TrackHealthInput,
   type TrackPoint,
 } from "@lping/core";
 
@@ -253,6 +254,99 @@ export class TrackRepo {
           ? 0
           : (now.getTime() - firstCaptureAt.getTime()) / 86_400_000,
     };
+  }
+
+  /**
+   * Kennzahlen für die Beurteilung der Aufzeichnung. Die Bewertung selbst
+   * passiert in @lping/core (evaluateTrackHealth) — hier wird nur gemessen.
+   */
+  async healthMetrics(now: Date = new Date(), expectedIntervalMin = 15): Promise<TrackHealthInput> {
+    const hourAgo = new Date(now.getTime() - 3_600_000);
+    const sixHoursAgo = new Date(now.getTime() - 6 * 3_600_000);
+    const dayAgo = new Date(now.getTime() - 24 * 3_600_000);
+
+    const [trackedActive, newest, pointsLastHour, featuresLast6h, featuresTotal, outcomesTotal, oldest] =
+      await Promise.all([
+        this.prisma.trackedPool.count({ where: { active: true } }),
+        this.prisma.poolSnapshot.findFirst({ orderBy: { ts: "desc" }, select: { ts: true } }),
+        this.prisma.poolSnapshot.count({ where: { ts: { gte: hourAgo } } }),
+        this.prisma.candidateFeature.count({ where: { capturedAt: { gte: sixHoursAgo } } }),
+        this.prisma.candidateFeature.count(),
+        this.prisma.candidateOutcome.count(),
+        this.prisma.candidateFeature.findFirst({
+          orderBy: { capturedAt: "asc" },
+          select: { capturedAt: true },
+        }),
+      ]);
+
+    const distinctPools = await this.prisma.poolSnapshot.findMany({
+      where: { ts: { gte: hourAgo } },
+      distinct: ["poolAddress"],
+      select: { poolAddress: true },
+    });
+
+    // Belegungsgrad der Merkmale in einer Stichprobe der jüngsten Aufzeichnungen:
+    // zeigt, ob eine Datenquelle still ausgefallen ist.
+    const sample = await this.prisma.candidateFeature.findMany({
+      orderBy: { capturedAt: "desc" },
+      take: 100,
+      select: { features: true },
+    });
+    const fieldCoverage: Record<string, number> = {};
+    if (sample.length > 0) {
+      for (const key of [
+        "tvl_usd",
+        "token_age_hours",
+        "risk_score",
+        "roundtrip_loss_pct",
+        "organic_score",
+      ]) {
+        const filled = sample.filter((row) => {
+          const features = row.features as Record<string, unknown> | null;
+          return features !== null && features[key] !== null && features[key] !== undefined;
+        }).length;
+        fieldCoverage[key] = filled / sample.length;
+      }
+    }
+
+    return {
+      now,
+      trackedActive,
+      newestPointAt: newest?.ts ?? null,
+      pointsLastHour,
+      poolsWithPointLastHour: distinctPools.length,
+      featuresLast6h,
+      featuresTotal,
+      outcomesTotal,
+      oldestFeatureAt: oldest?.capturedAt ?? null,
+      fieldCoverage,
+      largestGapMinutes: await this.largestGapMinutes(dayAgo, now),
+      expectedIntervalMin,
+    };
+  }
+
+  /**
+   * Größte Unterbrechung der letzten 24 Stunden, ausgewertet über Stundenblöcke
+   * statt Einzelzeitpunkte — das bleibt auch bei vielen tausend Messpunkten günstig.
+   */
+  private async largestGapMinutes(since: Date, now: Date): Promise<number | null> {
+    const rows = await this.prisma.$queryRaw<{ hour: Date }[]>`
+      SELECT DISTINCT date_trunc('hour', ts) AS hour
+      FROM pool_snapshots
+      WHERE ts >= ${since}
+      ORDER BY hour ASC
+    `;
+    if (rows.length === 0) return null;
+
+    let largest = 0;
+    let previous = since;
+    for (const row of rows) {
+      const gap = (row.hour.getTime() - previous.getTime()) / 60_000;
+      if (gap > largest) largest = gap;
+      previous = new Date(row.hour.getTime() + 3_600_000);
+    }
+    // Auch die Zeit seit dem letzten belegten Block zählt als Lücke.
+    return Math.max(largest, Math.max(0, (now.getTime() - previous.getTime()) / 60_000));
   }
 
   /**
