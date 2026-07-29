@@ -1,1 +1,0 @@
-self.__RSC_SERVER_MANIFEST="{\"node\":{\"60120536cb8eaf6573123b364820fb1f0f52b09dc5\":{\"workers\":{\"app/parameter/page\":{\"moduleId\":\"4090\",\"async\":false}},\"layer\":{\"app/parameter/page\":\"action-browser\"},\"filename\":\"app/parameter/actions.ts\",\"exportedName\":\"saveConfig\"}},\"edge\":{},\"encryptionKey\":\"process.env.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY\"}"
