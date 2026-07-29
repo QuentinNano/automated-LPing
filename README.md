@@ -39,7 +39,36 @@ den Ergebnissen stammen damit ausschließlich aus den Parametern:
 Ein weiteres Profil entsteht durch eine zusätzliche Datei in `config/` (z. B.
 `degen_eng.json`) — sie erscheint automatisch in UI und Vergleich.
 
-## Setup
+## Schnellstart (macOS)
+
+Einmalig, im Terminal (Spotlight `Cmd`+Leertaste → „Terminal"):
+
+```bash
+# 1. Werkzeuge installieren (Homebrew von https://brew.sh vorausgesetzt)
+brew install node git
+npm install -g pnpm
+brew install --cask docker      # danach Docker Desktop einmal öffnen
+
+# 2. Projekt holen
+git clone https://github.com/QuentinNano/automated-LPing.git
+cd automated-LPing
+
+# 3. Alles einrichten (Abhängigkeiten, .env, Datenbank, Schema)
+pnpm einrichten
+```
+
+Danach der eigentliche Betrieb:
+
+```bash
+pnpm --filter @lping/bot paper       # ein Simulationslauf
+pnpm --filter @lping/web dev         # Oberfläche → http://localhost:3000
+```
+
+`pnpm einrichten` prüft die Voraussetzungen und bricht mit einer konkreten
+Handlungsanweisung ab, wenn etwas fehlt. Das Skript ist gefahrlos wiederholbar:
+eine vorhandene `.env` wird nicht überschrieben.
+
+## Setup (allgemein)
 
 Voraussetzungen: Node >= 20, pnpm >= 10, Docker (für PostgreSQL).
 
