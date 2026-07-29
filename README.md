@@ -24,6 +24,18 @@ packages/
 config/           # global.json + ein JSON je Preset (konservativ, balanced, degen)
 ```
 
+## Wenn etwas nicht läuft
+
+`pnpm --filter @lping/bot api:check` prüft die externen Datenquellen und zeigt,
+welche Schnittstelle antwortet und welche Felder sie liefert. Die Meteora-APIs
+sind nicht formal versioniert; ändern sich Pfade oder Feldnamen, ist diese
+Ausgabe der schnellste Weg zur Ursache.
+
+Der Adapter spricht beide bekannten Meteora-Schnittstellen an
+(`dlmm.datapi.meteora.ag/pools`, ersatzweise `dlmm-api.meteora.ag/pair/all`),
+merkt sich die funktionierende und liest Feldnamen über Alias-Listen — ein
+Umbenennen einzelner Felder legt die Discovery damit nicht sofort lahm.
+
 ## Presets
 
 Ausgeliefert werden drei Risikoprofile, die im Paper-Trading **gleichzeitig** auf
@@ -84,6 +96,7 @@ pnpm test                     # Vitest (fixture-basiert, ohne Netzwerk)
 
 pnpm --filter @lping/bot validate  # Default-Config prüfen
 pnpm --filter @lping/bot health    # Adapter-Erreichbarkeit testen (Netzwerk nötig)
+pnpm --filter @lping/bot api:check # Datenquellen diagnostizieren (bei API-Fehlern)
 pnpm --filter @lping/db db:check   # DB-Roundtrip prüfen (nach db:migrate)
 
 # Scanner: Discovery → Screening → Score-Tabelle (Netzwerk nötig).
