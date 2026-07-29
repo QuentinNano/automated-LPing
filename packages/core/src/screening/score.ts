@@ -21,12 +21,16 @@ export function computeScore(input: ScreeningInput): ScoreBreakdown {
   return { total: clamp(total, 0, 100), components };
 }
 
-/** 35 P: Fee/TVL-Rate 24h. Degen-Vollausschlag bei 3 %/Tag, Multiday bei 1,5 %/Tag. */
+/**
+ * 35 P: Fee/TVL-Rate 24h. Der Vollausschlag skaliert mit dem Risikoappetit des
+ * Presets (abgeleitet aus dem erlaubten Vol/TVL-Band), damit die Kennlinie ohne
+ * hartkodierte Preset-Namen für beliebige Profile funktioniert.
+ */
 function feeYield(input: ScreeningInput): ScoreComponent {
   const max = 35;
   const rate = input.pool.feeTvl24hPct;
   if (rate === undefined) return { id: "fee_yield", points: 0, max, detail: "keine Fee-Daten" };
-  const fullAt = input.presetKind === "degen" ? 3 : 1.5;
+  const fullAt = clamp(input.preset.volTvlBounds.max / 16, 0.75, 3);
   return {
     id: "fee_yield",
     points: round1(max * clamp(rate / fullAt, 0, 1)),
@@ -88,18 +92,20 @@ function safetyMargin(input: ScreeningInput): ScoreComponent {
 }
 
 /**
- * 10 P: Momentum. Degen bewertet 6h-Trend (moderat positiv ideal, parabolisch
- * riskant), Multiday den 24h-Trend mit Präferenz für Stetigkeit.
+ * 10 P: Momentum. Kurzfristige Presets (Haltedauer < 48h) bewerten den
+ * 6h-Trend, längerfristige den 24h-Trend mit Präferenz für Stetigkeit.
+ * Über dem Ideal-Band wird abgewertet — parabolische Pumps sind Risiko,
+ * nicht Qualität.
  */
 function momentum(input: ScreeningInput): ScoreComponent {
   const max = 10;
   const market = input.market;
-  const change =
-    input.presetKind === "degen" ? market?.priceChangeH6Pct : market?.priceChangeH24Pct;
+  const shortTerm = input.preset.maxHoldHours <= 48;
+  const change = shortTerm ? market?.priceChangeH6Pct : market?.priceChangeH24Pct;
   if (change === null || change === undefined) {
     return { id: "momentum", points: 0, max, detail: "kein Preistrend verfügbar" };
   }
-  const idealMax = input.presetKind === "degen" ? 50 : 30;
+  const idealMax = shortTerm ? 50 : 30;
   let points: number;
   if (change <= 0) {
     points = 0;
@@ -112,11 +118,10 @@ function momentum(input: ScreeningInput): ScoreComponent {
   return { id: "momentum", points: round1(clamp(points, 0, max)), max, detail: `${change.toFixed(1)}%` };
 }
 
-/** 10 P: Quellen-Bonus — Fabriq-bestätigte Kandidaten > eigene Replikation. */
+/** 10 P: Quellen-Bonus — extern bestätigte Kandidaten > eigene Replikation. */
 function sourceBonus(input: ScreeningInput): ScoreComponent {
   const max = 10;
-  const fromFabriq = input.source === "fabriq_degen" || input.source === "fabriq_multiday";
-  return { id: "source_bonus", points: fromFabriq ? 10 : 5, max, detail: input.source };
+  return { id: "source_bonus", points: input.source === "fabriq" ? 10 : 5, max, detail: input.source };
 }
 
 function clamp(value: number, min: number, max: number): number {

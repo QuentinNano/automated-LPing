@@ -1,4 +1,4 @@
-import type { PresetConfig, PresetKind } from "../config/schema";
+import type { PresetConfig } from "../config/schema";
 import type { PoolMetrics } from "../domain/types";
 import { tokenSideOf } from "../screening/aggregate";
 
@@ -16,11 +16,7 @@ export interface ClassifyResult {
   reasons: string[];
 }
 
-export function classifyForPreset(
-  pool: PoolMetrics,
-  presetKind: PresetKind,
-  preset: PresetConfig,
-): ClassifyResult {
+export function classifyForPreset(pool: PoolMetrics, preset: PresetConfig): ClassifyResult {
   const reasons: string[] = [];
 
   if (tokenSideOf(pool) === null) reasons.push("nicht SOL-quotiert");
@@ -34,8 +30,7 @@ export function classifyForPreset(
     reasons.push(`baseFee ${baseFee}% < ${preset.discovery.minBaseFeePct}%`);
   }
 
-  const tvlFactor = presetKind === "degen" ? 0.5 : 0.75;
-  const minTvl = preset.minTvlUsd * tvlFactor;
+  const minTvl = preset.minTvlUsd * 0.5;
   if (pool.tvlUsd === undefined || pool.tvlUsd < minTvl) {
     reasons.push(`TVL ${pool.tvlUsd?.toFixed(0) ?? "?"} < ${minTvl}`);
   }

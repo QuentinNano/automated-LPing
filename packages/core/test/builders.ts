@@ -23,7 +23,11 @@ export function loadDefaultConfig(): BotConfig {
     JSON.parse(readFileSync(path.join(repoRoot, "config", name), "utf8")) as unknown;
   return parseBotConfig({
     global: read("global.json"),
-    presets: { degen: read("degen.json"), multiday: read("multiday.json") },
+    presets: {
+      konservativ: read("konservativ.json"),
+      balanced: read("balanced.json"),
+      degen: read("degen.json"),
+    },
   });
 }
 
@@ -105,14 +109,19 @@ export function buildInput(
   config: BotConfig,
   overrides: Partial<ScreeningInput> = {},
 ): ScreeningInput {
+  const preset = config.presets[presetKind];
+  if (preset === undefined) throw new Error(`Unbekanntes Preset: ${presetKind}`);
+  // Token-Alter passend zum Mindestalter des Presets, damit der Basis-Input
+  // für jedes Profil ein gültiger Kandidat ist.
+  const ageHours = Math.max(preset.tokenAgeHours.min * 1.5, 24);
   return {
     presetKind,
-    preset: config.presets[presetKind],
+    preset,
     global: config.global,
-    source: presetKind === "degen" ? "replicated_degen" : "replicated_multiday",
+    source: "replicated",
     pool: buildPool(),
     tokenMint: TOKEN_MINT,
-    market: buildMarket(presetKind === "multiday" ? { tokenAgeHours: 120 } : {}),
+    market: buildMarket({ tokenAgeHours: ageHours }),
     risk: buildRisk(),
     sellability: buildSellability(),
     ...overrides,

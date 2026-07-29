@@ -1,37 +1,38 @@
 {
+  "label": "Balanced",
   "enabled": true,
-  "capitalSharePct": 70,
-  "positionSizePct": 3,
+  "capitalSharePct": 35,
+  "positionSizePct": 2,
   "maxPositions": 5,
   "minScore": 60,
-  "minTvlUsd": 150000,
-  "tokenAgeHours": { "min": 72 },
-  "volTvlBounds": { "min": 0.5, "max": 20 },
+  "minTvlUsd": 120000,
+  "tokenAgeHours": { "min": 48 },
+  "volTvlBounds": { "min": 1, "max": 25 },
   "screening": {
     "maxTop10HolderPct": 25,
     "maxSingleHolderPct": 8,
-    "maxInsiderPct": 10,
-    "minHolders": 1000,
+    "maxInsiderPct": 12,
+    "minHolders": 800,
     "maxPriceDivergencePct": 2,
     "maxPoolShareOfTvlPct": 1,
-    "maxSingleLpDominancePct": 80,
+    "maxSingleLpDominancePct": 75,
     "maxNormalizedRiskScore": 30,
     "maxAvgTradeUsd": 10000
   },
-  "discovery": { "minBinStep": 20, "minBaseFeePct": 0.1 },
+  "discovery": { "minBinStep": 20, "minBaseFeePct": 0.2 },
   "strategy": { "type": "Curve", "sided": "balanced" },
-  "binRange": { "min": 60, "max": 69 },
+  "binRange": { "min": 40, "max": 60 },
   "feeHarvest": {
-    "claimIntervalMin": 240,
-    "convertToSolPct": 50,
+    "claimIntervalMin": 120,
+    "convertToSolPct": 75,
     "minClaimValueSol": 0.01,
     "claimCostFactor": 10,
     "dustThresholdSol": 0.02
   },
   "compound": { "enabled": false, "minSol": 0.1 },
-  "stopLossPct": 25,
+  "stopLossPct": 20,
   "takeProfitPct": 50,
-  "maxHoldHours": 336,
+  "maxHoldHours": 96,
   "rebalance": {
     "enabled": true,
     "bufferPct": 10,
@@ -41,8 +42,8 @@
   },
   "slippageCapPct": 1,
   "emergency": {
-    "priceDropPct5m": 30,
-    "tvlDropPct10m": 40,
-    "sellImpactMaxPct": 25
+    "priceDropPct5m": 25,
+    "tvlDropPct10m": 35,
+    "sellImpactMaxPct": 20
   }
 }

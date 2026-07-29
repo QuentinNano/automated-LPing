@@ -3,6 +3,13 @@ import { PrismaClient } from "@prisma/client";
 export { PrismaConfigStore } from "./configStore";
 export { ScanRepo } from "./scanRepo";
 export type { RecordedCandidate, ScanRecordInput } from "./scanRepo";
+export { PaperRepo } from "./paperRepo";
+export type {
+  OpenPaperPositionRecord,
+  TickPaperPositionRecord,
+  ClosePaperPositionRecord,
+  OpenPaperPosition,
+} from "./paperRepo";
 export { PrismaClient };
 
 /**

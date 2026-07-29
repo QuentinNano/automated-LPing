@@ -106,12 +106,11 @@ export interface AdapterHealth {
   note?: string;
 }
 
-/** Discovery-Herkunft eines Kandidaten (KONZEPT.md Abschnitt 4). */
-export type CandidateSource =
-  | "fabriq_degen"
-  | "fabriq_multiday"
-  | "replicated_degen"
-  | "replicated_multiday";
+/**
+ * Discovery-Herkunft eines Kandidaten (KONZEPT.md Abschnitt 4). Das Preset
+ * wird separat geführt, damit beliebig viele Presets dieselbe Quelle nutzen.
+ */
+export type CandidateSource = "fabriq" | "replicated";
 
 export interface FabriqPool {
   poolAddress: string;

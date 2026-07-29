@@ -1,10 +1,5 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
-import {
-  parseBotConfig,
-  type AppendConfigInput,
-  type ConfigStore,
-  type StoredConfig,
-} from "@lping/core";
+import type { BotConfig, AppendConfigInput, ConfigStore, StoredConfig } from "@lping/core";
 
 /**
  * ConfigStore-Implementierung auf der config_versions-Tabelle.
@@ -48,9 +43,10 @@ function toStored(row: {
 }): StoredConfig {
   return {
     version: row.version,
-    // Persistierte Configs beim Lesen erneut validieren — die DB ist kein
-    // vertrauenswürdiger Schema-Garant (manuelle Edits, alte Versionen).
-    config: parseBotConfig(row.config),
+    // Bewusst ohne Validierung: der ConfigService ist die einzige Instanz, die
+    // Configs prüft — und er kann veraltete Stände migrieren statt sie
+    // abzulehnen. Würde der Store hier werfen, käme die Migration nie zum Zug.
+    config: row.config as unknown as BotConfig,
     actor: row.actor,
     createdAt: row.createdAt,
     ...(row.reason !== null ? { reason: row.reason } : {}),
