@@ -6,7 +6,8 @@
   "scripts": {
     "start": "tsx src/main.ts",
     "validate": "tsx src/main.ts validate",
-    "health": "tsx src/main.ts health"
+    "health": "tsx src/main.ts health",
+    "fabriq:check": "tsx src/main.ts fabriq:check"
   },
   "dependencies": {
     "@lping/adapters": "workspace:*",

@@ -10,6 +10,7 @@ import {
   RugcheckAdapter,
 } from "@lping/adapters";
 import { loadDefaultsFromDir } from "./loadConfig";
+import { cmdFabriqCheck } from "./fabriqCheck";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const configDir = path.join(repoRoot, "config");
@@ -21,8 +22,10 @@ async function main(): Promise<number> {
       return cmdValidate();
     case "health":
       return cmdHealth();
+    case "fabriq:check":
+      return cmdFabriqCheck(process.argv[3]);
     default:
-      console.error(`Unbekanntes Kommando: ${command}\nVerfügbar: validate | health`);
+      console.error(`Unbekanntes Kommando: ${command}\nVerfügbar: validate | health | fabriq:check <URL>`);
       return 2;
   }
 }

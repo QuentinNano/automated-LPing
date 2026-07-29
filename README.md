@@ -39,6 +39,9 @@ pnpm test                     # Vitest (fixture-basiert, ohne Netzwerk)
 
 pnpm --filter @lping/bot validate  # Default-Config prüfen
 pnpm --filter @lping/bot health    # Adapter-Erreichbarkeit testen (Netzwerk nötig)
+
+# Fabriq-Endpoint prüfen (URL aus den Browser-Entwicklertools, siehe SPIKE.md):
+pnpm --filter @lping/bot fabriq:check "https://…"
 ```
 
 ## Stand & nächste Schritte
