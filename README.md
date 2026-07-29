@@ -38,6 +38,32 @@ Der Adapter spricht beide bekannten Meteora-Schnittstellen an
 merkt sich die funktionierende und liest Feldnamen über Alias-Listen — ein
 Umbenennen einzelner Felder legt die Discovery damit nicht sofort lahm.
 
+`api:check` weist zusätzlich aus, **welche Zeitfenster** ankommen und ob
+Gebührenstruktur (dynamische Gebühr, Protokollanteil, `collect_fee_mode`) und
+Pool-Alter gelesen werden. Fällt eines davon aus, verarmt die Aufzeichnung
+still — und aufgezeichnete Zeit lässt sich nicht nachholen.
+
+## Discovery
+
+Die Pool-Suche führt **mehrere Sortierungen** der Meteora-API zusammen, gefiltert
+serverseitig (`filter_by=is_blacklisted=false && tvl>=…`):
+
+| Sortierung | Wozu |
+|---|---|
+| `volume_24h:desc` | etablierte Aktivität — trägt die längerfristigen Presets |
+| `fee_tvl_ratio_1h:desc` | aktuelle Ertragskraft — Pools, die gerade anfangen zu verdienen |
+| `pool_created_at:desc` | neue Pools — das Degen-Fenster (1–48 h) ist über Volumen nicht erreichbar |
+
+Der Grund für den Aufwand: Ein Pool, der vor drei Stunden entstanden ist, kann
+per Definition kein hohes 24-Stunden-Volumen haben. Wer nur die
+Standardsortierung liest, sieht das Degen-Universum nie. Die Ergebnisse werden
+nach Pool-Adresse dedupliziert; `--pages` zählt Seiten **je Sortierung**.
+
+Die Seiten-Auswahl ist Vorauswahl, nicht Entscheidung: Abgelehnt wird
+ausschließlich im Screening, mit Begründung im Scanner. Die Quote-Token-Prüfung
+bleibt deshalb clientseitig — `filter_by` verknüpft nur mit UND, und SOL kann
+Token X *oder* Token Y sein.
+
 ## Presets
 
 Ausgeliefert werden drei Risikoprofile, die im Paper-Trading **gleichzeitig** auf
@@ -104,7 +130,7 @@ pnpm --filter @lping/db db:check   # DB-Roundtrip prüfen (nach db:migrate)
 # Scanner: Discovery → Screening → Score-Tabelle (Netzwerk nötig).
 # Persistiert Kandidaten + Snapshots, wenn DATABASE_URL gesetzt ist:
 pnpm --filter @lping/bot scan
-pnpm --filter @lping/bot scan -- --pages 4 --top 8   # kleinerer/schnellerer Lauf
+pnpm --filter @lping/bot scan -- --pages 1 --top 8   # kleinerer/schnellerer Lauf
 pnpm --filter @lping/bot scan -- --no-db             # ohne Persistenz
 
 # Paper-Trading: alle Presets parallel simulieren (benötigt Datenbank).

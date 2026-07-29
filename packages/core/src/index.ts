@@ -43,9 +43,14 @@ export {
 } from "./lifecycle/states";
 export type { LifecycleState, TransitionTrigger } from "./lifecycle/states";
 
+export { METRIC_WINDOWS, feeCurrencyOf } from "./domain/types";
 export type {
   TokenRef,
   PoolMetrics,
+  PoolTokenInfo,
+  CollectFeeMode,
+  MetricWindow,
+  WindowedMetric,
   MarketPairSnapshot,
   TokenRiskReport,
   SwapQuote,
@@ -79,8 +84,16 @@ export type {
   ScoreComponent,
 } from "./screening/types";
 
-export { classifyForPreset, shortlistRank } from "./discovery/replicate";
+export {
+  classifyForPreset,
+  shortlistRank,
+  minTvlAcrossPresets,
+  DISCOVERY_THRESHOLD_FACTOR,
+} from "./discovery/replicate";
 export type { ClassifyResult } from "./discovery/replicate";
+
+export { DISCOVERY_STRATEGIES, buildDiscoveryFilter } from "./discovery/query";
+export type { DiscoveryStrategy } from "./discovery/query";
 
 export {
   binPrice,

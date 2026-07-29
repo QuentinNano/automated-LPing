@@ -1,5 +1,13 @@
 import { z } from "zod";
-import type { AdapterHealth, PoolMetrics } from "@lping/core";
+import {
+  METRIC_WINDOWS,
+  type AdapterHealth,
+  type CollectFeeMode,
+  type MetricWindow,
+  type PoolMetrics,
+  type PoolTokenInfo,
+  type WindowedMetric,
+} from "@lping/core";
 import { AdapterError, TokenBucket, fetchJson, type FetchLike } from "./http";
 
 /**
@@ -22,8 +30,35 @@ export interface MeteoraPairsPage {
   total?: number;
   /** Anzahl Einträge, aus denen sich keine Pool-Metriken lesen ließen. */
   skipped: number;
+  /**
+   * Rohanzahl der Einträge dieser Seite (verwertbare + übersprungene).
+   * Die Pagination muss hieran entscheiden, ob eine weitere Seite folgt:
+   * `pairs.length` allein bricht zu früh ab, sobald ein Datensatz unbrauchbar
+   * ist — und genau das ist bei blacklisteten Pools der Normalfall.
+   */
+  rawCount: number;
   /** Welche Schnittstelle die Daten geliefert hat. */
   source: MeteoraSourceId;
+  /** Ob die Quelle die serverseitigen Filter/Sortierungen unterstützt. */
+  serverFiltered: boolean;
+}
+
+/**
+ * Abfrageparameter der aktuellen datapi-Schnittstelle.
+ *
+ * `sortBy`/`filterBy` verlagern die Vorauswahl auf den Server. Das ist der
+ * Unterschied zwischen "die 800 volumenstärksten Pools ansehen" und "die
+ * Pools ansehen, die zum Preset passen": frische Degen-Pools stehen in einer
+ * Sortierung nach 24-Stunden-Volumen weit hinten und wurden bislang nie
+ * erreicht.
+ */
+export interface MeteoraListQuery {
+  page?: number;
+  limit?: number;
+  /** z. B. `volume_24h:desc`, `fee_tvl_ratio_1h:desc`, `pool_created_at:desc`. */
+  sortBy?: string;
+  /** z. B. `is_blacklisted=false && tvl>=25000`. */
+  filterBy?: string;
 }
 
 export type MeteoraSourceId = "datapi" | "legacy";
@@ -34,8 +69,11 @@ interface MeteoraSource {
   listPath: string;
   poolPath: (address: string) => string;
   /** Query-Parameter für eine Seite; null = Endpunkt kennt keine Pagination. */
-  listParams: ((page: number, limit: number) => Record<string, string | number>) | null;
+  listParams: ((query: MeteoraListQuery) => Record<string, string | number>) | null;
 }
+
+/** Obergrenze der dokumentierten Schnittstelle für `page_size`. */
+export const MAX_POOL_PAGE_SIZE = 1000;
 
 const SOURCES: MeteoraSource[] = [
   {
@@ -43,11 +81,13 @@ const SOURCES: MeteoraSource[] = [
     baseUrl: "https://dlmm.datapi.meteora.ag",
     listPath: "/pools",
     poolPath: (address) => `/pools/${address}`,
-    // Seiten sind 1-basiert; nach Volumen sortiert kommen die aktivsten zuerst.
-    listParams: (page, limit) => ({
+    // Seiten sind 1-basiert. Sortierung und Filter sind serverseitig, damit die
+    // Vorauswahl nicht davon abhängt, was in den ersten Seiten zufällig steht.
+    listParams: ({ page = 0, limit = 50, sortBy, filterBy }) => ({
       page: page + 1,
-      page_size: limit,
-      sort_by: "volume_24h:desc",
+      page_size: Math.min(limit, MAX_POOL_PAGE_SIZE),
+      sort_by: sortBy ?? "volume_24h:desc",
+      ...(filterBy !== undefined && filterBy !== "" ? { filter_by: filterBy } : {}),
     }),
   },
   {
@@ -119,7 +159,7 @@ export class MeteoraAdapter {
     throw lastError ?? new Error(`Pool ${address} nicht abrufbar`);
   }
 
-  async getPairsPage(params: { page?: number; limit?: number } = {}): Promise<MeteoraPairsPage> {
+  async getPairsPage(params: MeteoraListQuery = {}): Promise<MeteoraPairsPage> {
     const page = params.page ?? 0;
     const limit = params.limit ?? 50;
 
@@ -129,7 +169,9 @@ export class MeteoraAdapter {
       try {
         const payload = await fetchJson(url, {
           schema: z.unknown(),
-          ...(source.listParams !== null ? { searchParams: source.listParams(page, limit) } : {}),
+          ...(source.listParams !== null
+            ? { searchParams: source.listParams({ ...params, page, limit }) }
+            : {}),
           ...this.requestOptions(),
         });
 
@@ -150,7 +192,12 @@ export class MeteoraAdapter {
         return {
           pairs,
           skipped,
+          rawCount: slice.length,
           source: source.id,
+          // Die ältere Schnittstelle kennt weder sort_by noch filter_by; sie
+          // liefert ungefiltert. Der Aufrufer muss deshalb weiterhin selbst
+          // filtern — serverseitige Filter sind Vorauswahl, nie Entscheidung.
+          serverFiltered: source.listParams !== null,
           ...(total !== undefined
             ? { total }
             : source.listParams === null
@@ -231,42 +278,78 @@ export function normalizeMeteoraPair(raw: unknown): PoolMetrics | null {
   }
 
   const tvlUsd = pickNumber(scopes, ["tvl", "liquidity", "tvl_usd", "liquidity_usd"]);
-  const volume24hUsd = pickNumber(scopes, ["volume", "trade_volume_24h", "volume_24h", "volume24h"]);
-  const fees24hUsd = pickNumber(scopes, ["fees", "fees_24h", "fee_24h", "fees24h"]);
 
-  // Die API liefert das Fee/TVL-Verhältnis teils fertig; sonst selbst rechnen.
-  const reportedRatio = pickNumber(scopes, ["fee_tvl_ratio", "fee_tvl_ratio_24h"]);
-  const feeTvl24hPct =
-    reportedRatio ??
-    (tvlUsd !== undefined && tvlUsd > 0 && fees24hUsd !== undefined
-      ? (fees24hUsd / tvlUsd) * 100
-      : undefined);
+  // Kennzahlen über alle von der API gelieferten Fenster, nicht nur 24 h:
+  // die kurzen Fenster tragen den Trend, den die Optimierung braucht.
+  const volumeUsd = pickWindows(scopes, ["volume", "volume_usd"], {
+    h24: ["trade_volume_24h", "volume_24h", "volume24h"],
+  });
+  const feesUsd = pickWindows(scopes, ["fees", "fees_usd"], {
+    h24: ["fees_24h", "fee_24h", "fees24h"],
+  });
+  const protocolFeesUsd = pickWindows(scopes, ["protocol_fees"], {});
+  const feeTvlPct = pickWindows(scopes, ["fee_tvl_ratio"], {
+    h24: ["fee_tvl_ratio_24h"],
+  });
+
+  const volume24hUsd = volumeUsd.h24;
+  const fees24hUsd = feesUsd.h24;
+
+  // Fehlt das Verhältnis für ein Fenster, aber Gebühren und TVL liegen vor,
+  // wird es gerechnet — die API liefert es nicht für jedes Fenster.
+  if (tvlUsd !== undefined && tvlUsd > 0) {
+    for (const window of METRIC_WINDOWS) {
+      if (feeTvlPct[window] !== undefined) continue;
+      const fees = feesUsd[window];
+      if (fees !== undefined) feeTvlPct[window] = (fees / tvlUsd) * 100;
+    }
+  }
+  const feeTvl24hPct = feeTvlPct.h24;
 
   const name = pickString(scopes, ["name", "pair_name", "symbol"]);
-  const baseFeePct = pickNumber(scopes, [
-    "base_fee_pct",
-    "base_fee_percentage",
-    "base_fee",
+  const dynamicFeePct = pickNumber(scopes, ["dynamic_fee_pct", "current_fee_pct"]);
+  const baseFeePct =
+    pickNumber(scopes, ["base_fee_pct", "base_fee_percentage", "base_fee"]) ??
     // Fällt die Basisgebühr aus, ist die aktuelle dynamische Gebühr die beste
     // verfügbare Näherung für die Ertragskraft des Pools.
-    "dynamic_fee_pct",
-    "current_fee_pct",
-  ]);
+    dynamicFeePct;
   const maxFeePct = pickNumber(scopes, ["max_fee_pct", "max_fee_percentage", "max_fee"]);
+  const protocolFeePct = pickNumber(scopes, [
+    "protocol_fee_pct",
+    "protocol_fee_percentage",
+    "protocol_share_pct",
+  ]);
+  const collectFeeMode = pickCollectFeeMode(scopes);
   const priceNative = pickNumber(scopes, ["current_price", "price", "price_native"]);
   const apr = pickNumber(scopes, ["apr", "apr_24h"]);
   const apy = pickNumber(scopes, ["apy", "apy_24h"]);
+  const hasFarm = pickBoolean(scopes, ["has_farm"]);
+  const farmApr = pickNumber(scopes, ["farm_apr"]);
+  const farmApy = pickNumber(scopes, ["farm_apy"]);
+  const launchpad = pickString(scopes, ["launchpad"]);
+  const poolCreatedAt = pickDate(scopes, ["created_at", "pool_created_at"]);
+  const tokenX = pickTokenInfo(raw, ["token_x", "tokenX"], mintX);
+  const tokenY = pickTokenInfo(raw, ["token_y", "tokenY"], mintY);
 
   return {
     poolAddress,
     mintX,
     mintY,
     binStep,
+    volumeUsd,
+    feesUsd,
+    feeTvlPct,
+    protocolFeesUsd,
+    rewardMints: pickRewardMints(scopes),
+    tags: pickStringArray(scopes, ["tags"]),
     fetchedAt: new Date(),
     source: "meteora",
     ...(name !== undefined ? { name } : {}),
     ...(baseFeePct !== undefined ? { baseFeePct } : {}),
     ...(maxFeePct !== undefined ? { maxFeePct } : {}),
+    ...(dynamicFeePct !== undefined ? { dynamicFeePct } : {}),
+    ...(protocolFeePct !== undefined ? { protocolFeePct } : {}),
+    ...(collectFeeMode !== undefined ? { collectFeeMode } : {}),
     ...(tvlUsd !== undefined ? { tvlUsd } : {}),
     ...(volume24hUsd !== undefined ? { volume24hUsd } : {}),
     ...(fees24hUsd !== undefined ? { fees24hUsd } : {}),
@@ -274,24 +357,38 @@ export function normalizeMeteoraPair(raw: unknown): PoolMetrics | null {
     ...(priceNative !== undefined ? { priceNative } : {}),
     ...(apr !== undefined ? { apr } : {}),
     ...(apy !== undefined ? { apy } : {}),
+    ...(hasFarm !== undefined ? { hasFarm } : {}),
+    ...(farmApr !== undefined ? { farmApr } : {}),
+    ...(farmApy !== undefined ? { farmApy } : {}),
+    ...(launchpad !== undefined ? { launchpad } : {}),
+    ...(poolCreatedAt !== undefined ? { poolCreatedAt } : {}),
+    ...(tokenX !== undefined ? { tokenX } : {}),
+    ...(tokenY !== undefined ? { tokenY } : {}),
   };
 }
 
 /**
  * Kennzahlen liegen je nach Schnittstelle flach (`volume_24h: 1234`) oder als
- * Objekt mit Zeitfenstern (`volume: { hour_1: …, hour_24: … }`). Diese Liste
- * deckt die gebräuchlichen Schreibweisen des 24-Stunden-Fensters ab.
+ * Objekt mit Zeitfenstern (`volume: { "1h": …, "24h": … }`). Die dokumentierte
+ * datapi-Form nutzt `"30m"`/`"1h"`/…; ältere Antworten `hour_1`/`hour_24`.
+ * Deshalb je Fenster eine Alias-Liste statt eines festen Schlüssels.
  */
-const WINDOW_24H_KEYS = [
-  "hour_24",
-  "h24",
-  "24h",
-  "hour24",
-  "last_24h",
-  "day_1",
-  "d1",
-  "min_1440",
-];
+const WINDOW_KEYS: Record<MetricWindow, string[]> = {
+  m30: ["30m", "min_30", "minute_30", "m30", "last_30m"],
+  h1: ["1h", "hour_1", "h1", "hour1", "last_1h", "min_60"],
+  h2: ["2h", "hour_2", "h2", "hour2", "last_2h"],
+  h4: ["4h", "hour_4", "h4", "hour4", "last_4h"],
+  h12: ["12h", "hour_12", "h12", "hour12", "last_12h"],
+  h24: ["24h", "hour_24", "h24", "hour24", "last_24h", "day_1", "d1", "min_1440"],
+};
+
+const WINDOW_24H_KEYS = WINDOW_KEYS.h24;
+
+/** Platzhalter, mit denen Meteora "kein Reward-Token" ausdrückt. */
+const EMPTY_MINTS = new Set([
+  "11111111111111111111111111111111",
+  "",
+]);
 
 /**
  * Verschachtelte Container, in denen Felder ebenfalls stehen können —
@@ -354,6 +451,181 @@ function pickNumber(scopes: Record<string, unknown>[], keys: string[]): number |
         }
       }
     }
+  }
+  return undefined;
+}
+
+/**
+ * Liest eine Kennzahl über alle Zeitfenster.
+ *
+ * `containerKeys` sind die Objekte mit Fenster-Unterschlüsseln
+ * (`volume: { "1h": … }`), `flatKeys` einzelne flache Felder je Fenster
+ * (`trade_volume_24h`) für die ältere Schnittstelle.
+ */
+function pickWindows(
+  scopes: Record<string, unknown>[],
+  containerKeys: string[],
+  flatKeys: Partial<Record<MetricWindow, string[]>>,
+): WindowedMetric {
+  const result: WindowedMetric = {};
+  for (const window of METRIC_WINDOWS) {
+    let value: number | undefined;
+    for (const containerKey of containerKeys) {
+      for (const scope of scopes) {
+        const container = scope[containerKey];
+        if (!isRecord(container)) continue;
+        for (const alias of WINDOW_KEYS[window]) {
+          const candidate = toNumber(container[alias]);
+          if (candidate !== undefined) {
+            value = candidate;
+            break;
+          }
+        }
+        if (value !== undefined) break;
+      }
+      if (value !== undefined) break;
+    }
+    // Flache Felder erst als Rückfallebene: das Fenster-Objekt ist genauer.
+    value ??= pickFlat(scopes, flatKeys[window] ?? []);
+    if (value !== undefined) result[window] = value;
+  }
+  return result;
+}
+
+/** Zahl aus flachen Feldern, ohne Fenster-Objekte zu berücksichtigen. */
+function pickFlat(scopes: Record<string, unknown>[], keys: string[]): number | undefined {
+  for (const key of keys) {
+    for (const scope of scopes) {
+      const value = toNumber(scope[key]);
+      if (value !== undefined) return value;
+    }
+  }
+  return undefined;
+}
+
+function pickBoolean(scopes: Record<string, unknown>[], keys: string[]): boolean | undefined {
+  for (const key of keys) {
+    for (const scope of scopes) {
+      const value = scope[key];
+      if (typeof value === "boolean") return value;
+      if (value === "true") return true;
+      if (value === "false") return false;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Zeitstempel als ISO-String oder Unix-Zeit. Die OpenAPI-Spezifikation nennt
+ * `created_at` als Integer, ältere Antworten liefern ISO-Strings — beides wird
+ * akzeptiert. Sekunden und Millisekunden werden an der Größe unterschieden.
+ */
+function pickDate(scopes: Record<string, unknown>[], keys: string[]): Date | undefined {
+  for (const key of keys) {
+    for (const scope of scopes) {
+      const value = scope[key];
+      if (typeof value === "string" && value.trim() !== "") {
+        const asNumber = Number(value);
+        const parsed = Number.isFinite(asNumber)
+          ? fromEpoch(asNumber)
+          : new Date(value);
+        if (!Number.isNaN(parsed.getTime())) return parsed;
+      }
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        return fromEpoch(value);
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Unterscheidet Sekunden von Millisekunden: 1e12 liegt im Jahr 2001 ff. */
+function fromEpoch(value: number): Date {
+  return new Date(value < 1e12 ? value * 1000 : value);
+}
+
+/** `collect_fee_mode`: 0 = Input-Token, 1 = immer Token Y. */
+function pickCollectFeeMode(
+  scopes: Record<string, unknown>[],
+): CollectFeeMode | undefined {
+  for (const key of ["collect_fee_mode", "collectFeeMode"]) {
+    for (const scope of scopes) {
+      const value = scope[key];
+      const asNumber = toNumber(value);
+      if (asNumber === 0) return "input_only";
+      if (asNumber === 1) return "only_y";
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === "inputonly" || normalized === "input_only") return "input_only";
+        if (normalized === "onlyy" || normalized === "only_y") return "only_y";
+      }
+    }
+  }
+  return undefined;
+}
+
+function pickStringArray(scopes: Record<string, unknown>[], keys: string[]): string[] {
+  for (const key of keys) {
+    for (const scope of scopes) {
+      const value = scope[key];
+      if (Array.isArray(value)) {
+        return value.filter((entry): entry is string => typeof entry === "string");
+      }
+    }
+  }
+  return [];
+}
+
+function pickRewardMints(scopes: Record<string, unknown>[]): string[] {
+  const mints: string[] = [];
+  for (const key of ["reward_mint_x", "reward_mint_y", "rewardMintX", "rewardMintY"]) {
+    const value = pickString(scopes, [key]);
+    if (value !== undefined && !EMPTY_MINTS.has(value) && !mints.includes(value)) {
+      mints.push(value);
+    }
+  }
+  return mints;
+}
+
+/**
+ * Token-Angaben, die die Pool-API bereits mitliefert. Besonders
+ * `freeze_authority_disabled` und `holders` ersparen dem Screening einen
+ * eigenen Abruf — bislang wurden beide ausschließlich über RugCheck geholt und
+ * bei fehlender Antwort fail-closed verworfen.
+ */
+function pickTokenInfo(
+  raw: Record<string, unknown>,
+  keys: string[],
+  mint: string,
+): PoolTokenInfo | undefined {
+  for (const key of keys) {
+    const value = raw[key];
+    if (!isRecord(value)) continue;
+    const scopes = [value];
+    const symbol = pickString(scopes, ["symbol"]);
+    const name = pickString(scopes, ["name"]);
+    const decimals = pickNumber(scopes, ["decimals"]);
+    const holders = pickNumber(scopes, ["holders", "holder_count"]);
+    const isVerified = pickBoolean(scopes, ["is_verified", "verified"]);
+    const freezeAuthorityDisabled = pickBoolean(scopes, [
+      "freeze_authority_disabled",
+      "freezeAuthorityDisabled",
+    ]);
+    const priceUsd = pickNumber(scopes, ["price", "price_usd"]);
+    const marketCapUsd = pickNumber(scopes, ["market_cap", "market_cap_usd"]);
+    const totalSupply = pickNumber(scopes, ["total_supply"]);
+    return {
+      mint,
+      ...(symbol !== undefined ? { symbol } : {}),
+      ...(name !== undefined ? { name } : {}),
+      ...(decimals !== undefined ? { decimals } : {}),
+      ...(holders !== undefined ? { holders } : {}),
+      ...(isVerified !== undefined ? { isVerified } : {}),
+      ...(freezeAuthorityDisabled !== undefined ? { freezeAuthorityDisabled } : {}),
+      ...(priceUsd !== undefined ? { priceUsd } : {}),
+      ...(marketCapUsd !== undefined ? { marketCapUsd } : {}),
+      ...(totalSupply !== undefined ? { totalSupply } : {}),
+    };
   }
   return undefined;
 }

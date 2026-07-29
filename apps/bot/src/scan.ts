@@ -1,11 +1,13 @@
 import {
   aggregateMarket,
+  buildDiscoveryFilter,
   buildFeatureVector,
   classifyForPreset,
   priceDivergencePct,
   screenCandidate,
   shortlistRank,
   tokenSideOf,
+  DISCOVERY_STRATEGIES,
   FEATURE_VERSION,
   type BotConfig,
   type FeatureVector,
@@ -31,7 +33,17 @@ export interface ScanDeps {
     getPairsPage(params: {
       page?: number;
       limit?: number;
-    }): Promise<{ pairs: PoolMetrics[]; skipped: number; total?: number }>;
+      sortBy?: string;
+      filterBy?: string;
+    }): Promise<{
+      pairs: PoolMetrics[];
+      skipped: number;
+      total?: number;
+      /** Rohanzahl der Einträge — entscheidet über eine Folgeseite. */
+      rawCount?: number;
+      /** Ob die Quelle sort_by/filter_by unterstützt hat. */
+      serverFiltered?: boolean;
+    }>;
   };
   dexscreener: {
     getPairsForToken(mint: string): Promise<{ pairs: MarketPairSnapshot[]; skipped: number }>;
@@ -68,9 +80,89 @@ export interface ScanDeps {
 }
 
 export interface ScanOptions {
+  /** Seiten **je Discovery-Strategie**. */
   pages?: number;
   pageLimit?: number;
   topPerPreset?: number;
+}
+
+/** Ergebnis einer Discovery-Runde über alle Strategien. */
+export interface DiscoveryResult {
+  pools: PoolMetrics[];
+  /** Neu gefundene Pools je Strategie (nach Dedupe gegen vorherige). */
+  perStrategy: { id: string; found: number; added: number }[];
+  /** Ob die Quelle serverseitig gefiltert hat. */
+  serverFiltered: boolean;
+  /** Angewandter `filter_by`-Ausdruck. */
+  filter: string;
+}
+
+/**
+ * Discovery über mehrere Sortierungen (KONZEPT.md 4.1).
+ *
+ * Der Filter läuft serverseitig, die Sortierungen werden zusammengeführt und
+ * nach Pool-Adresse dedupliziert. Wichtig ist der Abbruch: Er hängt an der
+ * **Rohanzahl** der Einträge, nicht an den verwertbaren — sonst beendet ein
+ * einzelner unbrauchbarer Datensatz (etwa ein blacklisteter Pool) die Suche
+ * mitten in der Liste.
+ */
+export async function discoverPools(
+  deps: ScanDeps,
+  config: BotConfig,
+  options: ScanOptions = {},
+): Promise<DiscoveryResult> {
+  const log = deps.log ?? (() => {});
+  const pagesPerStrategy = options.pages ?? 2;
+  const pageLimit = options.pageLimit ?? 500;
+  const filter = buildDiscoveryFilter(config);
+
+  const byAddress = new Map<string, PoolMetrics>();
+  const perStrategy: DiscoveryResult["perStrategy"] = [];
+  let serverFiltered = true;
+
+  for (const strategy of DISCOVERY_STRATEGIES) {
+    const before = byAddress.size;
+    let found = 0;
+
+    for (let page = 0; page < pagesPerStrategy; page++) {
+      const result = await deps.meteora.getPairsPage({
+        page,
+        limit: pageLimit,
+        sortBy: strategy.sortBy,
+        filterBy: filter,
+      });
+      found += result.pairs.length;
+      for (const pool of result.pairs) {
+        if (!byAddress.has(pool.poolAddress)) byAddress.set(pool.poolAddress, pool);
+      }
+
+      if (result.serverFiltered === false) serverFiltered = false;
+
+      // Weniger Rohdatensätze als angefragt = letzte Seite.
+      const raw = result.rawCount ?? result.pairs.length + result.skipped;
+      if (raw < pageLimit) break;
+      // Ohne serverseitige Sortierung liefert jede Seite dasselbe; dann bringt
+      // eine zweite Strategie nichts und wir sparen die Abrufe.
+      if (result.serverFiltered === false) break;
+    }
+
+    perStrategy.push({ id: strategy.id, found, added: byAddress.size - before });
+    if (!serverFiltered) {
+      log(
+        `Discovery: Quelle ohne serverseitige Sortierung — nur eine Runde ` +
+          `(${byAddress.size} Pools). Frische Pools können fehlen.`,
+      );
+      break;
+    }
+  }
+
+  const pools = [...byAddress.values()];
+  log(
+    `Discovery: ${pools.length} Pools über ${perStrategy.length} Sortierung(en) ` +
+      `[${perStrategy.map((s) => `${s.id} +${s.added}`).join(", ")}], Filter: ${filter}`,
+  );
+
+  return { pools, perStrategy, serverFiltered, filter };
 }
 
 export interface ScanRow {
@@ -82,6 +174,8 @@ export interface ScanRow {
 
 export interface ScanSummary {
   poolsScanned: number;
+  /** Wie die Grundgesamtheit zustande kam (Sortierungen, Filter). */
+  discovery: Omit<DiscoveryResult, "pools">;
   shortlisted: Record<PresetKind, number>;
   /** Häufigste Ausschlussgründe des Vor-Filters je Preset (absteigend). */
   prefilterReasons: Record<PresetKind, [string, number][]>;
@@ -113,18 +207,11 @@ export async function runScan(
   options: ScanOptions = {},
 ): Promise<ScanSummary> {
   const log = deps.log ?? (() => {});
-  const pages = options.pages ?? 8;
-  const pageLimit = options.pageLimit ?? 100;
   const topPerPreset = options.topPerPreset ?? 12;
 
-  // 1) Discovery: Meteora-Pools seitenweise laden.
-  const pools: PoolMetrics[] = [];
-  for (let page = 0; page < pages; page++) {
-    const result = await deps.meteora.getPairsPage({ page, limit: pageLimit });
-    pools.push(...result.pairs);
-    if (result.pairs.length < pageLimit) break;
-  }
-  log(`Discovery: ${pools.length} Pools geladen`);
+  // 1) Discovery: mehrere Sortierungen serverseitig gefiltert zusammenführen.
+  const discovery = await discoverPools(deps, config, options);
+  const pools = discovery.pools;
 
   // 2) Vor-Filter + Shortlist je Preset (billig, rein lokal).
   const presetIds = activePresetIds(config);
@@ -291,6 +378,11 @@ export async function runScan(
 
   return {
     poolsScanned: pools.length,
+    discovery: {
+      perStrategy: discovery.perStrategy,
+      serverFiltered: discovery.serverFiltered,
+      filter: discovery.filter,
+    },
     shortlisted,
     prefilterReasons,
     accepted: rows.filter((r) => r.screening.verdict === "accepted").length,
@@ -374,8 +466,22 @@ export function formatScanTable(summary: ScanSummary): string {
       `akzeptiert ${summary.accepted}, abgelehnt ${summary.rejected} | ` +
       `persistiert ${summary.persisted}` +
       (summary.tracked > 0 ? ` | aufgezeichnet ${summary.tracked}` : ""),
+    formatDiscovery(summary.discovery),
   );
   return lines.join("\n");
+}
+
+/**
+ * Welche Sortierung welche Pools beigetragen hat. Steht in der Ausgabe, weil
+ * "die Discovery findet nichts Frisches" sonst nicht von "es gibt nichts
+ * Frisches" zu unterscheiden ist.
+ */
+function formatDiscovery(discovery: ScanSummary["discovery"]): string {
+  const parts = discovery.perStrategy.map((s) => `${s.id} +${s.added}/${s.found}`).join(", ");
+  const base = `Discovery: ${parts || "—"} | Filter ${discovery.filter}`;
+  return discovery.serverFiltered
+    ? base
+    : `${base}\n! Quelle ohne serverseitige Sortierung (ältere Schnittstelle) — frische Pools können fehlen.`;
 }
 
 function pad(value: string, width: number): string {

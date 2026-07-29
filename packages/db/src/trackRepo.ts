@@ -383,16 +383,28 @@ export class TrackRepo {
    * — bei zeitweise unterbrochener Aufzeichnung ist das der Regelfall.
    *
    * `minCoverageRatio` verlangt einen Mindestanteil des Horizonts (Default 0,7).
+   *
+   * `featureVersion` grenzt auf ein Merkmalsschema ein. Ohne die Angabe kommen
+   * Zeilen verschiedener Versionen gemischt zurück — die haben unterschiedliche
+   * Spalten, und ein Modell darauf zu trainieren erzeugt stillschweigend
+   * fehlende Werte statt eines Fehlers. `featureVersions()` zeigt, was vorliegt.
    */
   async exportDataset(
     horizonHours: number,
-    options: { minCoverageRatio?: number; minObservations?: number } = {},
+    options: {
+      minCoverageRatio?: number;
+      minObservations?: number;
+      featureVersion?: number;
+    } = {},
   ): Promise<DatasetRow[]> {
     const minCoverage = (options.minCoverageRatio ?? 0.7) * horizonHours;
     const minObservations = options.minObservations ?? 2;
 
     const rows = await this.prisma.candidateFeature.findMany({
       where: {
+        ...(options.featureVersion !== undefined
+          ? { featureVersion: options.featureVersion }
+          : {}),
         outcomes: {
           some: {
             horizonHours,
@@ -434,6 +446,32 @@ export class TrackRepo {
           },
         },
       ];
+    });
+  }
+
+  /**
+   * Welche Merkmalsschemata liegen im Datensatz vor, mit Zeitraum und Anzahl?
+   *
+   * Nach einer Schema-Erweiterung enthält die Aufzeichnung zwangsläufig beide
+   * Versionen. Ohne diese Übersicht bemerkt man das erst beim Training — und
+   * dann sieht es aus wie fehlende Daten, nicht wie zwei Schemata.
+   */
+  async featureVersions(): Promise<
+    { featureVersion: number; count: number; firstAt: Date; lastAt: Date }[]
+  > {
+    const grouped = await this.prisma.candidateFeature.groupBy({
+      by: ["featureVersion"],
+      _count: { _all: true },
+      _min: { capturedAt: true },
+      _max: { capturedAt: true },
+      orderBy: { featureVersion: "asc" },
+    });
+
+    return grouped.flatMap((row) => {
+      const firstAt = row._min.capturedAt;
+      const lastAt = row._max.capturedAt;
+      if (firstAt === null || lastAt === null) return [];
+      return [{ featureVersion: row.featureVersion, count: row._count._all, firstAt, lastAt }];
     });
   }
 

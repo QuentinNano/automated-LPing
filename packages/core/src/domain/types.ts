@@ -10,6 +10,44 @@ export interface TokenRef {
   decimals?: number;
 }
 
+/**
+ * Zeitfenster, die die Meteora-Pool-API je Kennzahl liefert
+ * (`30m`, `1h`, `2h`, `4h`, `12h`, `24h`).
+ *
+ * Warum alle Fenster geführt werden: KONZEPT-ML.md 3.2/4.2 stützt sich auf
+ * Trends und Stetigkeit ("Fee/TVL-Trend statt nur -Niveau"), nicht auf das
+ * 24-Stunden-Niveau allein. Die Werte kommen im selben Response — sie später
+ * nachzuholen ist unmöglich, weil es keine Historie zum Abrufen gibt.
+ */
+export const METRIC_WINDOWS = ["m30", "h1", "h2", "h4", "h12", "h24"] as const;
+export type MetricWindow = (typeof METRIC_WINDOWS)[number];
+export type WindowedMetric = Partial<Record<MetricWindow, number>>;
+
+/**
+ * Gebühren-Währung eines Pools (`collect_fee_mode` in `pool_config`).
+ * - `input_only` (0): Gebühr im Input-Token des Swaps, folgt also der Richtung.
+ * - `only_y` (1): Gebühr immer in Token Y, auch wenn Y der Output ist.
+ */
+export type CollectFeeMode = "input_only" | "only_y";
+
+/** Token-Angaben, die die Pool-API bereits mitliefert (kein Extra-Request). */
+export interface PoolTokenInfo {
+  mint: string;
+  symbol?: string;
+  name?: string;
+  decimals?: number;
+  holders?: number;
+  isVerified?: boolean;
+  /**
+   * Aus der Pool-API. Achtung: `true` heißt "Freeze-Authority entzogen".
+   * Fehlt das Feld, bleibt es `undefined` — nie als "unbedenklich" lesen.
+   */
+  freezeAuthorityDisabled?: boolean;
+  priceUsd?: number;
+  marketCapUsd?: number;
+  totalSupply?: number;
+}
+
 /** Pool-Kennzahlen aus der Meteora-DLMM-API. */
 export interface PoolMetrics {
   poolAddress: string;
@@ -17,18 +55,75 @@ export interface PoolMetrics {
   mintX: string;
   mintY: string;
   binStep: number;
+  /** Basisgebühr (Mindestgebühr) in %. */
   baseFeePct?: number;
+  /** Obergrenze der Gesamtgebühr in %. */
   maxFeePct?: number;
+  /**
+   * Aktuelle Gesamtgebühr = Basisgebühr + volatilitätsabhängige Zusatzgebühr.
+   * Das ist der Satz, mit dem Swaps tatsächlich belastet werden; `baseFeePct`
+   * ist nur die Untergrenze und unterschätzt volatile Pools erheblich.
+   */
+  dynamicFeePct?: number;
+  /**
+   * Protokollanteil an der Handelsgebühr in % **der Gebühr** (nicht des
+   * Volumens). Standard-Pools 10 %, Launch-Pools 20 % — der LP erhält nur den
+   * Rest. Ohne diesen Abzug wird der Fee-Ertrag systematisch zu hoch angesetzt.
+   */
+  protocolFeePct?: number;
+  collectFeeMode?: CollectFeeMode;
   tvlUsd?: number;
+  /** Volumen je Zeitfenster in USD. */
+  volumeUsd: WindowedMetric;
+  /** Gesamt-Handelsgebühren je Zeitfenster in USD (vor Protokollabzug). */
+  feesUsd: WindowedMetric;
+  /** Gebühren/TVL je Zeitfenster in %. */
+  feeTvlPct: WindowedMetric;
+  /** Protokollanteil der Gebühren je Zeitfenster in USD. */
+  protocolFeesUsd: WindowedMetric;
+  /**
+   * 24-Stunden-Kürzel. Spiegeln `volumeUsd.h24` / `feesUsd.h24` /
+   * `feeTvlPct.h24` und werden ausschließlich im Adapter gesetzt — sie
+   * existieren, damit die bestehenden Filter- und Score-Pfade unverändert
+   * bleiben, nicht als zweite Wahrheit.
+   */
   volume24hUsd?: number;
   fees24hUsd?: number;
-  /** fees24h / tvl in %, sofern beide Werte vorliegen. */
   feeTvl24hPct?: number;
   priceNative?: number;
   apr?: number;
   apy?: number;
+  /** Liquidity-Mining: zusätzlicher Ertrag, der neben den Gebühren anfällt. */
+  hasFarm?: boolean;
+  farmApr?: number;
+  farmApy?: number;
+  /** Reward-Mints ohne Platzhalter-Adressen. */
+  rewardMints: string[];
+  tags: string[];
+  launchpad?: string;
+  /** Erstellungszeitpunkt des Pools (nicht des Tokens). */
+  poolCreatedAt?: Date;
+  tokenX?: PoolTokenInfo;
+  tokenY?: PoolTokenInfo;
   fetchedAt: Date;
   source: "meteora";
+}
+
+/**
+ * In welcher Währung die Gebühren dieses Pools anfallen — die Frage, die über
+ * das Token-Exposure geclaimter Gebühren entscheidet (KONZEPT.md 8.3).
+ *
+ * `only_y` allein sagt nichts: Es kommt darauf an, ob SOL Token Y ist. Steht
+ * SOL auf der X-Seite, kehrt derselbe Modus den Vorteil ins Gegenteil, weil
+ * dann alle Gebühren im Memecoin anfallen.
+ */
+export function feeCurrencyOf(
+  pool: Pick<PoolMetrics, "mintX" | "mintY" | "collectFeeMode">,
+  quoteMint: string,
+): "quote" | "base" | "mixed" | null {
+  if (pool.collectFeeMode === undefined) return null;
+  if (pool.collectFeeMode === "input_only") return "mixed";
+  return pool.mintY === quoteMint ? "quote" : "base";
 }
 
 /** Markt-Querschnitt eines Handelspaars (DexScreener). */

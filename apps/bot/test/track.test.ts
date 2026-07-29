@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { PoolMetrics } from "@lping/core";
-import { formatTrackStatus, runTrackCycle, type TrackDeps, type TrackStore } from "../src/track";
+import {
+  formatFeatureVersions,
+  formatTrackStatus,
+  runTrackCycle,
+  type TrackDeps,
+  type TrackStore,
+} from "../src/track";
 import { buildPool } from "../../../packages/core/test/builders";
 
 const T0 = new Date("2026-07-29T12:00:00Z");
@@ -144,5 +150,38 @@ describe("formatTrackStatus", () => {
   it("meldet Stillstand, wenn nichts mehr dazukommt", () => {
     const text = formatTrackStatus({ ...base, features: 0 }, 3000);
     expect(text).toContain("läuft der Scan");
+  });
+});
+
+describe("formatFeatureVersions", () => {
+  const row = (featureVersion: number, count: number, first: string, last: string) => ({
+    featureVersion,
+    count,
+    firstAt: new Date(first),
+    lastAt: new Date(last),
+  });
+
+  it("bleibt knapp, wenn nur ein Schema vorliegt", () => {
+    const text = formatFeatureVersions([row(2, 1500, "2026-07-01", "2026-07-29")]);
+    expect(text).toContain("v2");
+    expect(text).toContain("1500");
+    expect(text).not.toContain("mehrere Versionen");
+  });
+
+  it("weist einen Versionswechsel mit Zeiträumen aus", () => {
+    const text = formatFeatureVersions([
+      row(1, 900, "2026-07-01", "2026-07-28"),
+      row(2, 300, "2026-07-29", "2026-07-29"),
+    ]);
+    expect(text).toContain("mehrere Versionen");
+    expect(text).toContain("v1: 900");
+    expect(text).toContain("v2: 300");
+    expect(text).toContain("2026-07-28");
+    // Die jüngste Version ist die Empfehlung für die Optimierung.
+    expect(text).toContain("jüngste: v2");
+  });
+
+  it("meldet einen leeren Datensatz statt einer leeren Tabelle", () => {
+    expect(formatFeatureVersions([])).toContain("noch keine Aufzeichnungen");
   });
 });

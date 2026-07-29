@@ -16,7 +16,13 @@ import {
 import { loadDefaultsFromDir } from "./loadConfig";
 import { cmdFabriqCheck } from "./fabriqCheck";
 import { cmdApiCheck } from "./apiCheck";
-import { formatHealthReport, formatTrackStatus, runTrackCycle, type TrackDeps } from "./track";
+import {
+  formatFeatureVersions,
+  formatHealthReport,
+  formatTrackStatus,
+  runTrackCycle,
+  type TrackDeps,
+} from "./track";
 import { formatScanTable, runScan, type ScanDeps } from "./scan";
 import {
   formatComparison,
@@ -124,7 +130,9 @@ async function cmdScan(args: string[]): Promise<number> {
     throw error;
   }
 
-  const pages = intFlag(args, "--pages") ?? 8;
+  // --pages zählt Seiten **je Sortierung**; der Default steckt in discoverPools,
+  // damit CLI und Bibliothek nicht auseinanderlaufen.
+  const pages = intFlag(args, "--pages");
   const top = intFlag(args, "--top") ?? 12;
   const noDb = args.includes("--no-db");
 
@@ -158,8 +166,13 @@ async function cmdScan(args: string[]): Promise<number> {
     log: (line) => console.log(`  ${line}`),
   };
 
-  console.log(`Scan gestartet (pages=${pages}, top=${top} je Preset)…\n`);
-  const summary = await runScan(deps, config, { pages, topPerPreset: top });
+  console.log(
+    `Scan gestartet (${pages ?? "Standard"} Seite(n) je Sortierung, top=${top} je Preset)…\n`,
+  );
+  const summary = await runScan(deps, config, {
+    topPerPreset: top,
+    ...(pages !== undefined ? { pages } : {}),
+  });
   console.log("\n" + formatScanTable(summary));
   return 0;
 }
@@ -201,7 +214,7 @@ async function cmdPaper(args: string[]): Promise<number> {
   }
 
   const intervalMin = intFlag(args, "--interval") ?? 0;
-  const pages = intFlag(args, "--pages") ?? 4;
+  const pages = intFlag(args, "--pages");
   const top = intFlag(args, "--top") ?? 8;
   const tickOnly = args.includes("--tick-only");
 
@@ -249,7 +262,7 @@ async function cmdPaper(args: string[]): Promise<number> {
           log: () => {},
         },
         config,
-        { pages, topPerPreset: top },
+        { topPerPreset: top, ...(pages !== undefined ? { pages } : {}) },
       );
       console.log(`  ${summary.accepted} akzeptiert von ${summary.rows.length} geprüften`);
       const opened = await openFromScan(paperDeps, config, summary.rows);
@@ -317,7 +330,7 @@ async function cmdTrack(args: string[]): Promise<number> {
   const intervalMin = intFlag(args, "--interval") ?? 0;
   const limit = intFlag(args, "--limit") ?? 300;
   const scanEvery = args.includes("--no-scan") ? 0 : (intFlag(args, "--scan-every") ?? 4);
-  const pages = intFlag(args, "--pages") ?? 4;
+  const pages = intFlag(args, "--pages");
   const top = intFlag(args, "--top") ?? 12;
 
   // Prüfbericht: beurteilt die Aufzeichnung, statt nur Zahlen zu zeigen.
@@ -327,6 +340,7 @@ async function cmdTrack(args: string[]): Promise<number> {
       const metrics = await store.healthMetrics(new Date(), intervalMin > 0 ? Math.min(15, intervalMin) : 15);
       console.log(formatHealthReport(metrics));
       console.log("\n" + formatTrackStatus(await store.stats()));
+      console.log("\n" + formatFeatureVersions(await store.featureVersions()));
 
       // Der Bericht selbst ist das Ergebnis — deshalb standardmäßig
       // Rückgabewert 0, sonst überdeckt pnpm ihn mit Fehlerrauschen, das wie
@@ -343,6 +357,7 @@ async function cmdTrack(args: string[]): Promise<number> {
 
   if (statusOnly) {
     console.log(formatTrackStatus(await store.stats()));
+    console.log("\n" + formatFeatureVersions(await store.featureVersions()));
     return 0;
   }
 
@@ -389,7 +404,10 @@ async function cmdTrack(args: string[]): Promise<number> {
     if (config !== null && cycle % scanEvery === 0) {
       console.log("Neue Pools suchen…");
       try {
-        const summary = await runScan(scanDeps, config, { pages, topPerPreset: top });
+        const summary = await runScan(scanDeps, config, {
+          topPerPreset: top,
+          ...(pages !== undefined ? { pages } : {}),
+        });
         console.log(
           `  ${summary.poolsScanned} Pools geprüft, ${summary.tracked} Merkmalsvektoren aufgezeichnet`,
         );

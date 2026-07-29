@@ -99,6 +99,16 @@ Information ist Look-Ahead-Bias und macht das Modell wertlos.
   `holderCount`, Audit-Flags — siehe Abschnitt 4
 - Abgeleitet: realisierte Volatilität, TVL-Trend (fließt Liquidität zu oder ab?),
   Volumen-Stetigkeit, Fee/TVL-Trend statt nur -Niveau
+- **Gebührenstruktur (umgesetzt):** `dynamic_fee_pct` (Basis + Volatilitätsaufschlag,
+  der Satz, mit dem Swaps tatsächlich belastet werden), `max_fee_pct`,
+  `protocol_fee_pct` (10 % Standard / 20 % Launch-Pool gehen ans Protokoll, nicht
+  an den LP) und `collect_fee_mode` samt abgeleiteter Gebührenwährung
+  (`fee_currency`: fallen die Gebühren in SOL, im Memecoin oder gemischt an?).
+  Letzteres ist vermutlich das stärkste einzelne Risikomerkmal des Degen-Presets
+  — siehe die Korrektur in KONZEPT.md 8.3.
+- **Pool-Alter (umgesetzt):** `pool_age_hours` aus `created_at`, getrennt vom
+  Token-Alter. Ein neuer Pool auf einem älteren Token ist ein anderer Fall als
+  ein neuer Token.
 
 **Verlauf nach der Entscheidung** (`pool_tracks`): Preis, TVL, Volumen, Gebühren
 in dichten Abständen — 15 min für die ersten 48 h, danach stündlich bis Tag 7.
@@ -389,6 +399,7 @@ kurzfristig als ertragsmindernd erkennen würde.
 | Phase | Inhalt | Aufwand | Kalenderzeit |
 |---|---|---|---|
 | **M1 — Aufzeichnung** ✅ | `tracked_pools`, `candidate_features`, `candidate_outcomes`; `track`-Kommando; Jupiter-Token-API-Adapter (Organic Score); Fortschritts- und Lückenüberwachung | umgesetzt | **läuft** |
+| **M1b — Merkmalsbreite** ✅ | Alle sechs Zeitfenster der Pool-API (`30m`–`24h`) samt Trend- und Stetigkeitsmerkmalen, Gebührenstruktur (dynamische Gebühr, Protokollanteil, `collect_fee_mode`), Farm-Rewards, Pool-Alter, Token-Angaben aus der Pool-API; Discovery über mehrere Sortierungen (`FEATURE_VERSION` 2) | umgesetzt | **läuft** |
 | **M2 — Replay** | Tick-Reader, Einstiege an beliebigen Zeitpunkten, Determinismus, Gleichheitstest Replay ↔ Live | mittel | parallel zu M1 |
 | **M3 — Sensitivität** | Einzelparameter-Analyse, Auswahl der 5–10 relevanten, Bericht | gering | nach ~1 Woche Daten |
 | **M4 — Suche** | Zufallssuche + Verfeinerung, Zielfunktion, Plateau-Bewertung | mittel | nach M3 |

@@ -31,23 +31,55 @@ export function loadDefaultConfig(): BotConfig {
   });
 }
 
-/** Gesunder Degen-Pool: TVL 250k, Vol/TVL 5, Fee/TVL 5 %/24h. */
+/**
+ * Gesunder Degen-Pool: TVL 250k, Vol/TVL 5, Fee/TVL 5 %/24h.
+ *
+ * Die Fenster-Kennzahlen werden aus den 24-Stunden-Werten abgeleitet, damit ein
+ * Test nur das setzen muss, was er prüft. Wer ein bestimmtes Fenster braucht,
+ * überschreibt `volumeUsd`/`feesUsd`/`feeTvlPct` direkt.
+ */
 export function buildPool(overrides: Partial<PoolMetrics> = {}): PoolMetrics {
-  return {
+  const base = {
     poolAddress: POOL_ADDRESS,
     name: "WIF-SOL",
     mintX: TOKEN_MINT,
     mintY: WSOL_MINT,
     binStep: 100,
     baseFeePct: 1,
+    dynamicFeePct: 1.4,
+    protocolFeePct: 10,
+    collectFeeMode: "input_only" as const,
     tvlUsd: 250_000,
     volume24hUsd: 1_250_000,
     fees24hUsd: 12_500,
     feeTvl24hPct: 5,
     priceNative: 0.0000214,
+    rewardMints: [],
+    tags: [],
     fetchedAt: new Date("2026-07-29T12:00:00Z"),
-    source: "meteora",
+    source: "meteora" as const,
     ...overrides,
+  };
+
+  return {
+    ...base,
+    volumeUsd: overrides.volumeUsd ?? spread24h(base.volume24hUsd),
+    feesUsd: overrides.feesUsd ?? spread24h(base.fees24hUsd),
+    feeTvlPct: overrides.feeTvlPct ?? spread24h(base.feeTvl24hPct),
+    protocolFeesUsd: overrides.protocolFeesUsd ?? {},
+  };
+}
+
+/** Verteilt einen 24-Stunden-Wert gleichmäßig auf die kürzeren Fenster. */
+function spread24h(value: number | undefined): NonNullable<PoolMetrics["volumeUsd"]> {
+  if (value === undefined) return {};
+  return {
+    m30: value / 48,
+    h1: value / 24,
+    h2: value / 12,
+    h4: value / 6,
+    h12: value / 2,
+    h24: value,
   };
 }
 
