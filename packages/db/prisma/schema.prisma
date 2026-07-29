@@ -199,6 +199,63 @@ model ConfigVersion {
   @@map("config_versions")
 }
 
+/// Pools, deren Verlauf für die Strategie-Optimierung aufgezeichnet wird
+/// (KONZEPT-ML.md Abschnitt 3). Bewusst unabhängig davon, ob eine Position
+/// eröffnet wurde — nur so entsteht ein verzerrungsfreier Datensatz.
+model TrackedPool {
+  poolAddress   String    @id @map("pool_address")
+  tokenMint     String    @map("token_mint")
+  firstSeenAt   DateTime  @default(now()) @map("first_seen_at")
+  trackUntil    DateTime  @map("track_until")
+  lastTrackedAt DateTime? @map("last_tracked_at")
+  /// Anzahl geschriebener Messpunkte (Datenqualitäts-Kennzahl).
+  pointCount    Int       @default(0) @map("point_count")
+  active        Boolean   @default(true)
+
+  @@index([active, lastTrackedAt])
+  @@map("tracked_pools")
+}
+
+/// Merkmale eines Kandidaten zum Entscheidungszeitpunkt. Enthält per
+/// Konstruktion keine Information aus der Zukunft (Look-Ahead-Bias).
+model CandidateFeature {
+  id             String             @id @default(cuid())
+  poolAddress    String             @map("pool_address")
+  tokenMint      String             @map("token_mint")
+  preset         String
+  capturedAt     DateTime           @default(now()) @map("captured_at")
+  featureVersion Int                @map("feature_version")
+  features       Json
+  score          Decimal?           @db.Decimal(6, 2)
+  verdict        String
+  rejectedBy     String?            @map("rejected_by")
+  outcomes       CandidateOutcome[]
+
+  @@index([poolAddress, capturedAt])
+  @@index([capturedAt])
+  @@map("candidate_features")
+}
+
+/// Ergebnis-Labels je Horizont, ausschließlich aus der Zeit NACH der
+/// Entscheidung berechnet.
+model CandidateOutcome {
+  id             String           @id @default(cuid())
+  featureId      String           @map("feature_id")
+  feature        CandidateFeature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  horizonHours   Int              @map("horizon_hours")
+  priceChangePct Decimal?         @map("price_change_pct") @db.Decimal(14, 4)
+  tvlChangePct   Decimal?         @map("tvl_change_pct") @db.Decimal(14, 4)
+  feeYieldPct    Decimal?         @map("fee_yield_pct") @db.Decimal(14, 4)
+  maxDrawdownPct Decimal?         @map("max_drawdown_pct") @db.Decimal(14, 4)
+  rugged         Boolean          @default(false)
+  observations   Int              @default(0)
+  coveredHours   Decimal          @default(0) @map("covered_hours") @db.Decimal(10, 3)
+  computedAt     DateTime         @default(now()) @map("computed_at")
+
+  @@unique([featureId, horizonHours])
+  @@map("candidate_outcomes")
+}
+
 model BlacklistEntry {
   id        String        @id @default(cuid())
   kind      BlacklistKind

@@ -7,6 +7,7 @@ import {
   DexScreenerAdapter,
   FabriqAdapter,
   JupiterAdapter,
+  JupiterTokenAdapter,
   MeteoraAdapter,
   RugcheckAdapter,
   WSOL_MINT,
@@ -15,6 +16,7 @@ import {
 import { loadDefaultsFromDir } from "./loadConfig";
 import { cmdFabriqCheck } from "./fabriqCheck";
 import { cmdApiCheck } from "./apiCheck";
+import { formatTrackStatus, runTrackCycle, type TrackDeps } from "./track";
 import { formatScanTable, runScan, type ScanDeps } from "./scan";
 import {
   formatComparison,
@@ -47,10 +49,12 @@ async function main(): Promise<number> {
       return cmdScan(process.argv.slice(3));
     case "paper":
       return cmdPaper(process.argv.slice(3));
+    case "track":
+      return cmdTrack(process.argv.slice(3));
     default:
       console.error(
         `Unbekanntes Kommando: ${command}\n` +
-          `Verfügbar: validate | health | scan | paper | api:check | fabriq:check <URL>`,
+          `Verfügbar: validate | health | scan | paper | track | api:check | fabriq:check <URL>`,
       );
       return 2;
   }
@@ -126,10 +130,13 @@ async function cmdScan(args: string[]): Promise<number> {
 
   // Persistenz ist optional: ohne DB läuft der Scan, nur ohne Shadow-Tracking.
   let persist: ScanDeps["persist"] = null;
+  let track: ScanDeps["track"] = null;
   if (!noDb && process.env["DATABASE_URL"] !== undefined && process.env["DATABASE_URL"] !== "") {
     try {
-      const { createPrisma, ScanRepo } = await import("@lping/db");
-      persist = new ScanRepo(createPrisma());
+      const { createPrisma, ScanRepo, TrackRepo } = await import("@lping/db");
+      const prisma = createPrisma();
+      persist = new ScanRepo(prisma);
+      track = new TrackRepo(prisma);
     } catch (error) {
       console.warn(
         `DB-Persistenz nicht verfügbar (${error instanceof Error ? error.message : String(error)}) — ` +
@@ -145,7 +152,9 @@ async function cmdScan(args: string[]): Promise<number> {
     dexscreener: new DexScreenerAdapter(),
     rugcheck: new RugcheckAdapter(),
     jupiter: new JupiterAdapter(),
+    jupiterTokens: new JupiterTokenAdapter(),
     persist,
+    track,
     log: (line) => console.log(`  ${line}`),
   };
 
@@ -270,6 +279,71 @@ async function cmdPaper(args: string[]): Promise<number> {
     }
   }
 
+  return 0;
+}
+
+/**
+ * Datenaufzeichnung für die Strategie-Optimierung (KONZEPT-ML.md M1).
+ *
+ * Eigenes Kommando, weil es unabhängig vom Paper-Trading laufen soll und
+ * deutlich häufiger: Der Wert der Aufzeichnung hängt an lückenloser Kalenderzeit.
+ */
+async function cmdTrack(args: string[]): Promise<number> {
+  const databaseUrl = process.env["DATABASE_URL"];
+  if (databaseUrl === undefined || databaseUrl === "") {
+    console.error(
+      "track benötigt eine Datenbank.\n" +
+        "Setup: docker compose up -d && pnpm db:generate && pnpm db:migrate",
+    );
+    return 1;
+  }
+
+  const { createPrisma, TrackRepo } = await import("@lping/db");
+  const store = new TrackRepo(createPrisma());
+  const meteora = new MeteoraAdapter();
+
+  const statusOnly = args.includes("--status");
+  const intervalMin = intFlag(args, "--interval") ?? 0;
+  const limit = intFlag(args, "--limit") ?? 300;
+
+  if (statusOnly) {
+    console.log(formatTrackStatus(await store.stats()));
+    return 0;
+  }
+
+  const deps: TrackDeps = {
+    store,
+    getPool: (address) => meteora.getPair(address),
+    log: (line) => console.log(`  ${line}`),
+  };
+
+  const runCycle = async (): Promise<void> => {
+    console.log(`\n=== Aufzeichnung ${new Date().toISOString()} ===`);
+    const result = await runTrackCycle(deps, { limit });
+    for (const note of result.notes) console.log(`  ! ${note}`);
+    console.log("\n" + formatTrackStatus(await store.stats()));
+  };
+
+  try {
+    await runCycle();
+  } catch (error) {
+    console.error("\n" + explainFailure(error));
+    if (intervalMin === 0) return 1;
+  }
+
+  if (intervalMin > 0) {
+    console.log(
+      `\nLaufender Betrieb: nächster Durchgang in ${intervalMin} min (Abbruch mit Strg+C).`,
+    );
+    for (;;) {
+      await sleep(intervalMin * 60_000);
+      try {
+        await runCycle();
+      } catch (error) {
+        console.error("\n" + explainFailure(error));
+      }
+    }
+  }
   return 0;
 }
 

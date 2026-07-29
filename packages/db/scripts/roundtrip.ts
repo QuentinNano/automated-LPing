@@ -4,11 +4,13 @@ import path from "node:path";
 import { config as loadEnv } from "dotenv";
 import {
   ConfigService,
+  FEATURE_VERSION,
+  buildFeatureVector,
   parseBotConfig,
   type PoolMetrics,
   type ScreeningResult,
 } from "@lping/core";
-import { PrismaConfigStore, ScanRepo, createPrisma } from "../src/index";
+import { PrismaConfigStore, ScanRepo, TrackRepo, createPrisma } from "../src/index";
 
 /**
  * DB-Roundtrip-Check gegen die per DATABASE_URL konfigurierte Datenbank:
@@ -88,7 +90,9 @@ async function main(): Promise<void> {
       { global: { profitSweepThresholdSol: 4 } },
       { actor: "db:check", reason: "roundtrip" },
     );
-    assert(service.version === startVersion + 1, "Update erzeugt neue Version");
+    // Versionsnummern sind fortlaufende Kennungen, keine lückenlose Folge:
+    // gelöschte Versionen (etwa die dieses Selbsttests) hinterlassen Lücken.
+    assert(service.version > startVersion, "Update erzeugt eine neue, höhere Version");
     assert(
       service.config.global.profitSweepThresholdSol === 4,
       "Patch angekommen (profitSweepThresholdSol=4)",
@@ -132,6 +136,103 @@ async function main(): Promise<void> {
       "Kandidat erscheint in der Shadow-Liste",
     );
 
+    console.log("Aufzeichnung für die Optimierung:");
+    const track = new TrackRepo(prisma);
+    const decisionAt = new Date(Date.now() - 30 * 3_600_000);
+
+    const featureId = await track.recordFeatures({
+      poolAddress: TEST_POOL,
+      tokenMint: "TestMint1111111111111111111111111111111111",
+      preset: "degen",
+      featureVersion: FEATURE_VERSION,
+      features: buildFeatureVector({
+        pool: testPool(),
+        market: null,
+        risk: null,
+        sellability: null,
+        organics: null,
+        priceDivergencePct: null,
+      }),
+      score: 71.5,
+      verdict: "rejected",
+      rejectedBy: ["token_age"],
+      capturedAt: decisionAt,
+    });
+    assert(featureId.length > 0, "Merkmalsvektor gespeichert");
+
+    await track.trackPool(TEST_POOL, "TestMint1111111111111111111111111111111111", decisionAt);
+    const due = await track.duePools();
+    assert(
+      due.some((p) => p.poolAddress === TEST_POOL),
+      "Neu angemeldeter Pool ist sofort fällig",
+    );
+
+    // Verlauf simulieren: Preis fällt über 26 Stunden um 20 %.
+    for (const hours of [0, 1, 6, 24, 26]) {
+      const factor = 1 - 0.2 * (hours / 26);
+      await prisma.poolSnapshot.create({
+        data: {
+          poolAddress: TEST_POOL,
+          ts: new Date(decisionAt.getTime() + hours * 3_600_000),
+          tvlUsd: 123_456,
+          volume24hUsd: 500_000,
+          fees24hUsd: 5_000,
+          feeTvl24hPct: 4.05,
+          priceNative: 0.001 * factor,
+          binStep: 100,
+        },
+      });
+    }
+
+    const written = await track.computeDueOutcomes();
+    assert(written > 0, `Ergebnis-Labels berechnet (${written})`);
+
+    const outcomes = await prisma.candidateOutcome.findMany({
+      where: { featureId },
+      orderBy: { horizonHours: "asc" },
+    });
+    assert(outcomes.length >= 3, `Labels für mehrere Horizonte (${outcomes.length})`);
+
+    const h24 = outcomes.find((o) => o.horizonHours === 24);
+    assert(h24 !== undefined, "24-Stunden-Label vorhanden");
+    assert(
+      h24 !== undefined && Number(h24.priceChangePct) < -15,
+      "Preisrückgang korrekt gemessen",
+    );
+
+    // Ein Horizont, der noch nicht verstrichen ist, darf kein Label bekommen —
+    // sonst wären die Labels systematisch verzerrt.
+    assert(
+      !outcomes.some((o) => o.horizonHours === 168),
+      "Noch nicht verstrichener Horizont bleibt offen",
+    );
+
+    const dataset = await track.exportDataset(24, { minCoverageRatio: 0.1 });
+    assert(
+      dataset.some((row) => row.features["bin_step"] === 100),
+      "Datensatz-Export liefert Merkmale samt Label",
+    );
+    assert(
+      dataset.every((row) => row.outcome.observations > 0 && row.outcome.coveredHours > 0),
+      "Labels tragen ihre Qualitätsangaben mit",
+    );
+
+    // Der Verlauf deckt 26 von 168 Stunden ab: Für den 7-Tage-Horizont ist das
+    // zu wenig, und genau das muss der Export erkennen — sonst trainiert man
+    // später auf Labels, die eine Aufzeichnungslücke sind.
+    const strict = await track.exportDataset(24, { minCoverageRatio: 0.95 });
+    assert(strict.length <= dataset.length, "Strengere Abdeckungsforderung filtert stärker");
+
+    const quality = await track.datasetQuality([1, 24, 168]);
+    const weekly = quality.find((q) => q.horizonHours === 168);
+    assert(
+      weekly !== undefined && weekly.usable === 0,
+      "Lückenhaft belegte Horizonte gelten als unbrauchbar",
+    );
+
+    const stats = await track.stats();
+    assert(stats.features >= 1 && stats.outcomes >= 3, "Statistik zählt Merkmale und Labels");
+
     console.log("\nDB-Roundtrip OK ✔");
   } finally {
     await cleanup(prisma);
@@ -152,6 +253,9 @@ async function cleanup(client: ReturnType<typeof createPrisma>): Promise<void> {
   try {
     await client.poolSnapshot.deleteMany({ where: { poolAddress: { startsWith: TEST_PREFIX } } });
     await client.poolCandidate.deleteMany({ where: { poolAddress: { startsWith: TEST_PREFIX } } });
+    // Outcomes hängen per Cascade an den Features.
+    await client.candidateFeature.deleteMany({ where: { poolAddress: { startsWith: TEST_PREFIX } } });
+    await client.trackedPool.deleteMany({ where: { poolAddress: { startsWith: TEST_PREFIX } } });
     // Die vom Test erzeugte Config-Version zurücknehmen, damit die Historie
     // in der Oberfläche nur echte Änderungen zeigt.
     await client.configVersion.deleteMany({ where: { actor: "db:check" } });

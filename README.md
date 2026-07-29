@@ -6,6 +6,8 @@ Risiko-Filterung, automatisches Eröffnen/Rebalancen/Schließen von Positionen, 
 Parametersteuerung und Analyse-Dashboard.
 
 ➡️ **[KONZEPT.md](./KONZEPT.md)** — vollständiges Umsetzungs- und Risikokonzept.
+➡️ **[KONZEPT-ML.md](./KONZEPT-ML.md)** — datengetriebene Optimierung von Parametern
+und Indikatoren (Planung, noch nicht umgesetzt).
 
 ## Projektstruktur (Monorepo, pnpm)
 
@@ -109,6 +111,20 @@ pnpm --filter @lping/bot scan -- --no-db             # ohne Persistenz
 pnpm --filter @lping/bot paper                       # ein Zyklus
 pnpm --filter @lping/bot paper -- --interval 15      # dauerhaft, alle 15 min
 pnpm --filter @lping/bot paper -- --tick-only        # nur bestehende Positionen
+
+# Datenaufzeichnung für die spätere Strategie-Optimierung (KONZEPT-ML.md).
+# Empfohlen: startet nach Abstürzen von selbst neu, hält den Mac wach,
+# protokolliert nach logs/track.log:
+pnpm aufzeichnen
+
+# Einzelne Durchgänge / Statusabfrage:
+pnpm --filter @lping/bot track -- --interval 15
+pnpm --filter @lping/bot track -- --status
+
+# Datensicherung (die Aufzeichnung ist nicht wiederbeschaffbar!):
+pnpm sichern                                    # Sicherung anlegen
+bash scripts/backup.sh liste                    # vorhandene anzeigen
+bash scripts/backup.sh zurueck backups/DATEI    # einspielen
 
 # Oberfläche (http://localhost:3000)
 pnpm --filter @lping/web dev

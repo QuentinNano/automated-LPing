@@ -52,6 +52,7 @@ export type {
   SellabilityCheck,
   AdapterHealth,
   CandidateSource,
+  TokenOrganics,
   FabriqPool,
   FabriqStatus,
   FabriqTrendingResult,
@@ -106,3 +107,19 @@ export type {
   PresetPerformance,
 } from "./paper/types";
 export type { OpenPaperPositionParams, PaperCloseResult } from "./paper/engine";
+
+export {
+  FEATURE_VERSION,
+  FEATURE_KEYS,
+  buildFeatureVector,
+  featureHeader,
+  featureRow,
+} from "./ml/features";
+export type { FeatureVector, FeatureValue, FeatureInput } from "./ml/features";
+export {
+  OUTCOME_HORIZONS_HOURS,
+  TRACKING_DURATION_HOURS,
+  computeOutcomes,
+  trackingIntervalSec,
+} from "./ml/outcomes";
+export type { OutcomeLabel, OutcomeHorizon, TrackPoint } from "./ml/outcomes";

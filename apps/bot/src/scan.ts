@@ -1,10 +1,15 @@
 import {
   aggregateMarket,
+  buildFeatureVector,
   classifyForPreset,
+  priceDivergencePct,
   screenCandidate,
   shortlistRank,
   tokenSideOf,
+  FEATURE_VERSION,
   type BotConfig,
+  type FeatureVector,
+  type TokenOrganics,
   type CandidateSource,
   type MarketAggregates,
   type MarketPairSnapshot,
@@ -33,6 +38,8 @@ export interface ScanDeps {
   };
   rugcheck: { getReport(mint: string): Promise<TokenRiskReport> };
   jupiter: { checkSellability(mint: string): Promise<SellabilityCheck> };
+  /** Optional: Jupiter Token API v2 (Organic Score) — nur für die Aufzeichnung. */
+  jupiterTokens?: { getOrganics(mint: string): Promise<TokenOrganics | null> } | null;
   /** Optional: DB-Persistenz (ScanRepo aus @lping/db, strukturell typisiert). */
   persist?: {
     recordScreened(input: {
@@ -42,6 +49,20 @@ export interface ScanDeps {
       pool: PoolMetrics;
       screening: ScreeningResult;
     }): Promise<unknown>;
+  } | null;
+  /** Optional: Aufzeichnung für die Strategie-Optimierung (KONZEPT-ML.md M1). */
+  track?: {
+    recordFeatures(input: {
+      poolAddress: string;
+      tokenMint: string;
+      preset: PresetKind;
+      featureVersion: number;
+      features: FeatureVector;
+      score: number | null;
+      verdict: string;
+      rejectedBy: string[];
+    }): Promise<unknown>;
+    trackPool(poolAddress: string, tokenMint: string): Promise<unknown>;
   } | null;
   log?: (line: string) => void;
 }
@@ -67,6 +88,8 @@ export interface ScanSummary {
   accepted: number;
   rejected: number;
   persisted: number;
+  /** Für die Optimierung aufgezeichnete Merkmalsvektoren. */
+  tracked: number;
   rows: ScanRow[];
 }
 
@@ -81,6 +104,7 @@ interface Enrichment {
   market: MarketAggregates | null;
   risk: TokenRiskReport | null;
   sellability: SellabilityCheck | null;
+  organics: TokenOrganics | null;
 }
 
 export async function runScan(
@@ -143,7 +167,9 @@ export async function runScan(
   for (const id of presetIds) {
     for (const pool of shortlists[id]!) {
       const mint = tokenSideOf(pool);
-      if (mint !== null && !tokens.has(mint)) tokens.set(mint, { market: null, risk: null, sellability: null });
+      if (mint !== null && !tokens.has(mint)) {
+        tokens.set(mint, { market: null, risk: null, sellability: null, organics: null });
+      }
     }
   }
   let i = 0;
@@ -166,12 +192,22 @@ export async function runScan(
     } catch (error) {
       log(`  jupiter fehlgeschlagen: ${message(error)}`);
     }
+    if (deps.jupiterTokens != null) {
+      try {
+        enrichment.organics = await deps.jupiterTokens.getOrganics(mint);
+      } catch (error) {
+        // Rein informativ: der Organic Score ist ein Merkmal, kein Filter.
+        log(`  organic score nicht abrufbar: ${message(error)}`);
+      }
+    }
   }
 
   // 4) Screening + optionale Persistenz.
   const rows: ScanRow[] = [];
   let persisted = 0;
   let persistWarned = false;
+  let tracked = 0;
+  let trackWarned = false;
   const source: CandidateSource = "replicated";
   for (const id of presetIds) {
     for (const pool of shortlists[id]!) {
@@ -189,6 +225,39 @@ export async function runScan(
         sellability: enrichment?.sellability ?? null,
       });
       rows.push({ preset: id, pool, tokenMint: tokenMint ?? "-", screening });
+
+      // Aufzeichnung für die spätere Optimierung: Merkmale JEDES gescreenten
+      // Kandidaten, unabhängig vom Urteil (KONZEPT-ML.md Abschnitt 3.1).
+      if (deps.track != null && tokenMint !== null) {
+        try {
+          const features = buildFeatureVector({
+            pool,
+            market: enrichment?.market ?? null,
+            risk: enrichment?.risk ?? null,
+            sellability: enrichment?.sellability ?? null,
+            organics: enrichment?.organics ?? null,
+            priceDivergencePct:
+              enrichment?.market != null ? priceDivergencePct(pool, enrichment.market) : null,
+          });
+          await deps.track.recordFeatures({
+            poolAddress: pool.poolAddress,
+            tokenMint,
+            preset: id,
+            featureVersion: FEATURE_VERSION,
+            features,
+            score: screening.score.total,
+            verdict: screening.verdict,
+            rejectedBy: screening.rejectedBy,
+          });
+          await deps.track.trackPool(pool.poolAddress, tokenMint);
+          tracked++;
+        } catch (error) {
+          if (!trackWarned) {
+            trackWarned = true;
+            log(`Aufzeichnung fehlgeschlagen (Scan läuft weiter): ${message(error)}`);
+          }
+        }
+      }
 
       if (deps.persist != null) {
         try {
@@ -227,6 +296,7 @@ export async function runScan(
     accepted: rows.filter((r) => r.screening.verdict === "accepted").length,
     rejected: rows.filter((r) => r.screening.verdict === "rejected").length,
     persisted,
+    tracked,
     rows,
   };
 }
@@ -302,7 +372,8 @@ export function formatScanTable(summary: ScanSummary): string {
     "",
     `Pools: ${summary.poolsScanned} gescannt | Shortlist ${shortlist} | ` +
       `akzeptiert ${summary.accepted}, abgelehnt ${summary.rejected} | ` +
-      `persistiert ${summary.persisted}`,
+      `persistiert ${summary.persisted}` +
+      (summary.tracked > 0 ? ` | aufgezeichnet ${summary.tracked}` : ""),
   );
   return lines.join("\n");
 }

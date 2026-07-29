@@ -12,6 +12,9 @@ export type { DexScreenerAdapterOptions, DexPairRaw } from "./dexscreener";
 export { RugcheckAdapter, normalizeRugcheckReport } from "./rugcheck";
 export type { RugcheckAdapterOptions, RugcheckReportRaw } from "./rugcheck";
 
+export { JupiterTokenAdapter, normalizeOrganics } from "./jupiterTokens";
+export type { JupiterTokenAdapterOptions } from "./jupiterTokens";
+
 export { JupiterAdapter } from "./jupiter";
 export type { JupiterAdapterOptions, QuoteParams, SellabilityOptions, JupiterQuoteRaw } from "./jupiter";
 

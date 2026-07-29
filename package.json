@@ -13,7 +13,9 @@
     "test:watch": "vitest",
     "bot": "pnpm --filter @lping/bot start",
     "db:generate": "pnpm --filter @lping/db db:generate",
-    "db:migrate": "pnpm --filter @lping/db db:migrate"
+    "db:migrate": "pnpm --filter @lping/db db:migrate",
+    "aufzeichnen": "bash scripts/track-forever.sh",
+    "sichern": "bash scripts/backup.sh sichern"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
