@@ -19,7 +19,13 @@ import {
  */
 
 export interface TrackStore {
-  duePools(now?: Date, limit?: number): Promise<{ poolAddress: string; tokenMint: string }[]>;
+  duePools(
+    now?: Date,
+    limit?: number,
+    denseIntervalMin?: number,
+  ): Promise<{ poolAddress: string; tokenMint: string }[]>;
+  /** Optional: Minuten bis zum nächsten fälligen Messpunkt. */
+  nextDueInMinutes?(now?: Date, denseIntervalMin?: number): Promise<number | null>;
   recordPoint(pool: PoolMetrics, now?: Date): Promise<void>;
   deactivateExpired(now?: Date): Promise<number>;
   computeDueOutcomes(now?: Date, limit?: number): Promise<number>;
@@ -52,14 +58,15 @@ export interface TrackCycleResult {
 
 export async function runTrackCycle(
   deps: TrackDeps,
-  options: { limit?: number } = {},
+  options: { limit?: number; denseIntervalMin?: number } = {},
 ): Promise<TrackCycleResult> {
   const log = deps.log ?? (() => {});
   const now = (deps.now ?? (() => new Date()))();
   const notes: string[] = [];
+  const denseIntervalMin = options.denseIntervalMin ?? 15;
 
   const expired = await deps.store.deactivateExpired(now);
-  const due = await deps.store.duePools(now, options.limit ?? 300);
+  const due = await deps.store.duePools(now, options.limit ?? 300, denseIntervalMin);
 
   let recorded = 0;
   let failed = 0;
@@ -83,12 +90,27 @@ export async function runTrackCycle(
 
   const outcomes = await deps.store.computeDueOutcomes(now);
 
-  log(
-    `${recorded}/${due.length} Messpunkte geschrieben` +
-      (failed > 0 ? `, ${failed} fehlgeschlagen` : "") +
-      (expired > 0 ? `, ${expired} Verfolgungen beendet` : "") +
-      (outcomes > 0 ? `, ${outcomes} Ergebnis-Labels berechnet` : ""),
-  );
+  if (due.length === 0) {
+    // Ohne Erklärung sieht "0/0" wie ein Stillstand aus, obwohl es der
+    // Normalfall ist: Jeder Pool wird nur nach seinem eigenen Raster gemessen.
+    const nextIn = deps.store.nextDueInMinutes
+      ? await deps.store.nextDueInMinutes(now, denseIntervalMin)
+      : null;
+    log(
+      nextIn === null
+        ? "Kein Pool fällig (es wird noch keiner verfolgt)."
+        : `Kein Pool fällig — nächster Messpunkt in ${Math.ceil(nextIn)} min ` +
+          `(Raster: ${denseIntervalMin} min je Pool).`,
+    );
+  } else {
+    log(
+      `${recorded}/${due.length} Messpunkte geschrieben` +
+        (failed > 0 ? `, ${failed} fehlgeschlagen` : "") +
+        (expired > 0 ? `, ${expired} Verfolgungen beendet` : "") +
+        (outcomes > 0 ? `, ${outcomes} Ergebnis-Labels berechnet` : ""),
+    );
+  }
+  if (due.length === 0 && outcomes > 0) log(`${outcomes} Ergebnis-Labels berechnet.`);
 
   return { due: due.length, recorded, failed, expired, outcomes, notes };
 }

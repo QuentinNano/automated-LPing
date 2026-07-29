@@ -28,6 +28,18 @@ export interface DuePool {
   lastTrackedAt: Date | null;
 }
 
+/** Millisekunden bis zur Fälligkeit; <= 0 bedeutet "jetzt fällig". */
+function dueInMs(
+  row: { firstSeenAt: Date; lastTrackedAt: Date | null },
+  now: Date,
+  denseIntervalMin: number,
+): number {
+  if (row.lastTrackedAt === null) return -1;
+  const ageHours = (now.getTime() - row.firstSeenAt.getTime()) / 3_600_000;
+  const dueAt = row.lastTrackedAt.getTime() + trackingIntervalSec(ageHours, denseIntervalMin) * 1000;
+  return dueAt - now.getTime();
+}
+
 /** Eine Zeile des Trainingsdatensatzes: Merkmale + Label eines Horizonts. */
 export interface DatasetRow {
   features: FeatureVector;
@@ -98,7 +110,11 @@ export class TrackRepo {
    * Pools, deren nächster Messpunkt fällig ist. Das Raster wird dynamisch aus
    * dem Alter bestimmt: die ersten 48 Stunden dicht, danach gröber.
    */
-  async duePools(now: Date = new Date(), limit = 300): Promise<DuePool[]> {
+  async duePools(
+    now: Date = new Date(),
+    limit = 300,
+    denseIntervalMin = 15,
+  ): Promise<DuePool[]> {
     const rows = await this.prisma.trackedPool.findMany({
       where: { active: true, trackUntil: { gte: now } },
       orderBy: { lastTrackedAt: { sort: "asc", nulls: "first" } },
@@ -107,13 +123,22 @@ export class TrackRepo {
     });
 
     return rows
-      .filter((row) => {
-        if (row.lastTrackedAt === null) return true;
-        const ageHours = (now.getTime() - row.firstSeenAt.getTime()) / 3_600_000;
-        const dueAfterMs = trackingIntervalSec(ageHours) * 1000;
-        return now.getTime() - row.lastTrackedAt.getTime() >= dueAfterMs;
-      })
+      .filter((row) => dueInMs(row, now, denseIntervalMin) <= 0)
       .slice(0, limit);
+  }
+
+  /**
+   * Minuten bis zum nächsten fälligen Messpunkt. Macht ein "0 von N fällig"
+   * erklärbar, statt es wie einen Stillstand aussehen zu lassen.
+   */
+  async nextDueInMinutes(now: Date = new Date(), denseIntervalMin = 15): Promise<number | null> {
+    const rows = await this.prisma.trackedPool.findMany({
+      where: { active: true, trackUntil: { gte: now } },
+      select: { firstSeenAt: true, lastTrackedAt: true },
+    });
+    if (rows.length === 0) return null;
+    const soonest = Math.min(...rows.map((row) => dueInMs(row, now, denseIntervalMin)));
+    return Math.max(0, soonest) / 60_000;
   }
 
   /** Messpunkt schreiben und den Verfolgungsstand fortschreiben. */

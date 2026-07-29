@@ -173,9 +173,13 @@ function lastDefined(points: TrackPoint[], get: (p: TrackPoint) => number | null
  * (KONZEPT-ML.md Abschnitt 3.2). Spart Datenvolumen und API-Aufrufe, ohne die
  * entscheidende Frühphase zu verlieren.
  */
-export function trackingIntervalSec(ageHours: number): number {
-  if (ageHours < 48) return 15 * 60;
-  return 60 * 60;
+export function trackingIntervalSec(ageHours: number, denseIntervalMin = 15): number {
+  // In der Frühphase dicht messen — dort entscheidet sich bei Memecoins das
+  // meiste. `denseIntervalMin` folgt dem Zyklus-Intervall des Aufzeichners:
+  // Wer häufiger läuft, soll auch feiner auflösen.
+  if (ageHours < 48) return Math.max(60, denseIntervalMin * 60);
+  // Danach genügt ein gröberes Raster — nie feiner als die Frühphase.
+  return Math.max(denseIntervalMin * 60, 60 * 60);
 }
 
 /** Wie lange ein Pool nach der Entdeckung verfolgt wird. */
