@@ -113,13 +113,15 @@ pnpm --filter @lping/bot paper -- --interval 15      # dauerhaft, alle 15 min
 pnpm --filter @lping/bot paper -- --tick-only        # nur bestehende Positionen
 
 # Datenaufzeichnung für die spätere Strategie-Optimierung (KONZEPT-ML.md).
-# Empfohlen: startet nach Abstürzen von selbst neu, hält den Mac wach,
-# protokolliert nach logs/track.log:
+# Sucht neue Pools UND verfolgt deren Verlauf; startet nach Abstürzen von
+# selbst neu, hält den Mac wach, protokolliert nach logs/track.log:
 pnpm aufzeichnen
 
 # Einzelne Durchgänge / Statusabfrage:
-pnpm --filter @lping/bot track -- --interval 15
-pnpm --filter @lping/bot track -- --status
+pnpm --filter @lping/bot track                       # ein Durchgang
+pnpm --filter @lping/bot track -- --status           # Fortschritt
+pnpm --filter @lping/bot track -- --scan-every 8     # seltener nach neuen Pools suchen
+pnpm --filter @lping/bot track -- --no-scan          # nur verfolgen, nichts Neues suchen
 
 # Datensicherung (die Aufzeichnung ist nicht wiederbeschaffbar!):
 pnpm sichern                                    # Sicherung anlegen

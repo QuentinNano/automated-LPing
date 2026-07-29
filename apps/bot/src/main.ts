@@ -233,15 +233,19 @@ async function cmdPaper(args: string[]): Promise<number> {
 
     if (!tickOnly) {
       console.log("Neue Kandidaten suchen…");
+      const db = await import("@lping/db");
+      const prisma = db.createPrisma();
       const summary = await runScan(
         {
           meteora,
           dexscreener,
           rugcheck: new RugcheckAdapter(),
           jupiter,
-          persist: new (await import("@lping/db")).ScanRepo(
-            (await import("@lping/db")).createPrisma(),
-          ),
+          jupiterTokens: new JupiterTokenAdapter(),
+          persist: new db.ScanRepo(prisma),
+          // Auch der Paper-Betrieb speist den Datensatz für die spätere
+          // Optimierung — sonst sammelt nur ein separat gestarteter Scan.
+          track: new db.TrackRepo(prisma),
           log: () => {},
         },
         config,
@@ -285,8 +289,14 @@ async function cmdPaper(args: string[]): Promise<number> {
 /**
  * Datenaufzeichnung für die Strategie-Optimierung (KONZEPT-ML.md M1).
  *
- * Eigenes Kommando, weil es unabhängig vom Paper-Trading laufen soll und
- * deutlich häufiger: Der Wert der Aufzeichnung hängt an lückenloser Kalenderzeit.
+ * Der Zyklus besteht aus zwei Teilen, die beide nötig sind: Ein Scan **entdeckt**
+ * neue Pools und hält ihre Merkmale fest, das Tracking **verfolgt** deren
+ * weiteren Verlauf. Ohne den Scan hätte das Tracking nichts aufzuzeichnen —
+ * deshalb erledigt dieses Kommando beides, statt einen zweiten Dauerlauf zu
+ * verlangen.
+ *
+ * Der Scan läuft seltener als das Tracking (`--scan-every`), weil er die teuren
+ * Per-Token-Abrufe auslöst, während ein Messpunkt nur eine Pool-Abfrage kostet.
  */
 async function cmdTrack(args: string[]): Promise<number> {
   const databaseUrl = process.env["DATABASE_URL"];
@@ -298,17 +308,34 @@ async function cmdTrack(args: string[]): Promise<number> {
     return 1;
   }
 
-  const { createPrisma, TrackRepo } = await import("@lping/db");
-  const store = new TrackRepo(createPrisma());
+  const db = await import("@lping/db");
+  const prisma = db.createPrisma();
+  const store = new db.TrackRepo(prisma);
   const meteora = new MeteoraAdapter();
 
   const statusOnly = args.includes("--status");
   const intervalMin = intFlag(args, "--interval") ?? 0;
   const limit = intFlag(args, "--limit") ?? 300;
+  const scanEvery = args.includes("--no-scan") ? 0 : (intFlag(args, "--scan-every") ?? 4);
+  const pages = intFlag(args, "--pages") ?? 4;
+  const top = intFlag(args, "--top") ?? 12;
 
   if (statusOnly) {
     console.log(formatTrackStatus(await store.stats()));
     return 0;
+  }
+
+  let config: BotConfig | null = null;
+  if (scanEvery > 0) {
+    try {
+      config = loadDefaultsFromDir(configDir);
+    } catch (error) {
+      if (error instanceof ConfigValidationError) {
+        console.error(error.message);
+        return 1;
+      }
+      throw error;
+    }
   }
 
   const deps: TrackDeps = {
@@ -317,8 +344,38 @@ async function cmdTrack(args: string[]): Promise<number> {
     log: (line) => console.log(`  ${line}`),
   };
 
+  const scanDeps: ScanDeps = {
+    meteora,
+    dexscreener: new DexScreenerAdapter(),
+    rugcheck: new RugcheckAdapter(),
+    jupiter: new JupiterAdapter(),
+    jupiterTokens: new JupiterTokenAdapter(),
+    persist: new db.ScanRepo(prisma),
+    track: store,
+    log: () => {},
+  };
+
+  let cycle = 0;
   const runCycle = async (): Promise<void> => {
     console.log(`\n=== Aufzeichnung ${new Date().toISOString()} ===`);
+
+    // Entdeckung: neue Pools finden und ihre Merkmale festhalten.
+    if (config !== null && cycle % scanEvery === 0) {
+      console.log("Neue Pools suchen…");
+      try {
+        const summary = await runScan(scanDeps, config, { pages, topPerPreset: top });
+        console.log(
+          `  ${summary.poolsScanned} Pools geprüft, ${summary.tracked} Merkmalsvektoren aufgezeichnet`,
+        );
+      } catch (error) {
+        // Ein fehlgeschlagener Scan darf das Tracking nicht aufhalten: die
+        // Verläufe bereits bekannter Pools sind wertvoller als neue Funde.
+        console.log(`  ! Suche fehlgeschlagen: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+    cycle++;
+
+    // Verfolgung: Messpunkte der bekannten Pools schreiben.
     const result = await runTrackCycle(deps, { limit });
     for (const note of result.notes) console.log(`  ! ${note}`);
     console.log("\n" + formatTrackStatus(await store.stats()));
