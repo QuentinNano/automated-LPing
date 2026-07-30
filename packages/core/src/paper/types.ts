@@ -1,4 +1,5 @@
 import type { PresetKind } from "../config/schema";
+import type { PoolObservation } from "./poolHealth";
 
 /** Ein Liquiditäts-Bin der simulierten Position. */
 export interface SimBin {
@@ -62,6 +63,22 @@ export interface PaperPositionState {
   rangeReached: boolean;
   /** Zeitstempel der Rebalances des laufenden Tages (für maxPerDay). */
   rebalanceTimesMs: number[];
+  /**
+   * Gebührenertragsrate des Pools beim Eröffnen (% des TVL je Tag).
+   *
+   * Bezugsgröße des `fee_collapse`-Exits: Ein Pool, der bei Einstieg 12 %/Tag
+   * abwarf und jetzt 1 % abwirft, ist nicht mehr derselbe Pool — und das steht
+   * im PnL erst, wenn es zu spät ist.
+   */
+  entryFeeRatePctPerDay: number;
+  /**
+   * Rollierende Pool-Beobachtungen für die zustandsabhängigen Ausstiegsregeln.
+   *
+   * Die Engine sah bisher je Tick nur die Gegenwart und konnte deshalb keine
+   * Veränderung beurteilen. Das Fenster ist durch `exit` begrenzt und gedeckelt,
+   * damit der als JSON persistierte Zustand nicht wächst.
+   */
+  poolHistory: PoolObservation[];
 }
 
 /** Marktbeobachtung für einen Tick. */
@@ -75,6 +92,18 @@ export interface MarketTick {
    * schärfer auf als der träge 24-Stunden-Wert.
    */
   poolVolume24hUsd: number;
+  /**
+   * Dasselbe Volumen aus dem **trägsten** verfügbaren Zeitfenster.
+   *
+   * Für den Gebühren-Akkrual über ein 15-Minuten-Intervall ist das kürzeste
+   * Fenster richtig — es löst Volatilitätsphasen auf. Für **Projektionen** über
+   * Stunden oder Tage ist es falsch: Eine 30-Minuten-Volumenspitze zur
+   * Dauerannahme zu erklären, überschätzt den erwarteten Ertrag um
+   * Größenordnungen und öffnete damit das EV-Tor vor jedem Rebalance
+   * (ANALYSE.md 4.1). Fehlt der Wert, fällt die Projektion auf
+   * `poolVolume24hUsd` zurück.
+   */
+  poolVolume24hUsdSlow?: number;
   /**
    * Gesamte Swap-Gebühr des Pools in Prozent (Basis + Volatilitätsaufschlag).
    * Nicht die Basisgebühr: Bei volatilen Pools ist sie ein Mehrfaches davon,
@@ -91,11 +120,23 @@ export interface MarketTick {
   at: Date;
 }
 
+/**
+ * Warum eine Position geschlossen wurde.
+ *
+ * `take_profit` ist entfallen: Der Preisgewinn einer DLMM-Position ist durch
+ * ihre Range gedeckelt (+1 bis +2 % bei den ausgelieferten Presets), die
+ * Schwellen standen bei 30–50 %. Die Regel konnte nie auslösen und ließ ein
+ * einseitiges Regelwerk zurück. An ihre Stelle treten die zustandsabhängigen
+ * Gründe aus `poolHealth.ts`.
+ */
 export type PaperCloseReason =
   | "stop_loss"
-  | "take_profit"
   | "max_hold_time"
   | "out_of_range"
+  | "price_crash"
+  | "tvl_drain"
+  | "fee_collapse"
+  | "fee_stall"
   | "manual";
 
 export interface PaperValuation {
@@ -135,6 +176,14 @@ export interface PresetPerformance {
   realizedPnlSol: number;
   unrealizedPnlSol: number;
   totalPnlSol: number;
+  /**
+   * Summe der Einsätze aller Positionen dieses Presets.
+   *
+   * Die Bezugsgröße, die dem Vergleich fehlte: Ein Preset mit dreifacher
+   * Positionsgröße zeigt bei gleicher Güte dreifachen absoluten PnL. Ohne diesen
+   * Nenner misst die Tabelle Kapitaleinsatz statt Strategie (ANALYSE.md 4.3).
+   */
+  depositedSol: number;
   feesEarnedSol: number;
   costsSol: number;
   wins: number;

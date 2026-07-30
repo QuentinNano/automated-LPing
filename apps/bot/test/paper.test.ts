@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   openPaperPosition,
+  positionSizeSol,
   valuePosition,
   type PaperPositionState,
   type PoolMetrics,
@@ -82,6 +83,7 @@ function acceptedRow(preset: PresetKind, pool: PoolMetrics = buildPool()): ScanR
     preset,
     pool,
     tokenMint: TOKEN_MINT,
+    volatilityPctDaily: 30,
     screening: {
       verdict: "accepted",
       checks: [],
@@ -116,11 +118,16 @@ describe("openFromScan", () => {
     ]);
   });
 
-  it("dimensioniert die Positionsgröße aus dem virtuellen Preset-Kapital", async () => {
+  it("nimmt die Positionsgröße aus der einen Quelle, die sie definiert", async () => {
     const store = new FakeStore();
     await openFromScan(buildDeps(store), config, [acceptedRow("degen")]);
-    // 10 SOL Preset-Kapital × 1 % Positionsgröße
-    expect(store.positions[0]!.simState.depositSol).toBeCloseTo(0.1);
+    // Absolut in SOL statt als Anteil: Vorher rechneten Screening-Filter und
+    // Engine mit unterschiedlichen Bezugsgrößen und kamen auf Faktor 2
+    // Unterschied (ANALYSE.md 4.2).
+    expect(store.positions[0]!.simState.depositSol).toBeCloseTo(
+      positionSizeSol(config.presets["degen"]!),
+    );
+    expect(store.positions[0]!.simState.depositSol).toBe(1);
   });
 
   it("ignoriert abgelehnte Kandidaten", async () => {
@@ -225,7 +232,8 @@ describe("formatComparison", () => {
         closedPositions: 2,
         realizedPnlSol: -0.05,
         unrealizedPnlSol: 0,
-        totalPnlSol: -0.05,
+        depositedSol: 3,
+      totalPnlSol: -0.05,
         feesEarnedSol: 0.01,
         costsSol: 0.003,
         wins: 0,
@@ -241,7 +249,8 @@ describe("formatComparison", () => {
         closedPositions: 3,
         realizedPnlSol: 0.12,
         unrealizedPnlSol: 0.01,
-        totalPnlSol: 0.13,
+        depositedSol: 3,
+      totalPnlSol: 0.13,
         feesEarnedSol: 0.15,
         costsSol: 0.004,
         wins: 2,

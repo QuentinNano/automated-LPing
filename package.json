@@ -17,6 +17,7 @@
     "aufzeichnen": "bash scripts/track-forever.sh",
     "nachladen": "pnpm --filter @lping/bot exec tsx src/main.ts backfill",
     "abspielen": "pnpm --filter @lping/bot exec tsx src/main.ts replay",
+    "stresstest": "pnpm --filter @lping/bot exec tsx src/main.ts stress",
     "sichern": "bash scripts/backup.sh sichern",
     "pruefen": "pnpm --filter @lping/bot exec tsx src/main.ts track --check"
   },

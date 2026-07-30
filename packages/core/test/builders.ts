@@ -91,8 +91,12 @@ export function buildMarket(overrides: Partial<MarketAggregates> = {}): MarketAg
     txns24h: { buys: 3200, sells: 3100 },
     solPriceUsd: 180,
     medianPriceNative: 0.0000214,
+    priceChangeH1Pct: 4,
     priceChangeH6Pct: 20,
     priceChangeH24Pct: 15,
+    // Rund 30 %/Tag — innerhalb der Bänder aller Presets, damit der
+    // Volatilitätsfilter in Bestandstests nicht als stiller Ablehner wirkt.
+    volatilityPctDaily: 30,
     pairCount: 2,
     ...overrides,
   };

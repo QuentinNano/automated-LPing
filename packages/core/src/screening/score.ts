@@ -1,13 +1,20 @@
+import { feeYieldPerVariance } from "../ml/volatility";
 import type { ScoreBreakdown, ScoreComponent, ScreeningInput } from "./types";
 
 /**
  * Score 0–100 für das Ranking der Kandidaten (KONZEPT.md Abschnitt 5.4).
  * Gewichte: 35 Fee-Ertragskraft, 25 Markt-Qualität, 20 Sicherheitsmarge,
- * 10 Momentum, 10 Quellen-Bonus.
+ * 10 Momentum, 10 Ertrag je Varianz.
  *
  * Alle Kennlinien sind bewusst einfache, dokumentierte v1-Startwerte —
  * kalibriert wird datengetrieben über Paper-Trading und Shadow-Tracking,
  * nicht per Bauchgefühl im Code.
+ *
+ * **Der Quellen-Bonus ist entfallen.** Er vergab mangels zweiter Quelle an jeden
+ * Kandidaten dieselben 5 von 10 Punkten und verschob damit nur die Skala
+ * gegenüber `minScore`, ohne je zu unterscheiden (ANALYSE.md 4.5). An seine
+ * Stelle tritt die Größe, die dem Score bis dahin ganz fehlte: das Verhältnis
+ * von Gebührenertrag zu Volatilität.
  */
 export function computeScore(input: ScreeningInput): ScoreBreakdown {
   const components: ScoreComponent[] = [
@@ -15,7 +22,7 @@ export function computeScore(input: ScreeningInput): ScoreBreakdown {
     marketQuality(input),
     safetyMargin(input),
     momentum(input),
-    sourceBonus(input),
+    yieldPerVariance(input),
   ];
   const total = round1(components.reduce((sum, c) => sum + c.points, 0));
   return { total: clamp(total, 0, 100), components };
@@ -118,10 +125,36 @@ function momentum(input: ScreeningInput): ScoreComponent {
   return { id: "momentum", points: round1(clamp(points, 0, max)), max, detail: `${change.toFixed(1)}%` };
 }
 
-/** 10 P: Quellen-Bonus — extern bestätigte Kandidaten > eigene Replikation. */
-function sourceBonus(input: ScreeningInput): ScoreComponent {
+/**
+ * 10 P: Gebührenertrag je Einheit Varianz.
+ *
+ * Die Bedingung dafür, dass LPing überhaupt trägt, lautet nicht „viel Gebühr",
+ * sondern „mehr Gebühr als Varianzverlust". Zwei Pools mit identischer
+ * Fee/TVL-Rate sind verschieden gute Kandidaten, wenn einer halb so wild ist —
+ * und genau das konnte der Score bis hierher nicht ausdrücken.
+ *
+ * Vollausschlag ab Faktor 8: Der Gebührenertrag deckt den erwarteten
+ * Varianzverlust dann achtfach, was Kosten, Zeit außerhalb der Range und den
+ * Modellabschlag noch trägt. Ein bewusst einfacher Startwert wie alle anderen
+ * Kennlinien hier — er gehört in die Kalibrierung, nicht in eine Diskussion.
+ */
+function yieldPerVariance(input: ScreeningInput): ScoreComponent {
   const max = 10;
-  return { id: "source_bonus", points: input.source === "fabriq" ? 10 : 5, max, detail: input.source };
+  const rate = input.pool.feeTvl24hPct;
+  const volatility = input.market?.volatilityPctDaily ?? null;
+  if (rate === undefined || volatility === null) {
+    return { id: "yield_per_variance", points: 0, max, detail: "Volatilität unbekannt" };
+  }
+
+  const ratio = feeYieldPerVariance(rate, volatility);
+  if (ratio === null) return { id: "yield_per_variance", points: 0, max, detail: "nicht bestimmbar" };
+
+  return {
+    id: "yield_per_variance",
+    points: round1(max * clamp(ratio / 8, 0, 1)),
+    max,
+    detail: `Fee/Varianz ${ratio.toFixed(1)}× bei σ ${volatility.toFixed(0)} %/Tag`,
+  };
 }
 
 function clamp(value: number, min: number, max: number): number {

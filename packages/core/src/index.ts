@@ -9,6 +9,7 @@ export {
   EmergencyConfigSchema,
   StrategyConfigSchema,
   PaperConfigSchema,
+  ExitConfigSchema,
   KillSwitchSchema,
   parseBotConfig,
   ConfigValidationError,
@@ -19,6 +20,7 @@ export type {
   PresetConfig,
   PresetKind,
   PaperConfig,
+  ExitConfig,
   KillSwitch,
 } from "./config/schema";
 
@@ -49,6 +51,7 @@ export {
   trackPointFromPool,
   poolFeePct,
   volumeRate24hUsd,
+  volumeRate24hUsdSlow,
 } from "./paper/ticks";
 export type { TickPool } from "./paper/ticks";
 
@@ -127,6 +130,7 @@ export type { DiscoveryStrategy } from "./discovery/query";
 export {
   binPrice,
   binIdFromPrice,
+  deriveBinCount,
   strategyWeights,
   openBins,
   applyPriceMove,
@@ -149,6 +153,26 @@ export type {
   PresetPerformance,
 } from "./paper/types";
 export type { OpenPaperPositionParams, PaperCloseResult } from "./paper/engine";
+export {
+  evaluatePoolExit,
+  recordObservation,
+  poolFeeRatePctPerDay,
+} from "./paper/poolHealth";
+export type { PoolObservation, PoolExitReason, PoolHealthInput } from "./paper/poolHealth";
+export {
+  positionSizeSol,
+  deployedCapitalSol,
+  fixedCostSol,
+  assessSize,
+  RENT_BINDING_SOL,
+  BIN_ARRAY_INIT_SOL,
+} from "./paper/sizing";
+export type { SizeViability } from "./paper/sizing";
+export {
+  realizedVolatilityPctDaily,
+  estimateVolatilityPctDaily,
+  feeYieldPerVariance,
+} from "./ml/volatility";
 
 export {
   FEATURE_VERSION,

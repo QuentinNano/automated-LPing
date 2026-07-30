@@ -339,14 +339,37 @@ hängt, ist keins:
 
 | Annahme | Warum sie das Ergebnis verschiebt |
 |---|---|
-| `poolLiquidityBins` | Skaliert den Gebührenanteil linear und entscheidet, ob sich Konzentration auszahlt |
+| `poolLiquidityBins` | Skaliert den Gebührenanteil linear und entscheidet, ob sich Konzentration auszahlt. **Gemessen: Faktor 14 zwischen 10 und 140** — der Default steht deshalb auf dem konservativen 30 statt 70 |
 | `feeShareHaircutPct` | Pauschaler Sicherheitsabschlag auf den Gebührenanteil |
 | TVL-Forttragen (6 h) | Bestimmt, welche nachgeladenen Zeiträume überhaupt Gebühren buchen (5.2) |
 | `costs.swapSlippagePct` | Der größte variable Kostenposten, derzeit größenunabhängig |
+| `rebalance.projectionHours` | Über welchen Zeitraum der Zusatzertrag eines Rebalances gilt. Vorher implizit die gesamte Restlaufzeit — das öffnete das EV-Tor vollständig |
+| Abtastraster (`tickMinutes`) | Verschiebt Zeit-in-Range und Ergebnis um mehrere Prozentpunkte; die Richtung ist **nicht** offensichtlich und gehört gemessen |
 
 Die Sensitivitätsanalyse variiert sie wie jeden anderen Parameter. Anders als
 diese werden sie danach aber **nicht optimiert**, sondern auf dem konservativen
 Ende festgesetzt. Einen Modellfehler zu „optimieren" heißt, ihn auszunutzen.
+
+### 6.1a Zwei Wege, zwei Fragen: Replay und Stresstest
+
+Der Replay läuft auf **aufgezeichneten** Verläufen und sagt, was passiert wäre.
+Er kann aber nicht sagen, *warum*: Volatilität und Umschlag sind dort so
+verwoben, wie der Markt sie geliefert hat, und lassen sich nicht trennen.
+
+`pnpm stresstest` fährt dieselbe Engine auf **synthetischen** Pfaden mit
+getrennt einstellbarem σ, Umschlag und Drift. Das beantwortet die Frage, an der
+die Auslegung der Presets hängt: **Bei welcher Volatilität und welchem Umschlag
+trägt diese Bauform überhaupt?** Und es zeigt, ob ein Ergebnis am Markt hängt
+oder am Simulator.
+
+Beides ist nötig und keins ersetzt das andere. Der Stresstest sagt, wonach zu
+suchen wäre; der Replay, ob es das gab. Ein Ergebnis, das nur der Stresstest
+kennt, ist eine Aussage über ein Modell — ein Ergebnis, das nur der Replay
+kennt, kann Zufall einer Marktphase sein.
+
+Die Regime-Landkarte des Stresstests ist dabei die wichtigste Einzelausgabe: Sie
+zeigt, ob die Auswahlfilter überhaupt in die Richtung zeigen, in der das Ergebnis
+positiv wird.
 
 ### 6.2 Teil B (Führung): simulationsbasierte Suche
 
@@ -548,7 +571,7 @@ ihre Variation nicht stabil ist, ist ein Ergebnis über den Simulator und nicht
 |---|---|---|
 | **M1 — Aufzeichnung** | `tracked_pools`, `candidate_features`, `candidate_outcomes`, `pool_snapshots`, `pool_history_candles`; `track`- und `backfill`-Kommando; Merkmalsschema v2 mit allen Zeitfenstern, Gebührenstruktur und Organic Score; Sammelabruf über `filter_by`; Prüfbericht mit Lücken- und Rückstandsüberwachung | ✅ |
 | **M2 — Replay** | `loadSeries()` als ein Lesepfad für Replay und Labels; Replay über dieselbe Paper-Engine; Einstiege an beliebigen Zeitpunkten; Determinismus; Gleichheitstest gegen den Live-Pfad; `replay`-Kommando mit Preset-Vergleich | ✅ (offen: `high`/`low` für Zeit-in-Range) |
-| **M3 — Sensitivität** | Einzelparameter-Analyse **inklusive der Modellannahmen** (6.1), Auswahl der 5–10 relevanten, Bericht | **nächster Schritt** |
+| **M3 — Sensitivität** | Einzelparameter-Analyse **inklusive der Modellannahmen** (6.1), Auswahl der 5–10 relevanten, Bericht | **teilweise** — `pnpm stresstest` fährt Modellannahmen, Strategie-Stellschrauben, Marktbedingungen und eine Regime-Landkarte auf synthetischen Pfaden. Offen: dieselbe Analyse auf den **aufgezeichneten** Verläufen |
 | **M4 — Suche** | Zufallssuche und Verfeinerung, Zielfunktion, Plateau-Bewertung | offen |
 | **M5 — Validierung** | Vorwärts-Testen, Sperrzonen, Mehrfachtestkorrektur, Zufallsvergleich | offen, mit M4 |
 | **M6 — Auswahl & UI** | Pareto-Front, Diversitätsfilter, Strategie-Labor, Preset-Export | offen |

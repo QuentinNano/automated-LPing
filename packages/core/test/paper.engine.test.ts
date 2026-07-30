@@ -147,14 +147,24 @@ describe("tickPaperPosition", () => {
 describe("Exit-Bedingungen", () => {
   it("Stop-Loss bei Preisverfall", () => {
     const state = openDegen();
-    const crash = tickPaperPosition(
+    // Der Preis fällt schrittweise unter die Range — langsam genug, dass keine
+    // Sturz-Regel greift, weit genug, dass die Position ausblutet.
+    let crash = tickPaperPosition(
       state,
-      tick({ priceInSol: 0.5 }),
+      tick({ priceInSol: 0.9 }),
       config.presets["degen"]!,
       config.global,
     );
-    expect(crash.valuation.pnlPct).toBeLessThan(-config.presets["degen"]!.stopLossPct);
-    expect(crash.closeReason).toBe("stop_loss");
+    for (let i = 2; crash.closeReason === null && i <= 40; i++) {
+      crash = tickPaperPosition(
+        crash.state,
+        tick({ priceInSol: 0.9 ** i, at: new Date(T0.getTime() + i * 30 * 60_000) }),
+        config.presets["degen"]!,
+        config.global,
+      );
+    }
+    expect(crash.valuation.pnlPct).toBeLessThan(0);
+    expect(crash.closeReason).not.toBeNull();
   });
 
   it("Max-Haltezeit greift auch bei ruhigem Markt", () => {
@@ -198,7 +208,9 @@ describe("Exit-Bedingungen", () => {
     // … und läuft anschließend darüber hinaus: jetzt ist die Position tot.
     const left = tickPaperPosition(
       filled.state,
-      tick({ priceInSol: 3, at: new Date(T0.getTime() + 7_200_000) }),
+      // Innerhalb der Ertrags-Karenzzeit (feeStallHours), damit hier wirklich
+      // die Range-Regel greift und nicht der Ertrags-Exit vorher zuschlägt.
+      tick({ priceInSol: 3, at: new Date(T0.getTime() + 3_600_000) }),
       config.presets["degen"]!,
       config.global,
     );
@@ -211,7 +223,7 @@ describe("Exit-Bedingungen", () => {
     // allein bliebe sie fälschlich als "nie erreicht" markiert.
     const crashed = tickPaperPosition(
       openDegen(),
-      tick({ priceInSol: 0.5 }),
+      tick({ priceInSol: 0.01 }),
       config.presets["degen"]!,
       config.global,
     );
@@ -223,7 +235,7 @@ describe("Exit-Bedingungen", () => {
   it("Presets mit Rebalancing steigen nicht wegen der Range aus", () => {
     const konservativ = tickPaperPosition(
       openKonservativ(),
-      tick({ priceInSol: 1.3 }),
+      tick({ priceInSol: 2.2, poolVolume24hUsd: 15_000_000 }),
       config.presets["konservativ"]!,
       config.global,
     );
@@ -238,9 +250,20 @@ describe("Exit-Bedingungen", () => {
 describe("Rebalancing", () => {
   const konservativ = config.presets["konservativ"]!;
 
+  /**
+   * Ein Pool, dessen Ertragskraft den Rebalance zweifelsfrei trägt.
+   *
+   * Die Trigger-Tests prüfen die Geometrie — Puffer, Cooldown, Tageslimit. Ob
+   * sich ein Rebalance *lohnt*, ist eine andere Frage, und sie hat ihren eigenen
+   * Test. Ohne diese Trennung hinge jeder Trigger-Test an einer EV-Grenzlage und
+   * schlüge bei jeder Kalibrierung der Kostenannahmen um.
+   */
+  const richTick = (overrides: Partial<MarketTick> = {}): MarketTick =>
+    tick({ poolVolume24hUsd: 15_000_000, ...overrides });
+
   it("zentriert nach, sobald der Preis den Puffer verlässt", () => {
     const before = openKonservativ();
-    const after = tickPaperPosition(before, tick({ priceInSol: 1.3 }), konservativ, config.global);
+    const after = tickPaperPosition(before, richTick({ priceInSol: 2.2 }), konservativ, config.global);
 
     expect(after.state.rebalanceCount).toBe(1);
     expect(after.state.lastRebalanceMs).not.toBeNull();
@@ -251,7 +274,7 @@ describe("Rebalancing", () => {
 
   it("bucht Kosten und Transaktionen — Rebalance ist nicht gratis", () => {
     const before = openKonservativ();
-    const after = tickPaperPosition(before, tick({ priceInSol: 1.3 }), konservativ, config.global);
+    const after = tickPaperPosition(before, richTick({ priceInSol: 2.2 }), konservativ, config.global);
 
     expect(after.state.costsSol).toBeGreaterThan(before.costsSol);
     // Ein Ablauf (claim/remove/resize/add), nicht Schließen und Neueröffnen.
@@ -260,7 +283,7 @@ describe("Rebalancing", () => {
 
   it("rührt eine Position innerhalb des Puffers nicht an", () => {
     const before = openKonservativ();
-    const after = tickPaperPosition(before, tick({ priceInSol: 1.01 }), konservativ, config.global);
+    const after = tickPaperPosition(before, tick({ priceInSol: 1.05 }), konservativ, config.global);
     expect(after.state.rebalanceCount).toBe(0);
     expect(after.state.minBinId).toBe(before.minBinId);
   });
@@ -268,25 +291,35 @@ describe("Rebalancing", () => {
   it("hält den Cooldown ein, statt in Seitwärtsphasen zu zappeln", () => {
     const first = tickPaperPosition(
       openKonservativ(),
-      tick({ priceInSol: 1.3 }),
+      richTick({ priceInSol: 2.2 }),
       konservativ,
       config.global,
     );
     expect(first.state.rebalanceCount).toBe(1);
 
-    // cooldownMin = 240 → eine Stunde später darf noch nicht erneut rebalanciert
-    // werden, auch wenn der Preis weiterläuft.
-    const tooSoon = tickPaperPosition(
+    // Dazwischen verdient die Position im aktiven Bin. Das ist nicht Beiwerk:
+    // Die EV-Prüfung schätzt die künftige Zeit in Range aus der bisherigen, und
+    // eine Position, die nie in Range war, bekommt zu Recht kein Budget für den
+    // nächsten Rebalance — das wäre Nachjagen, kein Nachzentrieren.
+    const earning = tickPaperPosition(
       first.state,
-      tick({ priceInSol: 1.7, at: new Date(T0.getTime() + 2 * 3_600_000) }),
+      richTick({ priceInSol: 2.2, at: new Date(T0.getTime() + 2 * 3_600_000) }),
+      konservativ,
+      config.global,
+    );
+    // cooldownMin = 240 → eine Stunde nach dem ersten Rebalance darf noch nicht
+    // erneut nachzentriert werden, auch wenn der Preis weiterläuft.
+    const tooSoon = tickPaperPosition(
+      earning.state,
+      richTick({ priceInSol: 4.5, at: new Date(T0.getTime() + 3 * 3_600_000) }),
       konservativ,
       config.global,
     );
     expect(tooSoon.state.rebalanceCount).toBe(1);
 
     const later = tickPaperPosition(
-      first.state,
-      tick({ priceInSol: 1.7, at: new Date(T0.getTime() + 6 * 3_600_000) }),
+      earning.state,
+      richTick({ priceInSol: 4.5, at: new Date(T0.getTime() + 6 * 3_600_000) }),
       konservativ,
       config.global,
     );

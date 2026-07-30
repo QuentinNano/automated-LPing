@@ -60,6 +60,61 @@ export function strategyWeights(count: number, strategy: PresetConfig["strategy"
   return raw.map((v) => v / sum);
 }
 
+/**
+ * Bin-Zahl einer Position: aus der Volatilität hergeleitet, wo möglich.
+ *
+ * Die Range muss zur Bewegung des Marktes passen, nicht zu einer Zahl in der
+ * Konfiguration. Eine Position deckt die Preisbewegung von `coverageSigmas`
+ * Standardabweichungen über `horizonHours` ab.
+ *
+ * Gerechnet wird durchgehend in **log-Renditen** — dieselbe Einheit, in der
+ * `realizedVolatilityPctDaily` misst und in der DLMM seine Bins definiert
+ * (`p(i) = (1 + binStep/10000)^i`). Beides ist geometrisch, und ein Wechsel auf
+ * einfache Prozente mittendrin verschöbe die Breite systematisch:
+ *
+ *     halbe Breite (log) = coverageSigmas · σ · √(Horizont in Tagen)
+ *     Bins               = 2 · halbe Breite / ln(1 + binStep/10000)
+ *
+ * Nebenwirkung, die zur Sache gehört: In Preisen ist das Ergebnis asymmetrisch
+ * (−37 % / +60 % bei ±0,47 log). Das ist keine Ungenauigkeit, sondern die
+ * Geometrie der Bins.
+ *
+ * `binRange.min`/`max` bleiben als Leitplanken: Sie begrenzen, was Kosten und
+ * Kapitalbindung tragen. Ohne `coverageSigmas` oder ohne Volatilitätsschätzung
+ * gilt unverändert die Mitte der Spanne — die Herleitung darf nie an einer
+ * fehlenden Messung scheitern.
+ */
+export function deriveBinCount(params: {
+  binRange: { min: number; max: number; coverageSigmas?: number };
+  binStep: number;
+  horizonHours: number;
+  volatilityPctDaily: number | null | undefined;
+}): number {
+  const { binRange, binStep, horizonHours } = params;
+  const midpoint = Math.round((binRange.min + binRange.max) / 2);
+
+  const sigmas = binRange.coverageSigmas;
+  const volatility = params.volatilityPctDaily;
+  if (
+    sigmas === undefined ||
+    volatility === null ||
+    volatility === undefined ||
+    !Number.isFinite(volatility) ||
+    volatility <= 0 ||
+    binStep <= 0 ||
+    horizonHours <= 0
+  ) {
+    return midpoint;
+  }
+
+  const halfWidthLog = sigmas * (volatility / 100) * Math.sqrt(horizonHours / 24);
+  const perBin = Math.log(1 + binStep / 10_000);
+  if (perBin <= 0) return midpoint;
+
+  const derived = Math.round((2 * halfWidthLog) / perBin);
+  return Math.min(binRange.max, Math.max(binRange.min, derived));
+}
+
 export interface OpenPositionParams {
   /** Aktueller Token-Preis in SOL. */
   price: number;

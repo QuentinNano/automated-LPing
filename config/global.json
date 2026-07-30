@@ -1,7 +1,7 @@
 {
   "paperTrading": true,
   "killSwitch": "off",
-  "maxTotalExposureSol": 20,
+  "maxTotalExposureSol": 60,
   "minSolReserve": 0.5,
   "maxOpenPositions": 10,
   "dailyLossLimitPct": 5,
@@ -9,12 +9,12 @@
   "priorityFeeCapLamports": 2000000,
   "profitSweepThresholdSol": 5,
   "paper": {
-    "capitalPerPresetSol": 10,
+    "capitalPerPresetSol": 25,
     "costs": {
       "priorityFeeSol": 0.0005,
       "swapSlippagePct": 0.5
     },
     "feeShareHaircutPct": 30,
-    "poolLiquidityBins": 70
+    "poolLiquidityBins": 30
   }
 }

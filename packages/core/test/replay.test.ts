@@ -73,7 +73,7 @@ describe("replayPosition", () => {
     );
   });
 
-  it("löst den Stop-Loss aus, wenn der Preis wegläuft", () => {
+  it("benennt einen Preissturz als solchen, statt ihn als Stop-Loss zu buchen", () => {
     const series = [
       ...flatSeries(3),
       point(20, 0.0005),
@@ -82,8 +82,23 @@ describe("replayPosition", () => {
     ];
     const position = replayPosition(series, pool, balanced);
 
-    expect(position!.closeReason).toBe("stop_loss");
+    // Halbierung binnen fünf Minuten: Das ist ein Sturz, kein allmähliches
+    // Auslaufen. Der Grund unterscheidet beides — und die zustandsabhängige
+    // Regel greift, bevor der PnL die Stop-Loss-Schwelle erreicht.
+    expect(position!.closeReason).toBe("price_crash");
     expect(position!.valuation.pnlPct).toBeLessThan(0);
+  });
+
+  it("fällt auf den Stop-Loss zurück, wenn der Preis langsam genug zerfällt", () => {
+    // Rund 2,5 % je Fünf-Minuten-Schritt bleiben unter der Sturz-Schwelle des
+    // 30-Minuten-Fensters (20 %). Genau dafür gibt es den PnL-Stop: Er ist die
+    // Rückfalllinie, wenn kein einzelnes Signal auffällig wird, die Position
+    // aber trotzdem ausblutet.
+    const series = Array.from({ length: 40 }, (_, i) => point(i * 5, 0.001 * 0.975 ** i));
+    const position = replayPosition(series, pool, balanced);
+
+    expect(position!.closeReason).toBe("stop_loss");
+    expect(position!.valuation.pnlPct).toBeLessThanOrEqual(-balanced.preset.stopLossPct);
   });
 
   it("markiert am Datenende abgeschnittene Positionen als zensiert", () => {
