@@ -29,6 +29,17 @@ export interface SnapshotWindows {
 export interface TrackPoint {
   ts: Date;
   priceNative: number | null;
+  /**
+   * Höchst- und Tiefstkurs **innerhalb** des Intervalls, falls bekannt.
+   *
+   * Eine Stichprobe aus der laufenden Aufzeichnung kennt sie nicht — sie sieht
+   * nur den Preis zum Messzeitpunkt. Nachgeladene Kerzen liefern sie, und das
+   * ist mehr als eine Feinheit: Zwischen zwei Messpunkten kann der Preis eine
+   * Range verlassen und zurückkehren, ohne je in einer Stichprobe aufzutauchen.
+   * Wo `low` vorliegt, wird der Drawdown gemessen statt geschätzt.
+   */
+  high?: number | null;
+  low?: number | null;
   tvlUsd: number | null;
   fees24hUsd: number | null;
   volume24hUsd: number | null;
@@ -159,12 +170,16 @@ export function computeOutcomes(
         ? ((endTvl - baseTvl) / baseTvl) * 100
         : null;
 
-    // Tiefster Punkt im Fenster relativ zum Start.
+    // Tiefster Punkt im Fenster relativ zum Start. Wo eine Kerze ihren
+    // Tiefstkurs mitbringt, zählt dieser — sonst der Preis zum Messzeitpunkt.
+    // Ohne `low` unterschätzt das Label jeden Einbruch, der zwischen zwei
+    // Stichproben lag und sich wieder erholt hat.
     let maxDrawdownPct: number | null = null;
     if (basePrice !== null && basePrice > 0) {
       for (const point of window) {
-        if (point.priceNative === null) continue;
-        const change = ((point.priceNative - basePrice) / basePrice) * 100;
+        const trough = lowestOf(point);
+        if (trough === null) continue;
+        const change = ((trough - basePrice) / basePrice) * 100;
         if (maxDrawdownPct === null || change < maxDrawdownPct) maxDrawdownPct = change;
       }
     }
@@ -226,6 +241,15 @@ function emptyLabel(horizonHours: number): OutcomeLabel {
     observations: 0,
     coveredHours: 0,
   };
+}
+
+/** Tiefster bekannter Kurs einer Beobachtung: `low`, sonst der Messwert. */
+function lowestOf(point: TrackPoint): number | null {
+  const low = point.low;
+  if (low !== null && low !== undefined && Number.isFinite(low) && low > 0) return low;
+  return point.priceNative !== null && Number.isFinite(point.priceNative)
+    ? point.priceNative
+    : null;
 }
 
 function firstDefined(points: TrackPoint[], get: (p: TrackPoint) => number | null): number | null {

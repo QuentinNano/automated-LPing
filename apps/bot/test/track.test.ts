@@ -20,8 +20,9 @@ class FakeStore implements TrackStore {
   async duePools() {
     return this.due;
   }
-  async recordPoint(pool: PoolMetrics) {
-    this.recorded.push(pool.poolAddress);
+  async recordPoints(pools: PoolMetrics[]) {
+    this.recorded.push(...pools.map((pool) => pool.poolAddress));
+    return pools.length;
   }
   async deactivateExpired() {
     return this.expired;
@@ -44,10 +45,12 @@ class FakeStore implements TrackStore {
   }
 }
 
-function deps(store: FakeStore, getPool?: TrackDeps["getPool"]): TrackDeps {
+function deps(store: FakeStore, getPools?: TrackDeps["getPools"]): TrackDeps {
   return {
     store,
-    getPool: getPool ?? (async (address) => buildPool({ poolAddress: address })),
+    getPools:
+      getPools ??
+      (async (addresses) => addresses.map((address) => buildPool({ poolAddress: address }))),
     now: () => T0,
   };
 }
@@ -67,27 +70,52 @@ describe("runTrackCycle", () => {
     expect(store.recorded).toEqual(["PoolA", "PoolB"]);
   });
 
-  it("einzelne nicht abrufbare Pools stoppen den Durchgang nicht", async () => {
+  it("fragt alle fälligen Pools in einem Sammelabruf ab, nicht einzeln", async () => {
+    // Das ist der Kern der Skalierung: Bei einigen tausend verfolgten Pools
+    // reicht kein Messraster für eine Anfrage je Pool.
+    const store = new FakeStore();
+    store.due = Array.from({ length: 500 }, (_, i) => ({
+      poolAddress: `Pool${i}`,
+      tokenMint: `Mint${i}`,
+    }));
+
+    const batches: number[] = [];
+    const result = await runTrackCycle(
+      deps(store, async (addresses) => {
+        batches.push(addresses.length);
+        return addresses.map((address) => buildPool({ poolAddress: address }));
+      }),
+    );
+
+    expect(batches).toEqual([500]);
+    expect(result.recorded).toBe(500);
+  });
+
+  it("weist Pools aus, für die die Antwort keinen Wert enthielt", async () => {
+    // Ein entfernter oder blacklisteter Pool fehlt einfach im Sammelergebnis.
+    // Das darf nicht unsichtbar bleiben — so sieht eine verarmende
+    // Aufzeichnung aus.
     const store = new FakeStore();
     store.due = [
       { poolAddress: "PoolA", tokenMint: "MintA" },
-      { poolAddress: "Kaputt", tokenMint: "MintB" },
+      { poolAddress: "Verschwunden", tokenMint: "MintB" },
       { poolAddress: "PoolC", tokenMint: "MintC" },
     ];
 
     const result = await runTrackCycle(
-      deps(store, async (address) => {
-        if (address === "Kaputt") throw new Error("Pool entfernt");
-        return buildPool({ poolAddress: address });
-      }),
+      deps(store, async (addresses) =>
+        addresses
+          .filter((address) => address !== "Verschwunden")
+          .map((address) => buildPool({ poolAddress: address })),
+      ),
     );
 
     expect(result.recorded).toBe(2);
     expect(result.failed).toBe(1);
-    expect(result.notes.join(" ")).toContain("Pool entfernt");
+    expect(result.notes.join(" ")).toContain("Verschwunden");
   });
 
-  it("meldet nur den ersten Fehler, nicht jeden einzelnen", async () => {
+  it("ein fehlgeschlagener Sammelabruf trifft die Runde, nicht den Bestand", async () => {
     const store = new FakeStore();
     store.due = Array.from({ length: 20 }, (_, i) => ({
       poolAddress: `Pool${i}`,
@@ -100,9 +128,12 @@ describe("runTrackCycle", () => {
       }),
     );
 
+    // Die Runde ist beim nächsten Durchgang unverändert fällig — der Fehler
+    // kostet also nur diesen Durchgang.
     expect(result.failed).toBe(20);
+    expect(result.recorded).toBe(0);
     expect(result.notes).toHaveLength(1);
-    expect(result.notes[0]).toContain("20 Pool(s)");
+    expect(result.notes[0]).toContain("Sammelabruf");
   });
 
   it("beendet abgelaufene Verfolgungen und berechnet fällige Labels", async () => {

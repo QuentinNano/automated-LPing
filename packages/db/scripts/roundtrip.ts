@@ -8,6 +8,8 @@ import {
   buildFeatureVector,
   effectiveFeePct,
   parseBotConfig,
+  replayPosition,
+  type PoolCandle,
   type PoolMetrics,
   type ScreeningResult,
 } from "@lping/core";
@@ -49,6 +51,9 @@ function assert(condition: boolean, label: string): void {
 /** Erkennungszeichen der Testdaten — danach wird am Ende aufgeräumt. */
 const TEST_PREFIX = "RoundtripTestPool";
 const TEST_POOL = `${TEST_PREFIX}${Date.now()}`;
+/** Zweiter Testpool: angemeldet, aber ohne einen einzigen Messpunkt. */
+const EMPTY_POOL = `${TEST_PREFIX}Empty${Date.now()}`;
+const TEST_MINT = "TestMint1111111111111111111111111111111111";
 
 function testPool(): PoolMetrics {
   return {
@@ -196,7 +201,19 @@ async function main(): Promise<void> {
     // Gebührenstruktur und Zeitfenster müssen den Weg durch Postgres überleben:
     // sie sind die Grundlage des Replays (KONZEPT-ML.md 5).
     const points = await track.loadTrack(TEST_POOL, decisionAt);
-    assert(points.length === 5, `Zeitreihe über loadTrack gelesen (${points.length})`);
+    // Zwei Schreiber (Scan und Aufzeichnung), aber nur **eine** Sorte Zeilen:
+    // Seit beide dieselbe Abbildung benutzen, ist jeder Messpunkt vollständig.
+    // Vorher schrieb der Scan eine abgespeckte Variante ohne Gebührenstruktur
+    // und SOL-Kurs — im Replay sah sie aus wie ein vollwertiger Messpunkt,
+    // konnte aber keinen Gebührenanteil liefern.
+    assert(
+      points.length === 7,
+      `Zeitreihe über loadTrack gelesen (5 Messpunkte + 2 aus dem Scan = ${points.length})`,
+    );
+    assert(
+      points.every((p) => p.dynamicFeePct !== null && p.solPriceUsd !== null),
+      "Jeder Messpunkt ist vollständig, unabhängig davon, wer ihn geschrieben hat",
+    );
     const firstPoint = points[0];
     assert(
       firstPoint !== undefined && firstPoint.dynamicFeePct !== null,
@@ -266,6 +283,9 @@ async function main(): Promise<void> {
       "Lückenhaft belegte Horizonte gelten als unbrauchbar",
     );
 
+    await checkOutcomeBacklog(prisma, track, decisionAt);
+    await checkHistory(prisma, track, decisionAt);
+
     const stats = await track.stats();
     assert(stats.features >= 1 && stats.outcomes >= 3, "Statistik zählt Merkmale und Labels");
     // Die Rohabfrage COUNT(DISTINCT (a,b)) ist die einzige Stelle mit
@@ -287,6 +307,222 @@ async function main(): Promise<void> {
 }
 
 /**
+ * Nachberechnung der Ergebnis-Labels: Der Stapel muss vorankommen.
+ *
+ * Der Fehler, den dieser Abschnitt ausschließt: Wählt die Nachberechnung die
+ * ältesten Kandidaten aus, ohne zu prüfen, ob sie überhaupt noch offene Labels
+ * haben, belegen die fertigen den Stapel dauerhaft. Ab dem ersten vollen Stapel
+ * bekommt kein neuer Kandidat mehr ein Label — lautlos, denn die Gesamtzahl der
+ * Labels bleibt dabei hoch und sieht gesund aus. Deshalb läuft dieser Test
+ * bewusst mit Stapelgröße 1: Er bildet in klein nach, was im Betrieb ab ein paar
+ * hundert Kandidaten passiert.
+ */
+async function checkOutcomeBacklog(
+  prisma: ReturnType<typeof createPrisma>,
+  track: TrackRepo,
+  decisionAt: Date,
+): Promise<void> {
+  console.log("\nNachberechnung der Ergebnis-Labels:");
+
+  const recordFeature = (poolAddress: string, offsetMin: number): Promise<string> =>
+    track.recordFeatures({
+      poolAddress,
+      tokenMint: TEST_MINT,
+      preset: "degen",
+      featureVersion: FEATURE_VERSION,
+      features: buildFeatureVector({
+        pool: { ...testPool(), poolAddress },
+        market: null,
+        risk: null,
+        sellability: null,
+        organics: null,
+        priceDivergencePct: null,
+      }),
+      score: 70,
+      verdict: "accepted",
+      rejectedBy: [],
+      capturedAt: new Date(decisionAt.getTime() + offsetMin * 60_000),
+    });
+
+  // Zwei weitere Kandidaten auf dem bereits verfolgten Pool. Der Kandidat aus
+  // dem Hauptlauf ist für seine fälligen Horizonte fertig — genau der, der den
+  // Stapel früher dauerhaft besetzt hätte.
+  const older = await recordFeature(TEST_POOL, 6);
+  const newer = await recordFeature(TEST_POOL, 12);
+
+  const overdueBefore = await track.overdueOutcomes();
+  assert(overdueBefore >= 4, `Offene Labels gelten als überfällig (${overdueBefore})`);
+
+  const first = await track.computeDueOutcomes(new Date(), 1);
+  const second = await track.computeDueOutcomes(new Date(), 1);
+  assert(
+    first > 0 && second > 0,
+    `Beide Durchgänge schreiben Labels (${first}, dann ${second})`,
+  );
+
+  const olderCount = await prisma.candidateOutcome.count({ where: { featureId: older } });
+  const newerCount = await prisma.candidateOutcome.count({ where: { featureId: newer } });
+  assert(olderCount >= 3, `Erster Kandidat abgearbeitet (${olderCount} Labels)`);
+  assert(
+    newerCount >= 3,
+    `Zweiter Kandidat ebenfalls — der Stapel bleibt nicht stehen (${newerCount} Labels)`,
+  );
+
+  const overdueAfter = await track.overdueOutcomes();
+  assert(
+    overdueAfter < overdueBefore,
+    `Rückstand sinkt mit der Nachberechnung (${overdueBefore} → ${overdueAfter})`,
+  );
+
+  // Ein Kandidat, dessen Pool nie gemessen wurde, darf den Stapel ebenfalls
+  // nicht dauerhaft blockieren. Er bekommt leere Labels und ist damit erledigt.
+  await track.trackPool(EMPTY_POOL, TEST_MINT, decisionAt);
+  const orphan = await recordFeature(EMPTY_POOL, 18);
+  const written = await track.computeDueOutcomes(new Date(), 5);
+  assert(written > 0, `Kandidat ohne Messpunkte wird abgeschlossen (${written} Labels)`);
+
+  const orphanOutcomes = await prisma.candidateOutcome.findMany({
+    where: { featureId: orphan },
+  });
+  assert(
+    orphanOutcomes.length >= 3 && orphanOutcomes.every((o) => o.observations === 0),
+    `Leere Labels weisen ihre Leere aus (${orphanOutcomes.length})`,
+  );
+  // Und sie bleiben harmlos: Der Export siebt sie über die Qualitätsangaben aus.
+  const dataset = await track.exportDataset(24, { minCoverageRatio: 0.1 });
+  assert(
+    dataset.every((row) => row.outcome.observations >= 2),
+    "Leere Labels landen nicht im Trainingsdatensatz",
+  );
+}
+
+/**
+ * Nachgeladene Historie: idempotent schreiben, zusammengeführt lesen.
+ *
+ * Der Lesepfad ist der Grund für diesen Abschnitt. Kerzen und Messpunkte tragen
+ * verschiedene Bedeutungen — eine Kerze ist eine **Menge** je Fenster, ein
+ * Messpunkt eine gleitende 24-Stunden-Summe. Wer sie verwechselt, überschätzt
+ * eine 5-Minuten-Kerze um den Faktor 288. Und der TVL, den die Historie nicht
+ * kennt, muss aus der Aufzeichnung kommen.
+ */
+async function checkHistory(
+  prisma: ReturnType<typeof createPrisma>,
+  track: TrackRepo,
+  decisionAt: Date,
+): Promise<void> {
+  console.log("\nNachgeladene Historie:");
+
+  const start = new Date(decisionAt.getTime() + 3_600_000);
+  const candles: PoolCandle[] = [0, 5, 10].map((offsetMin) => ({
+    poolAddress: TEST_POOL,
+    ts: new Date(start.getTime() + offsetMin * 60_000),
+    timeframe: "5m",
+    open: 0.001,
+    high: 0.0012,
+    // Der Tiefstkurs liegt unter jedem Messpunkt: Genau diesen Einbruch würde
+    // eine Stichprobe verpassen.
+    low: 0.0004,
+    close: 0.0009,
+    volumeUsd: 2_000,
+    feesUsd: 30,
+    protocolFeesUsd: 3,
+  }));
+
+  const written = await track.recordCandles(candles);
+  assert(written === 3, `Kerzen geschrieben (${written})`);
+
+  // Zweiter Lauf über denselben Zeitraum: ersetzen, nicht verdoppeln. Sonst
+  // wächst die Historie mit jedem Nachladen statt sich zu aktualisieren.
+  await track.recordCandles(candles);
+  const stored = await prisma.poolHistoryCandle.count({ where: { poolAddress: TEST_POOL } });
+  assert(stored === 3, `Nachladen ist idempotent (${stored} Zeilen nach zwei Läufen)`);
+
+  const newest = await track.newestCandleAt([TEST_POOL], "5m");
+  assert(
+    newest.get(TEST_POOL)?.getTime() === candles[2]!.ts.getTime(),
+    "Jüngste Kerze als Fortsetzungspunkt lesbar",
+  );
+
+  const points = await track.loadHistory(TEST_POOL, start, new Date(start.getTime() + 3_600_000));
+  assert(points.length === 3, `Historie als Zeitreihe gelesen (${points.length})`);
+
+  const first = points[0]!;
+  // 2.000 USD in 5 Minuten sind 288 × 2.000 als Tagesrate — die Engine erwartet
+  // eine Rate und skaliert selbst auf das Intervall.
+  assert(
+    first.volume24hUsd !== null && Math.abs(first.volume24hUsd - 2_000 * 288) < 1,
+    `Fenstermenge als 24-Stunden-Rate umgerechnet (${first.volume24hUsd})`,
+  );
+  // Der Satz bleibt davon unberührt: 30 / 2.000 = 1,5 %.
+  assert(
+    effectiveFeePct(first) !== null && Math.abs(effectiveFeePct(first)! - 1.5) < 0.001,
+    `Gebührensatz aus der Kerze bestimmbar (${effectiveFeePct(first)})`,
+  );
+  // Protokollanteil gemessen statt geschätzt: 3 / 30 = 10 %.
+  const protocolFeePct = first.protocolFeePct ?? null;
+  assert(
+    protocolFeePct !== null && Math.abs(protocolFeePct - 10) < 0.001,
+    `Protokollanteil je Kerze gemessen (${protocolFeePct})`,
+  );
+  assert(first.low === 0.0004, `Tiefstkurs erhalten (${first.low})`);
+  // Den TVL kennt die Historie nicht — er kommt aus der Aufzeichnung.
+  assert(first.tvlUsd === 123_456, `TVL aus dem Messpunkt fortgetragen (${first.tvlUsd})`);
+  assert(first.solPriceUsd === 180, `SOL-Kurs fortgetragen (${first.solPriceUsd})`);
+  // Gleitende Fenster gibt es für eine Kerze nicht; sie zu erfinden wäre falsch.
+  assert(first.windows === null, "Keine gleitenden Fenster erfunden");
+
+  const stats = await track.historyStats("5m");
+  assert(
+    stats.candles >= 3 && stats.pools >= 1,
+    `Bestand der Historie ausgewiesen (${stats.candles} Kerzen, ${stats.pools} Pools)`,
+  );
+
+  // --- Zusammengeführter Lesepfad ------------------------------------------
+  // Replay und Label-Berechnung müssen dieselbe Zeitreihe sehen. Kerzen bilden
+  // das Raster; ein Messpunkt kommt nur dazu, wo keine Kerze in der Nähe liegt.
+  const merged = await track.loadSeries(TEST_POOL, decisionAt, new Date());
+  const fromCandles = merged.filter((p) => p.low !== null && p.low !== undefined);
+  const fromSnapshots = merged.filter((p) => p.low === null || p.low === undefined);
+  assert(
+    fromCandles.length === 3,
+    `Kerzen bilden das Raster (${fromCandles.length} von ${merged.length} Punkten)`,
+  );
+  assert(
+    fromSnapshots.length > 0,
+    `Messpunkte außerhalb des Kerzen-Zeitraums bleiben erhalten (${fromSnapshots.length})`,
+  );
+  const sorted = merged.every(
+    (p, i) => i === 0 || p.ts.getTime() >= merged[i - 1]!.ts.getTime(),
+  );
+  assert(sorted, "Zusammengeführte Reihe ist zeitlich sortiert");
+
+  // --- Replay über echte Datenbankinhalte ----------------------------------
+  const replayPools = await track.replayPools([TEST_POOL]);
+  const replayPool = replayPools[0];
+  assert(
+    replayPool !== undefined && replayPool.binStep === 100,
+    `Pool-Stammdaten für den Replay gelesen (${replayPool?.mintY?.slice(0, 6)}…, binStep ${replayPool?.binStep})`,
+  );
+
+  const config = parseBotConfig(loadDefaults());
+  const position = replayPosition(merged, replayPool!, {
+    preset: config.presets["balanced"]!,
+    global: config.global,
+  });
+  assert(position !== null, "Position aus aufgezeichneten Daten abgespielt");
+  assert(
+    position!.state.costsSol > 0,
+    `Replay bucht Kosten wie das Paper-Trading (${position!.state.costsSol.toFixed(6)} SOL)`,
+  );
+  // Der Preis fällt im Testverlauf um 20 % — die Position darf das nicht
+  // ignorieren, sonst rechnet der Replay an den Daten vorbei.
+  assert(
+    position!.valuation.pnlPct !== 0,
+    `Preisbewegung wirkt sich aus (PnL ${position!.valuation.pnlPct.toFixed(2)} %)`,
+  );
+}
+
+/**
  * Entfernt alle Spuren des Selbsttests.
  *
  * Der Test schreibt bewusst in die echte Datenbank — nur so beweist er, dass
@@ -302,6 +538,9 @@ async function cleanup(client: ReturnType<typeof createPrisma>): Promise<void> {
     // Outcomes hängen per Cascade an den Features.
     await client.candidateFeature.deleteMany({ where: { poolAddress: { startsWith: TEST_PREFIX } } });
     await client.trackedPool.deleteMany({ where: { poolAddress: { startsWith: TEST_PREFIX } } });
+    await client.poolHistoryCandle.deleteMany({
+      where: { poolAddress: { startsWith: TEST_PREFIX } },
+    });
     // Die vom Test erzeugte Config-Version zurücknehmen, damit die Historie
     // in der Oberfläche nur echte Änderungen zeigt.
     await client.configVersion.deleteMany({ where: { actor: "db:check" } });

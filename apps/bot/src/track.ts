@@ -26,7 +26,8 @@ export interface TrackStore {
   ): Promise<{ poolAddress: string; tokenMint: string }[]>;
   /** Optional: Minuten bis zum nächsten fälligen Messpunkt. */
   nextDueInMinutes?(now?: Date, denseIntervalMin?: number): Promise<number | null>;
-  recordPoint(pool: PoolMetrics, now?: Date): Promise<void>;
+  /** Messpunkte einer ganzen Runde in einem Stapel. */
+  recordPoints(pools: PoolMetrics[], now?: Date): Promise<number>;
   deactivateExpired(now?: Date): Promise<number>;
   computeDueOutcomes(now?: Date, limit?: number): Promise<number>;
   stats(now?: Date): Promise<{
@@ -48,10 +49,27 @@ export interface TrackStore {
 
 export interface TrackDeps {
   store: TrackStore;
-  getPool(poolAddress: string): Promise<PoolMetrics>;
+  /**
+   * Pool-Metriken für viele Adressen **auf einmal**.
+   *
+   * Das ist der Unterschied zwischen einer Aufzeichnung, die mitkommt, und einer,
+   * die zurückfällt: Einzeln abgefragt kostet jeder Messpunkt eine Anfrage, und
+   * bei einigen tausend verfolgten Pools reicht kein Zeitraster dafür aus. Die
+   * Pool-Liste liefert bis zu 1.000 Pools pro Antwort.
+   */
+  getPools(poolAddresses: string[]): Promise<PoolMetrics[]>;
   log?: (line: string) => void;
   now?: () => Date;
 }
+
+/**
+ * Pools je Durchgang.
+ *
+ * Früher lag die Grenze bei 300, weil jeder Messpunkt eine eigene Anfrage
+ * kostete. Mit dem Sammelabruf sind 2.000 Pools rund 50 Anfragen — die Grenze
+ * schützt jetzt nur noch vor einer Runde, die länger dauert als das Messraster.
+ */
+export const DEFAULT_CYCLE_LIMIT = 2000;
 
 export interface TrackCycleResult {
   due: number;
@@ -72,26 +90,36 @@ export async function runTrackCycle(
   const denseIntervalMin = options.denseIntervalMin ?? 15;
 
   const expired = await deps.store.deactivateExpired(now);
-  const due = await deps.store.duePools(now, options.limit ?? 300, denseIntervalMin);
+  const due = await deps.store.duePools(now, options.limit ?? DEFAULT_CYCLE_LIMIT, denseIntervalMin);
 
   let recorded = 0;
   let failed = 0;
-  let firstError: string | null = null;
 
-  for (const entry of due) {
+  if (due.length > 0) {
+    const addresses = due.map((entry) => entry.poolAddress);
     try {
-      const pool = await deps.getPool(entry.poolAddress);
-      await deps.store.recordPoint(pool, (deps.now ?? (() => new Date()))());
-      recorded++;
+      const pools = await deps.getPools(addresses);
+      recorded = await deps.store.recordPoints(pools, (deps.now ?? (() => new Date()))());
+
+      // Fehlende Adressen sind normal (Pool entfernt, von Meteora auf die
+      // Blacklist gesetzt), aber sie dürfen nicht unsichtbar bleiben: Genau so
+      // sieht eine still verarmende Aufzeichnung aus.
+      failed = due.length - recorded;
+      if (failed > 0) {
+        const found = new Set(pools.map((pool) => pool.poolAddress));
+        const missing = addresses.filter((address) => !found.has(address));
+        notes.push(
+          `${failed} Pool(s) ohne Messpunkt` +
+            (missing.length > 0 ? `, z. B. ${missing.slice(0, 3).join(", ")}` : ""),
+        );
+      }
     } catch (error) {
-      failed++;
-      // Einzelne nicht erreichbare Pools sind normal (Pool entfernt, API-Aussetzer).
-      // Nur der erste Fehler wird gemeldet, sonst ertrinkt die Ausgabe darin.
-      if (firstError === null) firstError = message(error);
+      // Anders als früher trifft ein Fehler jetzt die ganze Runde, nicht einen
+      // Pool. Das ist der Preis des Sammelabrufs — und weil die Runde beim
+      // nächsten Durchgang unverändert fällig ist, kostet er nur diesen.
+      failed = due.length;
+      notes.push(`Sammelabruf fehlgeschlagen: ${message(error)}`);
     }
-  }
-  if (firstError !== null) {
-    notes.push(`${failed} Pool(s) nicht abrufbar, erster Fehler: ${firstError}`);
   }
 
   const outcomes = await deps.store.computeDueOutcomes(now);

@@ -3,7 +3,9 @@ import {
   METRIC_WINDOWS,
   type AdapterHealth,
   type CollectFeeMode,
+  type HistoryTimeframe,
   type MetricWindow,
+  type PoolCandle,
   type PoolMetrics,
   type PoolTokenInfo,
   type WindowedMetric,
@@ -61,6 +63,35 @@ export interface MeteoraListQuery {
   filterBy?: string;
 }
 
+/**
+ * Zeitraum-Abfrage der Historien-Endpunkte.
+ *
+ * Beide Grenzen sind optional und inklusiv. Fehlt eine, leitet die API sie aus
+ * `timeframe` ab; fehlen beide, liefert sie einen Standardbereich. Für
+ * reproduzierbares Nachladen sollten beide gesetzt sein.
+ */
+export interface HistoryQuery {
+  timeframe: HistoryTimeframe;
+  startTime?: Date;
+  endTime?: Date;
+}
+
+export interface OhlcvRow {
+  ts: Date;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volumeUsd: number | null;
+}
+
+export interface VolumeHistoryRow {
+  ts: Date;
+  volumeUsd: number | null;
+  feesUsd: number | null;
+  protocolFeesUsd: number | null;
+}
+
 export type MeteoraSourceId = "datapi" | "legacy";
 
 interface MeteoraSource {
@@ -70,10 +101,32 @@ interface MeteoraSource {
   poolPath: (address: string) => string;
   /** Query-Parameter für eine Seite; null = Endpunkt kennt keine Pagination. */
   listParams: ((query: MeteoraListQuery) => Record<string, string | number>) | null;
+  /** Historien-Endpunkte — nur die aktuelle Schnittstelle hat sie. */
+  ohlcvPath?: (address: string) => string;
+  volumeHistoryPath?: (address: string) => string;
 }
 
 /** Obergrenze der dokumentierten Schnittstelle für `page_size`. */
 export const MAX_POOL_PAGE_SIZE = 1000;
+
+/**
+ * Anfragen pro Sekunde im Normalbetrieb.
+ *
+ * Dokumentiert sind 30 RPS für alle DLMM-APIs. Der Abstand nach unten ist
+ * Absicht: Discovery, Aufzeichnung und Nachladen teilen sich das Budget, und ein
+ * 429 kostet mehr als er einspart. Wer mehr braucht, setzt einen eigenen
+ * `limiter`.
+ */
+export const DEFAULT_RATE_PER_SEC = 20;
+
+/**
+ * Wie viele Pool-Adressen in einen `filter_by`-Ausdruck gehen.
+ *
+ * Begrenzt wird nicht durch die API, sondern durch die URL-Länge: Eine
+ * Solana-Adresse ist 32–44 Zeichen, 40 davon plus Trennzeichen bleiben mit
+ * ~1,8 kB deutlich unter jeder üblichen Grenze.
+ */
+export const MAX_ADDRESSES_PER_QUERY = 40;
 
 const SOURCES: MeteoraSource[] = [
   {
@@ -81,6 +134,8 @@ const SOURCES: MeteoraSource[] = [
     baseUrl: "https://dlmm.datapi.meteora.ag",
     listPath: "/pools",
     poolPath: (address) => `/pools/${address}`,
+    ohlcvPath: (address) => `/pools/${address}/ohlcv`,
+    volumeHistoryPath: (address) => `/pools/${address}/volume/history`,
     // Seiten sind 1-basiert. Sortierung und Filter sind serverseitig, damit die
     // Vorauswahl nicht davon abhängt, was in den ersten Seiten zufällig steht.
     listParams: ({ page = 0, limit = 50, sortBy, filterBy }) => ({
@@ -117,7 +172,7 @@ export class MeteoraAdapter {
 
   constructor(options: MeteoraAdapterOptions = {}) {
     this.sources = options.sources ?? SOURCES;
-    this.limiter = options.limiter ?? new TokenBucket(2);
+    this.limiter = options.limiter ?? new TokenBucket(DEFAULT_RATE_PER_SEC);
     this.fetchImpl = options.fetchImpl;
     this.timeoutMs = options.timeoutMs;
   }
@@ -211,6 +266,200 @@ export class MeteoraAdapter {
     throw lastError ?? new AdapterError("Keine Meteora-Schnittstelle erreichbar", "network", {
       url: this.sources[0]?.baseUrl ?? "",
     });
+  }
+
+  /**
+   * Pool-Metriken für viele Adressen auf einmal.
+   *
+   * Der Unterschied zu N × `getPair` ist der Grund für diese Methode: Die
+   * Aufzeichnung braucht je Messrunde einen Wert für **jeden** verfolgten Pool.
+   * Einzeln abgefragt sind 2.000 Pools 2.000 Anfragen und sprengen jedes
+   * Zeitraster; über `filter_by=pool_address=[…]` sind es 50.
+   *
+   * Adressen, die die API nicht kennt (Pool entfernt, Tippfehler), fehlen im
+   * Ergebnis. Der Aufrufer muss die Differenz selbst bilden — stillschweigend
+   * fehlende Messpunkte wären schlimmer als ein gemeldeter Fehlversuch.
+   */
+  async getPairsByAddresses(addresses: string[]): Promise<PoolMetrics[]> {
+    const unique = [...new Set(addresses)].filter((address) => address.length > 0);
+    const pools: PoolMetrics[] = [];
+
+    for (let i = 0; i < unique.length; i += MAX_ADDRESSES_PER_QUERY) {
+      const chunk = unique.slice(i, i + MAX_ADDRESSES_PER_QUERY);
+      const page = await this.getPairsPage({
+        page: 0,
+        limit: Math.min(chunk.length, MAX_POOL_PAGE_SIZE),
+        filterBy: `pool_address=[${chunk.join("|")}]`,
+      });
+
+      if (!page.serverFiltered) {
+        // Die ältere Schnittstelle kennt `filter_by` nicht und hätte irgendeine
+        // Seite geliefert. Ein falscher Pool ist schlimmer als keiner.
+        throw new AdapterError(
+          "Sammelabruf braucht die aktuelle Schnittstelle (filter_by)",
+          "validation",
+          { url: `${this.sources[0]?.baseUrl ?? ""}/pools` },
+        );
+      }
+
+      const wanted = new Set(chunk);
+      for (const pool of page.pairs) {
+        if (wanted.has(pool.poolAddress)) pools.push(pool);
+      }
+    }
+
+    return pools;
+  }
+
+  /**
+   * Kerzen der Pool-Historie: Preis aus `/ohlcv`, Volumen und Gebühren aus
+   * `/volume/history`, über den Zeitstempel zusammengeführt.
+   *
+   * Beide Endpunkte rastern identisch, liefern aber getrennt — und der Replay
+   * braucht beides je Fenster. Fehlt eine Seite, entstehen trotzdem Kerzen: Ein
+   * Preisverlauf ohne Gebühren ist unvollständig, aber nicht wertlos, und
+   * `null` sagt das ehrlich.
+   */
+  async getHistory(
+    address: string,
+    options: HistoryQuery,
+  ): Promise<PoolCandle[]> {
+    const [prices, volumes] = await Promise.all([
+      this.getOhlcv(address, options),
+      this.getVolumeHistory(address, options),
+    ]);
+
+    const byTs = new Map<number, PoolCandle>();
+    for (const row of prices) {
+      byTs.set(row.ts.getTime(), {
+        poolAddress: address,
+        ts: row.ts,
+        timeframe: options.timeframe,
+        open: row.open,
+        high: row.high,
+        low: row.low,
+        close: row.close,
+        volumeUsd: row.volumeUsd,
+        feesUsd: null,
+        protocolFeesUsd: null,
+      });
+    }
+
+    for (const row of volumes) {
+      const key = row.ts.getTime();
+      const existing = byTs.get(key);
+      if (existing === undefined) {
+        byTs.set(key, {
+          poolAddress: address,
+          ts: row.ts,
+          timeframe: options.timeframe,
+          open: null,
+          high: null,
+          low: null,
+          close: null,
+          volumeUsd: row.volumeUsd,
+          feesUsd: row.feesUsd,
+          protocolFeesUsd: row.protocolFeesUsd,
+        });
+        continue;
+      }
+      existing.feesUsd = row.feesUsd;
+      existing.protocolFeesUsd = row.protocolFeesUsd;
+      // Das Volumen steht in beiden Antworten; die Gebühren-Historie ist die
+      // Quelle, zu der die Gebühren gehören — sonst wäre der Satz aus zwei
+      // verschiedenen Antworten zusammengerechnet.
+      if (row.volumeUsd !== null) existing.volumeUsd = row.volumeUsd;
+    }
+
+    return [...byTs.values()].sort((a, b) => a.ts.getTime() - b.ts.getTime());
+  }
+
+  /** Preiskerzen (`/pools/{address}/ohlcv`). */
+  async getOhlcv(address: string, options: HistoryQuery): Promise<OhlcvRow[]> {
+    const payload = await this.fetchHistory(
+      address,
+      options,
+      (source) => source.ohlcvPath,
+      "ohlcv",
+    );
+    return payload.flatMap((raw) => {
+      const ts = historyTimestamp(raw);
+      if (ts === null) return [];
+      return [
+        {
+          ts,
+          open: nullableNumber(raw["open"]),
+          high: nullableNumber(raw["high"]),
+          low: nullableNumber(raw["low"]),
+          close: nullableNumber(raw["close"]),
+          volumeUsd: nullableNumber(raw["volume"]),
+        },
+      ];
+    });
+  }
+
+  /** Volumen-, Gebühren- und Protokollgebühren-Historie. */
+  async getVolumeHistory(address: string, options: HistoryQuery): Promise<VolumeHistoryRow[]> {
+    const payload = await this.fetchHistory(
+      address,
+      options,
+      (source) => source.volumeHistoryPath,
+      "volume/history",
+    );
+    return payload.flatMap((raw) => {
+      const ts = historyTimestamp(raw);
+      if (ts === null) return [];
+      return [
+        {
+          ts,
+          volumeUsd: nullableNumber(raw["volume"]),
+          feesUsd: nullableNumber(raw["fees"]),
+          protocolFeesUsd: nullableNumber(raw["protocol_fees"]),
+        },
+      ];
+    });
+  }
+
+  /**
+   * Gemeinsamer Abrufpfad beider Historien-Endpunkte.
+   *
+   * Es wird nur die Quelle versucht, die sie überhaupt hat: Die ältere
+   * Schnittstelle kennt keine Historie, und ein Rückfall auf sie würde einen
+   * 404 in einen unverständlichen Fehler verwandeln.
+   */
+  private async fetchHistory(
+    address: string,
+    options: HistoryQuery,
+    pathOf: (source: MeteoraSource) => ((address: string) => string) | undefined,
+    label: string,
+  ): Promise<Record<string, unknown>[]> {
+    const source = this.sources.find((candidate) => pathOf(candidate) !== undefined);
+    const path = source === undefined ? undefined : pathOf(source);
+    if (source === undefined || path === undefined) {
+      throw new AdapterError(
+        `Keine Schnittstelle mit ${label}-Historie konfiguriert`,
+        "validation",
+        { url: label },
+      );
+    }
+
+    const url = `${source.baseUrl}${path(address)}`;
+    const payload = await fetchJson(url, {
+      schema: z.unknown(),
+      searchParams: {
+        timeframe: options.timeframe,
+        ...(options.startTime !== undefined
+          ? { start_time: Math.floor(options.startTime.getTime() / 1000) }
+          : {}),
+        ...(options.endTime !== undefined
+          ? { end_time: Math.floor(options.endTime.getTime() / 1000) }
+          : {}),
+      },
+      ...this.requestOptions(),
+    });
+
+    const { items } = unwrapList(payload, url);
+    return items.filter(isRecord);
   }
 
   async health(): Promise<AdapterHealth> {
@@ -542,6 +791,28 @@ function pickDate(scopes: Record<string, unknown>[], keys: string[]): Date | und
 /** Unterscheidet Sekunden von Millisekunden: 1e12 liegt im Jahr 2001 ff. */
 function fromEpoch(value: number): Date {
   return new Date(value < 1e12 ? value * 1000 : value);
+}
+
+/**
+ * Zeitstempel einer Historien-Zeile. `timestamp` ist Unix-Sekunden; die Doku
+ * nennt zusätzlich `timestamp_str`, der hier als Rückfallebene dient.
+ * `null` heißt: Zeile ohne verwertbaren Zeitpunkt und damit unbrauchbar.
+ */
+function historyTimestamp(raw: Record<string, unknown>): Date | null {
+  const numeric = toNumber(raw["timestamp"]);
+  if (numeric !== undefined && numeric > 0) return fromEpoch(numeric);
+
+  const text = raw["timestamp_str"];
+  if (typeof text === "string" && text.trim() !== "") {
+    const parsed = new Date(text);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return null;
+}
+
+/** Zahl oder `null` — für Historien-Felder, die fehlen dürfen. */
+function nullableNumber(value: unknown): number | null {
+  return toNumber(value) ?? null;
 }
 
 /** `collect_fee_mode`: 0 = Input-Token, 1 = immer Token Y. */

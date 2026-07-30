@@ -13,7 +13,7 @@ import { TokenBucket, fetchJson, type FetchLike } from "../http";
  *   extrahiert (Base58-Adressfelder + Score-Felder in beliebiger Nesting-Tiefe).
  * - `getTrending` wirft NIE: Fehler werden als Status (`unavailable`,
  *   `schema_drift`) gemeldet, damit die Discovery automatisch auf die eigene
- *   Preset-Replikation zurückfallen kann (KONZEPT.md Abschnitt 4.1).
+ *   eigene Discovery zurückfallen kann (KONZEPT.md Abschnitt 4).
  * - Rate-Limit: max. 1 Request / 30 s (Rücksichtnahme + Blockvermeidung).
  */
 

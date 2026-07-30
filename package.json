@@ -15,6 +15,8 @@
     "db:generate": "pnpm --filter @lping/db db:generate",
     "db:migrate": "pnpm --filter @lping/db db:migrate",
     "aufzeichnen": "bash scripts/track-forever.sh",
+    "nachladen": "pnpm --filter @lping/bot exec tsx src/main.ts backfill",
+    "abspielen": "pnpm --filter @lping/bot exec tsx src/main.ts replay",
     "sichern": "bash scripts/backup.sh sichern",
     "pruefen": "pnpm --filter @lping/bot exec tsx src/main.ts track --check"
   },

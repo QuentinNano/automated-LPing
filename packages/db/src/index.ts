@@ -3,7 +3,7 @@ import { PrismaClient } from "@prisma/client";
 export { PrismaConfigStore } from "./configStore";
 export { ScanRepo } from "./scanRepo";
 export type { RecordedCandidate, ScanRecordInput } from "./scanRepo";
-export { TrackRepo } from "./trackRepo";
+export { TrackRepo, snapshotDataOf } from "./trackRepo";
 export type { RecordFeatureInput, DuePool, DatasetRow } from "./trackRepo";
 export { PaperRepo } from "./paperRepo";
 export type {

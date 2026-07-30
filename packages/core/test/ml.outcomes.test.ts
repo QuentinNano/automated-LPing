@@ -43,6 +43,22 @@ describe("computeOutcomes", () => {
     expect(labels.get(6)!.maxDrawdownPct).toBeCloseTo(-50);
   });
 
+  it("nutzt den Tiefstkurs einer Kerze statt des Stichprobenwerts", () => {
+    // Genau der Fall, den eine Aufzeichnung im 15-Minuten-Raster nicht sieht:
+    // Der Preis bricht zwischen zwei Messpunkten ein und erholt sich wieder.
+    // Ohne `low` bleibt der Einbruch unsichtbar und das Label zu freundlich.
+    const sampled = [point(0, 1), point(2, 0.98), point(5, 1.02)];
+    expect(byHorizon(computeOutcomes(T0, sampled)).get(6)!.maxDrawdownPct).toBeCloseTo(-2);
+
+    const withCandles = sampled.map((p, i) => (i === 1 ? { ...p, low: 0.35 } : p));
+    expect(byHorizon(computeOutcomes(T0, withCandles)).get(6)!.maxDrawdownPct).toBeCloseTo(-65);
+  });
+
+  it("ignoriert einen unbrauchbaren Tiefstkurs und fällt auf den Messwert zurück", () => {
+    const points = [point(0, 1), { ...point(2, 0.6), low: 0 }, point(5, 0.9)];
+    expect(byHorizon(computeOutcomes(T0, points)).get(6)!.maxDrawdownPct).toBeCloseTo(-40);
+  });
+
   it("erkennt Rugs über Preis- oder TVL-Einbruch", () => {
     const priceRug = byHorizon(computeOutcomes(T0, [point(0, 1), point(2, 0.05)]));
     expect(priceRug.get(6)!.rugged).toBe(true);

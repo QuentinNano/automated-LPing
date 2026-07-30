@@ -35,6 +35,16 @@ export interface TrackHealthInput {
   featuresLast6h: number;
   featuresTotal: number;
   outcomesTotal: number;
+  /**
+   * Fällige, aber fehlende Ergebnis-Labels, deren Horizont deutlich länger
+   * verstrichen ist, als die Nachberechnung braucht.
+   *
+   * Warum diese Zahl und nicht `outcomesTotal`: Eine Nachberechnung, die nur
+   * die ältesten Kandidaten immer wieder anfasst, liefert weiterhin eine große
+   * Gesamtzahl und sieht damit gesund aus — während für jeden neuen Kandidaten
+   * nie ein Label entsteht. Erst der Rückstand macht den Unterschied sichtbar.
+   */
+  overdueOutcomes: number;
   oldestFeatureAt: Date | null;
   /**
    * Belegungsgrad wichtiger Merkmale (0–1) in einer Stichprobe der jüngsten
@@ -46,6 +56,15 @@ export interface TrackHealthInput {
   /** Erwarteter Abstand zwischen Messpunkten in Minuten. */
   expectedIntervalMin: number;
 }
+
+/**
+ * Ab wie vielen überfälligen Labels der Rückstand kein Nachholen mehr ist.
+ *
+ * Ein Durchgang arbeitet einige hundert Kandidaten ab, ein normaler Rückstand
+ * nach kurzer Unterbrechung ist damit binnen weniger Durchgänge abgebaut. Eine
+ * dreistellige Zahl trotz Karenzzeit heißt: Es wird nicht mehr nachgeführt.
+ */
+const OVERDUE_FAIL_THRESHOLD = 100;
 
 /** Merkmale, deren Ausbleiben auf eine defekte Datenquelle hindeutet. */
 const WATCHED_FIELDS: { key: string; label: string; source: string; minShare: number }[] = [
@@ -170,7 +189,14 @@ export function evaluateTrackHealth(input: TrackHealthInput): HealthCheck[] {
       ...(status === "ok"
         ? {}
         : {
-            hint: "Längere Unterbrechungen verzerren den Datensatz systematisch (meist fehlen Nachtstunden). Rechner durchlaufen lassen oder auf einen Server umziehen.",
+            // Preis-, Volumen- und Gebührenverlauf sind rückwirkend abrufbar;
+            // TVL-Messpunkte und Merkmale nicht. Eine Lücke ist damit teilweise
+            // reparierbar — und wer das nicht weiß, verliert den Rest auch.
+            hint:
+              "Längere Unterbrechungen verzerren den Datensatz systematisch (meist fehlen " +
+              "Nachtstunden). `pnpm nachladen` holt Preis-, Volumen- und Gebührenverlauf " +
+              "nachträglich; TVL-Messpunkte und Merkmale bleiben verloren. Gegen die " +
+              "Ursache: Rechner durchlaufen lassen oder auf einen Server umziehen.",
           }),
     });
   }
@@ -204,23 +230,37 @@ export function evaluateTrackHealth(input: TrackHealthInput): HealthCheck[] {
         status: "info",
         detail: "Noch zu früh — das erste Label entsteht eine Stunde nach dem ersten Kandidaten.",
       });
+    } else if (input.outcomesTotal === 0) {
+      checks.push({
+        id: "outcomes",
+        label: "Ergebnis-Labels",
+        status: "fail",
+        detail: `Seit ${oldestAgeHours.toFixed(0)} Stunden Daten, aber kein einziges Label berechnet.`,
+        hint: "Ohne Labels ist der Datensatz für die Optimierung wertlos. Bitte melden.",
+      });
+    } else if (input.overdueOutcomes > 0) {
+      // Der gefährliche Zustand: Es gibt Labels, aber sie wachsen nicht mit dem
+      // Datensatz mit. Die Gesamtzahl allein verrät das nicht.
+      checks.push({
+        id: "outcomes",
+        label: "Ergebnis-Labels",
+        status: input.overdueOutcomes >= OVERDUE_FAIL_THRESHOLD ? "fail" : "warn",
+        detail:
+          `${input.outcomesTotal} Labels berechnet, aber ${input.overdueOutcomes} sind ` +
+          `überfällig (Horizont längst verstrichen, Label fehlt).`,
+        hint:
+          "Läuft `pnpm aufzeichnen`? Nach einer Unterbrechung holt die Nachberechnung " +
+          "den Rückstand über die nächsten Durchgänge auf. Bleibt die Zahl gleich oder " +
+          "steigt sie weiter, werden für neue Kandidaten keine Labels mehr berechnet — " +
+          "dann bitte melden.",
+      });
     } else {
-      checks.push(
-        input.outcomesTotal === 0
-          ? {
-              id: "outcomes",
-              label: "Ergebnis-Labels",
-              status: "fail",
-              detail: `Seit ${oldestAgeHours.toFixed(0)} Stunden Daten, aber kein einziges Label berechnet.`,
-              hint: "Ohne Labels ist der Datensatz für die Optimierung wertlos. Bitte melden.",
-            }
-          : {
-              id: "outcomes",
-              label: "Ergebnis-Labels",
-              status: "ok",
-              detail: `${input.outcomesTotal} Labels berechnet.`,
-            },
-      );
+      checks.push({
+        id: "outcomes",
+        label: "Ergebnis-Labels",
+        status: "ok",
+        detail: `${input.outcomesTotal} Labels berechnet, keine überfällig.`,
+      });
     }
   }
 

@@ -16,12 +16,95 @@ export interface TokenRef {
  *
  * Warum alle Fenster geführt werden: KONZEPT-ML.md 3.2/4.2 stützt sich auf
  * Trends und Stetigkeit ("Fee/TVL-Trend statt nur -Niveau"), nicht auf das
- * 24-Stunden-Niveau allein. Die Werte kommen im selben Response — sie später
- * nachzuholen ist unmöglich, weil es keine Historie zum Abrufen gibt.
+ * 24-Stunden-Niveau allein. Die Werte kommen im selben Response, kosten also
+ * nichts extra.
+ *
+ * Volumen- und Gebührenverlauf ließen sich notfalls über die Historien-
+ * Endpunkte der Pool-API nachladen (`/pools/{address}/ohlcv`,
+ * `/pools/{address}/volume/history`, KONZEPT-ML.md 3.3). Für den TVL gilt das
+ * nicht — er ist nur als aktueller Stand zu haben und deshalb der Grund, warum
+ * die Verlaufsaufzeichnung trotzdem laufen muss.
  */
 export const METRIC_WINDOWS = ["m30", "h1", "h2", "h4", "h12", "h24"] as const;
 export type MetricWindow = (typeof METRIC_WINDOWS)[number];
 export type WindowedMetric = Partial<Record<MetricWindow, number>>;
+
+/**
+ * Fensterlängen der Historien-Endpunkte der Pool-API
+ * (`/pools/{address}/ohlcv`, `/pools/{address}/volume/history`).
+ *
+ * Bewusst getrennt von `METRIC_WINDOWS`: Das sind **Kerzen** (disjunkte
+ * Zeitfenster in der Vergangenheit), jene sind **gleitende Fenster** bis jetzt.
+ * Die Werte zu verwechseln hieße, ein 5-Minuten-Volumen für ein
+ * 30-Minuten-Volumen zu halten.
+ */
+export const HISTORY_TIMEFRAMES = ["5m", "30m", "1h", "2h", "4h", "12h", "24h"] as const;
+export type HistoryTimeframe = (typeof HISTORY_TIMEFRAMES)[number];
+
+/** Länge jeder Kerze in Minuten — Grundlage jeder Raten-Umrechnung. */
+export const TIMEFRAME_MINUTES: Record<HistoryTimeframe, number> = {
+  "5m": 5,
+  "30m": 30,
+  "1h": 60,
+  "2h": 120,
+  "4h": 240,
+  "12h": 720,
+  "24h": 1440,
+};
+
+/**
+ * Eine Kerze der Pool-Historie, zusammengeführt aus beiden Historien-Endpunkten.
+ *
+ * Der entscheidende Unterschied zu einem `pool_snapshots`-Messpunkt: Volumen und
+ * Gebühren gelten **für dieses Fenster**, nicht als gleitende 24-Stunden-Summe.
+ * Wer sie als 24-Stunden-Wert liest, überschätzt eine 5-Minuten-Kerze um den
+ * Faktor 288.
+ *
+ * Was die Historie **nicht** liefert: TVL, dynamische Gebühr und SOL-Kurs. Die
+ * gibt es nur als aktuellen Stand, also ausschließlich aus der laufenden
+ * Aufzeichnung (KONZEPT-ML.md 3.3).
+ */
+export interface PoolCandle {
+  poolAddress: string;
+  /** Beginn des Fensters. */
+  ts: Date;
+  timeframe: HistoryTimeframe;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  /** Handelsvolumen in diesem Fenster (USD). */
+  volumeUsd: number | null;
+  /** Gesamt-Handelsgebühren in diesem Fenster (USD), vor Protokollabzug. */
+  feesUsd: number | null;
+  /** Protokollanteil in diesem Fenster (USD) — der LP erhält ihn nicht. */
+  protocolFeesUsd: number | null;
+}
+
+/**
+ * Gebührensatz einer Kerze in Prozent des Volumens.
+ *
+ * Der Quotient ist skalenfrei: Ob die Beträge für fünf Minuten oder 24 Stunden
+ * gelten, kürzt sich heraus. Damit ist er die verlässlichste Größe der Historie
+ * — und genau der Satz, mit dem die Simulation Gebühren buchen muss.
+ */
+export function candleFeePct(candle: PoolCandle): number | null {
+  const { feesUsd, volumeUsd } = candle;
+  if (feesUsd === null || volumeUsd === null || volumeUsd <= 0 || feesUsd < 0) return null;
+  return (feesUsd / volumeUsd) * 100;
+}
+
+/**
+ * Volumen einer Kerze als 24-Stunden-Rate.
+ *
+ * Die Paper-Engine erwartet `poolVolume24hUsd` als Rate und skaliert sie selbst
+ * auf das abgelaufene Intervall. Eine Kerze ist eine Menge, keine Rate — hier
+ * wird sie umgerechnet.
+ */
+export function candleVolumeRate24hUsd(candle: PoolCandle): number | null {
+  if (candle.volumeUsd === null) return null;
+  return candle.volumeUsd * (1440 / TIMEFRAME_MINUTES[candle.timeframe]);
+}
 
 /**
  * Gebühren-Währung eines Pools (`collect_fee_mode` in `pool_config`).

@@ -206,6 +206,43 @@ model PoolSnapshot {
   @@map("pool_snapshots")
 }
 
+/// Kerzen der Pool-Historie, nachgeladen über die Historien-Endpunkte der
+/// DLMM-API (KONZEPT-ML.md 3.3).
+///
+/// Bewusst eine eigene Tabelle statt zusätzlicher Spalten in `pool_snapshots`:
+/// Eine Kerze ist eine andere Art von Beobachtung. Volumen und Gebühren gelten
+/// für ein **abgeschlossenes Fenster**, nicht als gleitende 24-Stunden-Summe,
+/// und sie trägt High/Low, die eine Stichprobe nicht haben kann. Beides unter
+/// denselben Spaltennamen zu mischen hieße, zwei Bedeutungen zu verwechseln —
+/// und ein 5-Minuten-Volumen für ein Tagesvolumen zu halten, wäre ein Faktor 288.
+///
+/// Was hier fehlt und nur die laufende Aufzeichnung liefert: TVL, dynamische
+/// Gebühr, SOL-Kurs.
+model PoolHistoryCandle {
+  poolAddress     String   @map("pool_address")
+  /// Beginn des Fensters.
+  ts              DateTime
+  /// Fensterlänge, wie von der API benannt (`5m` … `24h`).
+  timeframe       String
+  open            Decimal? @db.Decimal(30, 15)
+  high            Decimal? @db.Decimal(30, 15)
+  low             Decimal? @db.Decimal(30, 15)
+  close           Decimal? @db.Decimal(30, 15)
+  volumeUsd       Decimal? @map("volume_usd") @db.Decimal(20, 2)
+  /// Gesamtgebühren des Fensters, vor Protokollabzug.
+  feesUsd         Decimal? @map("fees_usd") @db.Decimal(20, 2)
+  /// Protokollanteil des Fensters — aus ihm folgt der LP-Anteil je Kerze,
+  /// statt ihn aus einer Pool-Konfiguration zu schätzen.
+  protocolFeesUsd Decimal? @map("protocol_fees_usd") @db.Decimal(20, 2)
+  fetchedAt       DateTime @default(now()) @map("fetched_at")
+
+  /// Der zusammengesetzte Schlüssel macht das Nachladen idempotent: Ein zweiter
+  /// Lauf über denselben Zeitraum ersetzt, statt zu verdoppeln.
+  @@id([poolAddress, timeframe, ts])
+  @@index([poolAddress, ts])
+  @@map("pool_history_candles")
+}
+
 /// Append-only Konfigurations-Historie (ConfigService-Persistenz).
 model ConfigVersion {
   version   Int      @id @default(autoincrement())

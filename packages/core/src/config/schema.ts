@@ -103,7 +103,7 @@ export const ScreeningConfigSchema = z.object({
   maxAvgTradeUsd: z.number().positive(),
 });
 
-/** Vor-Filter der Discovery-Replikation (KONZEPT.md Abschnitt 4.1, Weg 2). */
+/** Vor-Filter der Discovery (KONZEPT.md Abschnitt 4.2). */
 export const DiscoveryConfigSchema = z.object({
   minBinStep: z.number().int().min(1).max(400),
   minBaseFeePct: z.number().min(0).max(15),

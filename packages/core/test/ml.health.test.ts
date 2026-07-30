@@ -16,6 +16,7 @@ function healthy(overrides: Partial<TrackHealthInput> = {}): TrackHealthInput {
     featuresLast6h: 90,
     featuresTotal: 1400,
     outcomesTotal: 2600,
+    overdueOutcomes: 0,
     oldestFeatureAt: hoursAgo(120),
     fieldCoverage: {
       tvl_usd: 1,
@@ -109,6 +110,35 @@ describe("evaluateTrackHealth", () => {
   it("meldet fehlende Labels, sobald genug Zeit vergangen ist", () => {
     const checks = byId(healthy({ oldestFeatureAt: hoursAgo(48), outcomesTotal: 0 }));
     expect(checks.get("outcomes")?.status).toBe("fail");
+  });
+
+  it("erkennt eine stehengebliebene Nachberechnung trotz vieler Labels", () => {
+    // Der Fall, den die reine Gesamtzahl nicht zeigt: Es sind Tausende Labels
+    // da, aber sie gehören alle zu den ältesten Kandidaten — für jeden neuen
+    // entsteht keines mehr.
+    const checks = byId(healthy({ outcomesTotal: 2600, overdueOutcomes: 4200 }));
+    const check = checks.get("outcomes");
+    expect(check?.status).toBe("fail");
+    expect(check?.detail).toContain("überfällig");
+  });
+
+  it("wertet einen kleinen Rückstand nur als Hinweis", () => {
+    // Nach einer kurzen Unterbrechung ist ein Rückstand normal und wird über
+    // die nächsten Durchgänge abgebaut.
+    expect(byId(healthy({ overdueOutcomes: 12 })).get("outcomes")?.status).toBe("warn");
+  });
+
+  it("bestätigt ausdrücklich, wenn nichts überfällig ist", () => {
+    const check = byId(healthy()).get("outcomes");
+    expect(check?.status).toBe("ok");
+    expect(check?.detail).toContain("keine überfällig");
+  });
+
+  it("verlangt keine Labels, solange der erste Horizont läuft — auch mit Rückstand", () => {
+    // Vor der ersten Stunde kann definitionsgemäß nichts überfällig sein; ein
+    // Zahlendreher darf hier keinen Fehlalarm auslösen.
+    const checks = byId(healthy({ oldestFeatureAt: minutesAgo(30), overdueOutcomes: 5 }));
+    expect(checks.get("outcomes")?.status).toBe("info");
   });
 });
 

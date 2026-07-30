@@ -1,15 +1,73 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import {
+  OUTCOME_HORIZONS_HOURS,
+  TIMEFRAME_MINUTES,
   TRACKING_DURATION_HOURS,
   computeOutcomes,
   solPriceUsdOf,
   trackingIntervalSec,
   type FeatureVector,
+  type HistoryTimeframe,
+  type PoolCandle,
   type PoolMetrics,
   type SnapshotWindows,
   type TrackHealthInput,
   type TrackPoint,
 } from "@lping/core";
+
+/**
+ * Fensterlänge, in der die Historie geführt wird.
+ *
+ * Fünf Minuten sind der Zweck der Übung: Ein 24-Stunden-Mittel kann die
+ * Volatilitätsphasen nicht auflösen, in denen eine DLMM-Position verdient
+ * (KONZEPT-ML.md 3.2). Feiner geht die API nicht.
+ */
+export const DEFAULT_HISTORY_TIMEFRAME: HistoryTimeframe = "5m";
+
+/**
+ * Wie lange ein TVL-Wert nach vorne getragen wird, wenn eine Kerze keinen
+ * eigenen hat.
+ *
+ * Die Historie liefert keinen TVL — er existiert nur als Momentaufnahme in der
+ * laufenden Aufzeichnung. Über wenige Stunden ist Forttragen vertretbar; danach
+ * ist `null` die ehrlichere Antwort, und die Simulation bucht dann keine
+ * Gebühren statt falsche.
+ */
+const TVL_CARRY_FORWARD_HOURS = 6;
+
+/** Längster Auswertungshorizont — begrenzt, wie weit ein Verlauf gelesen wird. */
+const MAX_HORIZON_HOURS = Math.max(...OUTCOME_HORIZONS_HOURS);
+
+/**
+ * Karenzzeit, bevor ein fehlendes Label als überfällig gilt.
+ *
+ * Ein fälliges Label entsteht im nächsten Durchgang, also binnen Minuten. Die
+ * Karenz deckt Unterbrechungen ab, nach denen ein Rückstand erst über mehrere
+ * Durchgänge abgearbeitet wird — sie soll den Normalbetrieb nicht anschlagen
+ * lassen, aber einen echten Stillstand nicht verstecken.
+ */
+const OUTCOME_GRACE_HOURS = 6;
+
+/**
+ * Bedingung „für diesen Horizont ist ein Label fällig, aber nicht vorhanden".
+ *
+ * Das ist der Kern der Nachberechnung: Ohne die `outcomes: none`-Bedingung
+ * liefert die Abfrage immer wieder dieselben ältesten Kandidaten — auch die
+ * längst vollständig ausgewerteten. Sobald mehr Kandidaten existieren, als ein
+ * Durchgang abarbeitet, bekäme kein neuer Kandidat je ein Label, und zwar
+ * lautlos: Die Gesamtzahl der Labels bleibt hoch, sie wächst nur nicht mehr.
+ */
+function pendingHorizonConditions(
+  now: Date,
+  graceHours = 0,
+): Prisma.CandidateFeatureWhereInput[] {
+  return OUTCOME_HORIZONS_HOURS.map((horizonHours) => ({
+    capturedAt: {
+      lte: new Date(now.getTime() - (horizonHours + graceHours) * 3_600_000),
+    },
+    outcomes: { none: { horizonHours } },
+  }));
+}
 
 export interface RecordFeatureInput {
   poolAddress: string;
@@ -53,6 +111,35 @@ function snapshotWindows(pool: PoolMetrics): Prisma.InputJsonValue | undefined {
   return Object.keys(windows).length > 0
     ? (windows as unknown as Prisma.InputJsonValue)
     : undefined;
+}
+
+/**
+ * Ein Messpunkt als Datenbankzeile.
+ *
+ * Öffentlich, weil zwei Stellen Messpunkte schreiben: die Aufzeichnung und der
+ * Scan. Früher schrieb der Scan eine abgespeckte Variante ohne Gebührenstruktur,
+ * SOL-Kurs und Zeitfenster — was in derselben Tabelle zwei Sorten Zeilen ergab,
+ * die sich nur beim Lesen unterschieden. Für den Replay ist das gefährlich: Eine
+ * Zeile ohne SOL-Kurs liefert keinen Gebührenanteil, sieht aber aus wie ein
+ * vollwertiger Messpunkt. Es gibt deshalb genau eine Stelle, die festlegt, was
+ * ein Messpunkt enthält.
+ */
+export function snapshotDataOf(pool: PoolMetrics, ts?: Date) {
+  return {
+    poolAddress: pool.poolAddress,
+    ...(ts !== undefined ? { ts } : {}),
+    tvlUsd: pool.tvlUsd ?? null,
+    volume24hUsd: pool.volume24hUsd ?? null,
+    fees24hUsd: pool.fees24hUsd ?? null,
+    feeTvl24hPct: pool.feeTvl24hPct ?? null,
+    priceNative: pool.priceNative ?? null,
+    binStep: pool.binStep,
+    dynamicFeePct: pool.dynamicFeePct ?? null,
+    baseFeePct: pool.baseFeePct ?? null,
+    protocolFeePct: pool.protocolFeePct ?? null,
+    solPriceUsd: solPriceUsdOf(pool),
+    windows: snapshotWindows(pool),
+  };
 }
 
 /** Millisekunden bis zur Fälligkeit; <= 0 bedeutet "jetzt fällig". */
@@ -155,6 +242,25 @@ export class TrackRepo {
   }
 
   /**
+   * Verfolgte Pools, unabhängig von der Messfälligkeit.
+   *
+   * Das Nachladen richtet sich nicht nach dem Messraster: Es holt fehlende
+   * Historie, und die fehlt auch dann, wenn der nächste Messpunkt noch nicht
+   * fällig ist. Standardmäßig auch abgelaufene Verfolgungen — deren Verlauf ist
+   * genauso Teil des Datensatzes, nur eben abgeschlossen.
+   */
+  async trackedPools(
+    options: { activeOnly?: boolean; limit?: number } = {},
+  ): Promise<{ poolAddress: string; firstSeenAt: Date; trackUntil: Date }[]> {
+    return this.prisma.trackedPool.findMany({
+      ...(options.activeOnly === true ? { where: { active: true } } : {}),
+      orderBy: { firstSeenAt: "asc" },
+      ...(options.limit !== undefined ? { take: options.limit } : {}),
+      select: { poolAddress: true, firstSeenAt: true, trackUntil: true },
+    });
+  }
+
+  /**
    * Minuten bis zum nächsten fälligen Messpunkt. Macht ein "0 von N fällig"
    * erklärbar, statt es wie einen Stillstand aussehen zu lassen.
    */
@@ -170,29 +276,100 @@ export class TrackRepo {
 
   /** Messpunkt schreiben und den Verfolgungsstand fortschreiben. */
   async recordPoint(pool: PoolMetrics, now: Date = new Date()): Promise<void> {
+    await this.recordPoints([pool], now);
+  }
+
+  /**
+   * Messpunkte vieler Pools in **einer** Transaktion.
+   *
+   * Der Grund ist derselbe wie beim Sammelabruf: Bei einigen tausend verfolgten
+   * Pools ist eine Transaktion je Pool der Engpass, nicht die Datenmenge. Ein
+   * `createMany` für die Messpunkte plus ein Zähler-Update je Pool geht als ein
+   * Stapel zur Datenbank.
+   *
+   * Pools ohne `tracked_pools`-Eintrag würden das Update sprengen; sie werden
+   * vorher herausgefiltert, damit ein verwaister Pool nicht die ganze Runde
+   * scheitern lässt.
+   */
+  async recordPoints(pools: PoolMetrics[], now: Date = new Date()): Promise<number> {
+    if (pools.length === 0) return 0;
+
+    const known = await this.prisma.trackedPool.findMany({
+      where: { poolAddress: { in: pools.map((pool) => pool.poolAddress) } },
+      select: { poolAddress: true },
+    });
+    const tracked = new Set(known.map((row) => row.poolAddress));
+    const writable = pools.filter((pool) => tracked.has(pool.poolAddress));
+    if (writable.length === 0) return 0;
+
     await this.prisma.$transaction([
-      this.prisma.poolSnapshot.create({
-        data: {
-          poolAddress: pool.poolAddress,
-          ts: now,
-          tvlUsd: pool.tvlUsd ?? null,
-          volume24hUsd: pool.volume24hUsd ?? null,
-          fees24hUsd: pool.fees24hUsd ?? null,
-          feeTvl24hPct: pool.feeTvl24hPct ?? null,
-          priceNative: pool.priceNative ?? null,
-          binStep: pool.binStep,
-          dynamicFeePct: pool.dynamicFeePct ?? null,
-          baseFeePct: pool.baseFeePct ?? null,
-          protocolFeePct: pool.protocolFeePct ?? null,
-          solPriceUsd: solPriceUsdOf(pool),
-          windows: snapshotWindows(pool),
-        },
+      this.prisma.poolSnapshot.createMany({
+        data: writable.map((pool) => snapshotDataOf(pool, now)),
       }),
-      this.prisma.trackedPool.update({
-        where: { poolAddress: pool.poolAddress },
-        data: { lastTrackedAt: now, pointCount: { increment: 1 } },
-      }),
+      ...writable.map((pool) =>
+        this.prisma.trackedPool.update({
+          where: { poolAddress: pool.poolAddress },
+          data: { lastTrackedAt: now, pointCount: { increment: 1 } },
+        }),
+      ),
     ]);
+
+    return writable.length;
+  }
+
+  /**
+   * Nachgeladene Kerzen sichern.
+   *
+   * Ersetzt den abgedeckten Zeitraum statt zu ergänzen: Die jüngste Kerze ist
+   * beim Abruf noch nicht abgeschlossen und ändert sich, und ein zweiter Lauf
+   * über denselben Zeitraum soll denselben Bestand ergeben — nicht doppelte
+   * Zeilen und nicht veraltete Werte.
+   */
+  async recordCandles(candles: PoolCandle[]): Promise<number> {
+    if (candles.length === 0) return 0;
+
+    const groups = new Map<string, PoolCandle[]>();
+    for (const candle of candles) {
+      const key = `${candle.poolAddress} ${candle.timeframe}`;
+      const group = groups.get(key);
+      if (group === undefined) groups.set(key, [candle]);
+      else group.push(candle);
+    }
+
+    let written = 0;
+    for (const group of groups.values()) {
+      const first = group[0]!;
+      const times = group.map((candle) => candle.ts.getTime());
+      const from = new Date(Math.min(...times));
+      const to = new Date(Math.max(...times));
+
+      await this.prisma.$transaction([
+        this.prisma.poolHistoryCandle.deleteMany({
+          where: {
+            poolAddress: first.poolAddress,
+            timeframe: first.timeframe,
+            ts: { gte: from, lte: to },
+          },
+        }),
+        this.prisma.poolHistoryCandle.createMany({
+          data: group.map((candle) => ({
+            poolAddress: candle.poolAddress,
+            timeframe: candle.timeframe,
+            ts: candle.ts,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            volumeUsd: candle.volumeUsd,
+            feesUsd: candle.feesUsd,
+            protocolFeesUsd: candle.protocolFeesUsd,
+          })),
+        }),
+      ]);
+      written += group.length;
+    }
+
+    return written;
   }
 
   /** Abgelaufene Verfolgungen stilllegen. */
@@ -210,10 +387,21 @@ export class TrackRepo {
    * Ein Label wird erst geschrieben, wenn sein Horizont **vollständig
    * verstrichen** ist — ein nach zwei Stunden berechnetes 24-Stunden-Label
    * wäre systematisch verzerrt.
+   *
+   * Ausgewählt werden ausschließlich Kandidaten mit mindestens einem fälligen,
+   * aber fehlenden Label (siehe `pendingHorizonConditions`). Fertige Kandidaten
+   * dürfen den Stapel nicht belegen, sonst bleibt die Nachberechnung an den
+   * ältesten Zeilen hängen und neue Kandidaten bekommen nie ein Label.
+   *
+   * Ein Horizont ohne Messpunkte bekommt ein **leeres** Label statt gar keines.
+   * Das ist Absicht: Auch „in diesem Zeitraum wurde nichts aufgezeichnet" ist
+   * ein Ergebnis, und nur so verlässt der Kandidat den Stapel. Für das Training
+   * ist die Zeile unschädlich — `exportDataset` und `datasetQuality` verlangen
+   * beide `observations >= 2` und fangen sie ab.
    */
   async computeDueOutcomes(now: Date = new Date(), limit = 200): Promise<number> {
     const features = await this.prisma.candidateFeature.findMany({
-      where: { capturedAt: { lte: new Date(now.getTime() - 3_600_000) } },
+      where: { OR: pendingHorizonConditions(now) },
       orderBy: { capturedAt: "asc" },
       take: limit,
       select: {
@@ -224,35 +412,61 @@ export class TrackRepo {
       },
     });
 
-    let written = 0;
+    const rows: Prisma.CandidateOutcomeCreateManyInput[] = [];
     for (const feature of features) {
       const done = new Set(feature.outcomes.map((o) => o.horizonHours));
-      const points = await this.loadTrack(feature.poolAddress, feature.capturedAt);
-      if (points.length === 0) continue;
+      // Über den längsten Horizont hinaus sieht kein Label — den Rest des
+      // Verlaufs zu laden kostet nur Speicher und wächst mit der Laufzeit.
+      const until = new Date(feature.capturedAt.getTime() + MAX_HORIZON_HOURS * 3_600_000);
+      // Derselbe Lesepfad wie der Replay: Labels und Optimierung müssen
+      // dieselbe Zeitreihe sehen. Nebeneffekt, der die Labels ehrlicher macht:
+      // Wo Kerzen vorliegen, misst `maxDrawdownPct` den Einbruch über `low`,
+      // statt ihn zwischen zwei Stichproben zu verpassen.
+      const points = await this.loadSeries(feature.poolAddress, feature.capturedAt, until);
 
       for (const label of computeOutcomes(feature.capturedAt, points)) {
         if (done.has(label.horizonHours)) continue;
         const horizonEnd = feature.capturedAt.getTime() + label.horizonHours * 3_600_000;
         if (horizonEnd > now.getTime()) continue;
-        if (label.observations === 0) continue;
 
-        await this.prisma.candidateOutcome.create({
-          data: {
-            featureId: feature.id,
-            horizonHours: label.horizonHours,
-            priceChangePct: label.priceChangePct,
-            tvlChangePct: label.tvlChangePct,
-            feeYieldPct: label.feeYieldPct,
-            maxDrawdownPct: label.maxDrawdownPct,
-            rugged: label.rugged,
-            observations: label.observations,
-            coveredHours: label.coveredHours,
-          },
+        rows.push({
+          featureId: feature.id,
+          horizonHours: label.horizonHours,
+          priceChangePct: label.priceChangePct,
+          tvlChangePct: label.tvlChangePct,
+          feeYieldPct: label.feeYieldPct,
+          maxDrawdownPct: label.maxDrawdownPct,
+          rugged: label.rugged,
+          observations: label.observations,
+          coveredHours: label.coveredHours,
         });
-        written++;
       }
     }
-    return written;
+
+    if (rows.length === 0) return 0;
+    // Ein Insert statt einem je Label. `skipDuplicates` deckt den Fall ab, dass
+    // zwei Aufzeichner gleichzeitig laufen — die Eindeutigkeit erzwingt ohnehin
+    // der Index auf (feature_id, horizon_hours).
+    const result = await this.prisma.candidateOutcome.createMany({
+      data: rows,
+      skipDuplicates: true,
+    });
+    return result.count;
+  }
+
+  /**
+   * Fällige, aber fehlende Labels jenseits der Karenzzeit.
+   *
+   * Die Kennzahl, an der ein Stillstand der Nachberechnung sichtbar wird: Die
+   * bloße Anzahl berechneter Labels bleibt dabei hoch und sieht gesund aus.
+   */
+  async overdueOutcomes(now: Date = new Date()): Promise<number> {
+    const counts = await Promise.all(
+      pendingHorizonConditions(now, OUTCOME_GRACE_HOURS).map((where) =>
+        this.prisma.candidateFeature.count({ where }),
+      ),
+    );
+    return counts.reduce((sum, count) => sum + count, 0);
   }
 
   /**
@@ -293,6 +507,227 @@ export class TrackRepo {
       solPriceUsd: decimal(row.solPriceUsd),
       windows: (row.windows as SnapshotWindows | null) ?? null,
     }));
+  }
+
+  /**
+   * Zeitreihe aus **nachgeladenen Kerzen**, ergänzt um den TVL aus der
+   * laufenden Aufzeichnung.
+   *
+   * Die Arbeitsteilung ist keine Bequemlichkeit, sondern folgt daraus, was
+   * abrufbar ist: Preis, Volumen und Gebühren kommen fein aufgelöst aus der
+   * Historie, den TVL gibt es nur als Momentaufnahme. Er wird deshalb vom
+   * jeweils letzten Messpunkt nach vorne getragen — höchstens
+   * `TVL_CARRY_FORWARD_HOURS` lang, danach `null`.
+   *
+   * Umrechnung der Mengen in Raten: Die Paper-Engine erwartet
+   * `volume24hUsd`/`fees24hUsd` als **24-Stunden-Rate** und skaliert selbst auf
+   * das abgelaufene Intervall. Eine Kerze ist eine Menge; sie wird hier mit
+   * `1440 / Fensterminuten` hochgerechnet. Der Gebührensatz bleibt davon
+   * unberührt, weil sich der Faktor im Quotienten kürzt.
+   *
+   * Der Protokollanteil wird je Kerze aus `protocol_fees / fees` gerechnet —
+   * gemessen statt aus der Pool-Konfiguration geschätzt.
+   */
+  async loadHistory(
+    poolAddress: string,
+    since: Date,
+    until: Date,
+    options: { timeframe?: HistoryTimeframe } = {},
+  ): Promise<TrackPoint[]> {
+    const timeframe = options.timeframe ?? DEFAULT_HISTORY_TIMEFRAME;
+    const carryMs = TVL_CARRY_FORWARD_HOURS * 3_600_000;
+
+    const [candles, snapshots] = await Promise.all([
+      this.prisma.poolHistoryCandle.findMany({
+        where: { poolAddress, timeframe, ts: { gte: since, lte: until } },
+        orderBy: { ts: "asc" },
+      }),
+      this.prisma.poolSnapshot.findMany({
+        where: { poolAddress, ts: { gte: new Date(since.getTime() - carryMs), lte: until } },
+        orderBy: { ts: "asc" },
+        select: { ts: true, tvlUsd: true, solPriceUsd: true },
+      }),
+    ]);
+
+    const perDay = 1440 / TIMEFRAME_MINUTES[timeframe];
+
+    let index = 0;
+    let tvlUsd: number | null = null;
+    let solPriceUsd: number | null = null;
+    let carriedAtMs = Number.NEGATIVE_INFINITY;
+
+    return candles.map((candle) => {
+      const tsMs = candle.ts.getTime();
+      // Alle Messpunkte bis zu dieser Kerze einarbeiten (beide Listen sind
+      // aufsteigend sortiert, also genügt ein Durchlauf über beide).
+      while (index < snapshots.length && snapshots[index]!.ts.getTime() <= tsMs) {
+        const row = snapshots[index]!;
+        const tvl = decimal(row.tvlUsd);
+        if (tvl !== null) {
+          tvlUsd = tvl;
+          carriedAtMs = row.ts.getTime();
+        }
+        const solPrice = decimal(row.solPriceUsd);
+        if (solPrice !== null) solPriceUsd = solPrice;
+        index++;
+      }
+
+      const stale = tsMs - carriedAtMs > carryMs;
+      const volume = decimal(candle.volumeUsd);
+      const fees = decimal(candle.feesUsd);
+      const protocolFees = decimal(candle.protocolFeesUsd);
+
+      return {
+        ts: candle.ts,
+        priceNative: decimal(candle.close) ?? decimal(candle.open),
+        high: decimal(candle.high),
+        low: decimal(candle.low),
+        tvlUsd: stale ? null : tvlUsd,
+        solPriceUsd: stale ? null : solPriceUsd,
+        volume24hUsd: volume === null ? null : volume * perDay,
+        fees24hUsd: fees === null ? null : fees * perDay,
+        protocolFeePct:
+          fees !== null && fees > 0 && protocolFees !== null
+            ? (protocolFees / fees) * 100
+            : null,
+        // Die Historie kennt die dynamische Gebühr nicht. `effectiveFeePct`
+        // fällt damit auf die realisierte Rate aus Gebühren/Volumen zurück —
+        // die für eine Kerze genauer ist als jede Momentaufnahme.
+        dynamicFeePct: null,
+        baseFeePct: null,
+        // Keine gleitenden Fenster erfinden: Eine Kerze ist kein Fenster.
+        windows: null,
+      };
+    });
+  }
+
+  /**
+   * Zeitreihe eines Pools aus **beiden** Quellen — der Lesepfad für Replay und
+   * Label-Berechnung.
+   *
+   * Es gibt genau einen solchen Pfad, und das ist Absicht (KONZEPT-ML.md 5):
+   * Sobald Optimierung und Auswertung verschiedene Zeitreihen sehen, optimiert
+   * man gegen die eine und bewertet mit der anderen.
+   *
+   * Regel: **Kerzen bilden das Raster, wo es sie gibt.** Sie sind feiner
+   * aufgelöst und tragen High/Low; die Messpunkte steuern den TVL bei (siehe
+   * `loadHistory`). Ein Messpunkt kommt nur dann als eigener Punkt dazu, wenn in
+   * seiner Nähe keine Kerze liegt — sonst stünden zwei Beobachtungen desselben
+   * Moments in der Reihe, und die Simulation zählte das Intervall doppelt.
+   */
+  async loadSeries(
+    poolAddress: string,
+    since: Date,
+    until: Date,
+    options: { timeframe?: HistoryTimeframe } = {},
+  ): Promise<TrackPoint[]> {
+    const timeframe = options.timeframe ?? DEFAULT_HISTORY_TIMEFRAME;
+    const [candles, snapshots] = await Promise.all([
+      this.loadHistory(poolAddress, since, until, { timeframe }),
+      this.loadTrack(poolAddress, since, until),
+    ]);
+
+    if (candles.length === 0) return snapshots;
+    if (snapshots.length === 0) return candles;
+
+    const stepMs = TIMEFRAME_MINUTES[timeframe] * 60_000;
+    const merged = [...candles];
+
+    // Beide Listen sind aufsteigend sortiert, ein Durchlauf genügt.
+    let index = 0;
+    for (const point of snapshots) {
+      const ts = point.ts.getTime();
+      while (index + 1 < candles.length && candles[index + 1]!.ts.getTime() <= ts) index++;
+      const before = Math.abs(ts - candles[index]!.ts.getTime());
+      const after =
+        index + 1 < candles.length
+          ? Math.abs(candles[index + 1]!.ts.getTime() - ts)
+          : Number.POSITIVE_INFINITY;
+      if (Math.min(before, after) > stepMs) merged.push(point);
+    }
+
+    merged.sort((a, b) => a.ts.getTime() - b.ts.getTime());
+    return merged;
+  }
+
+  /**
+   * Jüngste Kerze je Pool — der Startpunkt eines Nachlade-Laufs.
+   *
+   * Ohne diese Auskunft würde jeder Lauf den gesamten Zeitraum neu holen. Mit
+   * ihr holt er nur, was fehlt.
+   */
+  async newestCandleAt(
+    poolAddresses: string[],
+    timeframe: HistoryTimeframe = DEFAULT_HISTORY_TIMEFRAME,
+  ): Promise<Map<string, Date>> {
+    if (poolAddresses.length === 0) return new Map();
+    const rows = await this.prisma.poolHistoryCandle.groupBy({
+      by: ["poolAddress"],
+      where: { poolAddress: { in: poolAddresses }, timeframe },
+      _max: { ts: true },
+    });
+    const newest = new Map<string, Date>();
+    for (const row of rows) {
+      if (row._max.ts !== null) newest.set(row.poolAddress, row._max.ts);
+    }
+    return newest;
+  }
+
+  /**
+   * Stammdaten für den Replay: Mints und Bin Step je Pool.
+   *
+   * Die Zeitreihe allein reicht nicht. Sie enthält `price_native` genau so, wie
+   * die API sie liefert — den Preis von X in Y —, und ob das der Token in SOL
+   * oder SOL im Token ist, steht nur in den Mints. Ohne sie läge jede
+   * Bin-Zuordnung falsch herum.
+   *
+   * Quelle sind die gescreenten Kandidaten: Dort liegen die vollständigen
+   * Pool-Metriken des Entdeckungszeitpunkts. Ein verfolgter Pool ohne
+   * Kandidatenzeile lässt sich nicht abspielen und fehlt im Ergebnis.
+   */
+  async replayPools(
+    poolAddresses?: string[],
+  ): Promise<{ poolAddress: string; mintX: string; mintY: string; binStep: number }[]> {
+    const rows = await this.prisma.poolCandidate.findMany({
+      ...(poolAddresses !== undefined ? { where: { poolAddress: { in: poolAddresses } } } : {}),
+      orderBy: { discoveredAt: "desc" },
+      distinct: ["poolAddress"],
+      select: { poolAddress: true, rawMetrics: true },
+    });
+
+    return rows.flatMap((row) => {
+      const metrics = row.rawMetrics as { mintX?: unknown; mintY?: unknown; binStep?: unknown };
+      const { mintX, mintY, binStep } = metrics;
+      if (typeof mintX !== "string" || typeof mintY !== "string" || typeof binStep !== "number") {
+        return [];
+      }
+      return [{ poolAddress: row.poolAddress, mintX, mintY, binStep }];
+    });
+  }
+
+  /** Bestand der nachgeladenen Historie, für Bericht und Fortschritt. */
+  async historyStats(
+    timeframe: HistoryTimeframe = DEFAULT_HISTORY_TIMEFRAME,
+  ): Promise<{ pools: number; candles: number; firstAt: Date | null; lastAt: Date | null }> {
+    const [candles, bounds, distinct] = await Promise.all([
+      this.prisma.poolHistoryCandle.count({ where: { timeframe } }),
+      this.prisma.poolHistoryCandle.aggregate({
+        where: { timeframe },
+        _min: { ts: true },
+        _max: { ts: true },
+      }),
+      this.prisma.poolHistoryCandle.findMany({
+        where: { timeframe },
+        distinct: ["poolAddress"],
+        select: { poolAddress: true },
+      }),
+    ]);
+    return {
+      pools: distinct.length,
+      candles,
+      firstAt: bounds._min.ts ?? null,
+      lastAt: bounds._max.ts ?? null,
+    };
   }
 
   /** Kennzahlen für die Fortschrittsanzeige des Strategie-Labors. */
@@ -356,19 +791,28 @@ export class TrackRepo {
     const sixHoursAgo = new Date(now.getTime() - 6 * 3_600_000);
     const dayAgo = new Date(now.getTime() - 24 * 3_600_000);
 
-    const [trackedActive, newest, pointsLastHour, featuresLast6h, featuresTotal, outcomesTotal, oldest] =
-      await Promise.all([
-        this.prisma.trackedPool.count({ where: { active: true } }),
-        this.prisma.poolSnapshot.findFirst({ orderBy: { ts: "desc" }, select: { ts: true } }),
-        this.prisma.poolSnapshot.count({ where: { ts: { gte: hourAgo } } }),
-        this.prisma.candidateFeature.count({ where: { capturedAt: { gte: sixHoursAgo } } }),
-        this.prisma.candidateFeature.count(),
-        this.prisma.candidateOutcome.count(),
-        this.prisma.candidateFeature.findFirst({
-          orderBy: { capturedAt: "asc" },
-          select: { capturedAt: true },
-        }),
-      ]);
+    const [
+      trackedActive,
+      newest,
+      pointsLastHour,
+      featuresLast6h,
+      featuresTotal,
+      outcomesTotal,
+      overdueOutcomes,
+      oldest,
+    ] = await Promise.all([
+      this.prisma.trackedPool.count({ where: { active: true } }),
+      this.prisma.poolSnapshot.findFirst({ orderBy: { ts: "desc" }, select: { ts: true } }),
+      this.prisma.poolSnapshot.count({ where: { ts: { gte: hourAgo } } }),
+      this.prisma.candidateFeature.count({ where: { capturedAt: { gte: sixHoursAgo } } }),
+      this.prisma.candidateFeature.count(),
+      this.prisma.candidateOutcome.count(),
+      this.overdueOutcomes(now),
+      this.prisma.candidateFeature.findFirst({
+        orderBy: { capturedAt: "asc" },
+        select: { capturedAt: true },
+      }),
+    ]);
 
     const distinctPools = await this.prisma.poolSnapshot.findMany({
       where: { ts: { gte: hourAgo } },
@@ -415,6 +859,7 @@ export class TrackRepo {
       featuresLast6h,
       featuresTotal,
       outcomesTotal,
+      overdueOutcomes,
       oldestFeatureAt: oldest?.capturedAt ?? null,
       fieldCoverage,
       largestGapMinutes: await this.largestGapMinutes(dayAgo, now),
