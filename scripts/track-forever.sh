@@ -43,6 +43,18 @@ TOP="${TOP:-40}"
 # später entdeckt, und die Zeitreihen der bekannten bleiben dicht.
 SCAN_EVERY="${SCAN_EVERY:-6}"
 
+# Nach wie vielen Zyklen die Historie nachgeladen wird.
+#
+# Preis-, Volumen- und Gebührenverlauf sind über die Historien-Endpunkte der
+# Pool-API rückwirkend abrufbar (KONZEPT-ML.md 3.3). Das erledigt zwei Dinge, die
+# vorher nicht möglich waren: Es schließt Lücken aus Unterbrechungen, und es gibt
+# neu entdeckten Pools ihre Vorgeschichte — ein Pool, der seit 20 Stunden
+# existiert, liefert sofort 20 Stunden Verlauf.
+#
+# Seltener als die Verfolgung, weil der Bestand meist schon aktuell ist: Bei
+# INTERVAL_MIN=5 ergibt BACKFILL_EVERY=12 einen Durchgang pro Stunde.
+BACKFILL_EVERY="${BACKFILL_EVERY:-12}"
+
 LOG_DIR="logs"
 LOG_FILE="$LOG_DIR/track.log"
 RESTART_DELAY=30
@@ -102,7 +114,7 @@ ensure_database() {
   return 1
 }
 
-log "Start. Intervall ${INTERVAL_MIN} min, ${TOP} Kandidaten je Preset, Suche alle ${SCAN_EVERY} Zyklen."
+log "Start. Intervall ${INTERVAL_MIN} min, ${TOP} Kandidaten je Preset, Suche alle ${SCAN_EVERY} Zyklen, Nachladen alle ${BACKFILL_EVERY} Zyklen."
 log "Protokoll: $LOG_FILE"
 log "Beenden mit Strg+C."
 
@@ -120,7 +132,8 @@ while true; do
   fi
 
   pnpm --filter @lping/bot track -- \
-    --interval "$INTERVAL_MIN" --top "$TOP" --scan-every "$SCAN_EVERY" 2>&1 | tee -a "$LOG_FILE"
+    --interval "$INTERVAL_MIN" --top "$TOP" --scan-every "$SCAN_EVERY" \
+    --backfill-every "$BACKFILL_EVERY" 2>&1 | tee -a "$LOG_FILE"
 
   # Hierhin kommt die Schleife nur, wenn der Prozess beendet wurde.
   log "Aufzeichnung gestoppt — neuer Versuch in ${RESTART_DELAY}s."

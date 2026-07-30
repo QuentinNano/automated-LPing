@@ -71,6 +71,8 @@ export async function cmdApiCheck(): Promise<number> {
     console.log(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  await checkHistory();
+
   console.log("\nDexScreener (SOL-Preis):");
   try {
     const { pairs } = await new DexScreenerAdapter().getPairsForToken(WSOL_MINT);
@@ -92,6 +94,82 @@ export async function cmdApiCheck(): Promise<number> {
     return 1;
   }
   return 0;
+}
+
+/**
+ * Prüft die Historien-Endpunkte — und zwar die eine Frage, die die Doku offen
+ * lässt: **In welcher Einheit steht der Preis?**
+ *
+ * `current_price` ist der Preis von Token X in Token Y. Ob OHLCV dieselbe
+ * Einheit nutzt oder USD, ist nicht dokumentiert. Der Unterschied ist für den
+ * Replay entscheidend: Eine Verwechslung verschiebt jede Bin-Zuordnung. Deshalb
+ * wird hier verglichen statt angenommen — die jüngste Kerze sollte nahe am
+ * aktuellen Preis liegen.
+ */
+async function checkHistory(): Promise<void> {
+  console.log("\nHistorie (nachladbarer Verlauf):");
+  const meteora = new MeteoraAdapter();
+
+  let pool;
+  try {
+    const page = await meteora.getPairsPage({ page: 0, limit: 1 });
+    pool = page.pairs[0];
+  } catch (error) {
+    console.log(`  ✗ Kein Pool zum Prüfen: ${message(error)}`);
+    return;
+  }
+  if (pool === undefined) {
+    console.log("  ! Kein Pool verwertbar — Historie nicht prüfbar.");
+    return;
+  }
+
+  const endTime = new Date();
+  const startTime = new Date(endTime.getTime() - 2 * 3_600_000);
+  try {
+    const candles = await meteora.getHistory(pool.poolAddress, {
+      timeframe: "5m",
+      startTime,
+      endTime,
+    });
+    if (candles.length === 0) {
+      console.log(
+        `  ! ${pool.name ?? pool.poolAddress.slice(0, 10)}: keine Kerzen für die letzten 2 Stunden.`,
+      );
+      return;
+    }
+
+    const last = candles[candles.length - 1]!;
+    const withFees = candles.filter((candle) => candle.feesUsd !== null).length;
+    console.log(
+      `  ✓ ${candles.length} Kerzen (5m) für ${pool.name ?? pool.poolAddress.slice(0, 10)}, ` +
+        `davon ${withFees} mit Gebühren`,
+    );
+    console.log(
+      `    Letzte Kerze: close ${fmt(last.close ?? undefined)}, ` +
+        `high ${fmt(last.high ?? undefined)}, low ${fmt(last.low ?? undefined)}, ` +
+        `Volumen ${fmt(last.volumeUsd ?? undefined)} USD`,
+    );
+
+    // Der eigentliche Zweck: Einheit des Preises gegenprüfen.
+    const current = pool.priceNative;
+    if (current !== undefined && current > 0 && last.close !== null && last.close > 0) {
+      const ratio = last.close / current;
+      const plausible = ratio > 0.5 && ratio < 2;
+      console.log(
+        `    Abgleich mit current_price ${fmt(current)}: Verhältnis ${ratio.toFixed(3)} — ` +
+          (plausible
+            ? "gleiche Einheit (Preis von X in Y)."
+            : "ABWEICHUNG! Vermutlich andere Einheit (USD?) — der Replay würde Bins falsch zuordnen."),
+      );
+    }
+  } catch (error) {
+    console.log(`  ✗ Historie nicht abrufbar: ${message(error)}`);
+    console.log("    Ohne sie lassen sich Aufzeichnungslücken nicht nachträglich schließen.");
+  }
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** Zeigt Envelope-Struktur und Feldnamen des ersten Datensatzes. */

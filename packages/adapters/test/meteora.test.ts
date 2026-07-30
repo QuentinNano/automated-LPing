@@ -2,8 +2,20 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { MeteoraAdapter, TokenBucket, WSOL_MINT, normalizeMeteoraPair } from "@lping/adapters";
-import { FEATURE_KEYS, buildFeatureVector, feeCurrencyOf } from "@lping/core";
+import {
+  MAX_ADDRESSES_PER_QUERY,
+  MeteoraAdapter,
+  TokenBucket,
+  WSOL_MINT,
+  normalizeMeteoraPair,
+} from "@lping/adapters";
+import {
+  FEATURE_KEYS,
+  buildFeatureVector,
+  candleFeePct,
+  candleVolumeRate24hUsd,
+  feeCurrencyOf,
+} from "@lping/core";
 import { fetchQueue, jsonResponse } from "./helpers";
 
 const fixturesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
@@ -14,6 +26,10 @@ const datapiPage = JSON.parse(
 /** Antwortform genau nach OpenAPI-Spezifikation (siehe Fixture-Kommentar). */
 const documentedPage = JSON.parse(
   readFileSync(path.join(fixturesDir, "meteora-datapi-pools-documented.json"), "utf8"),
+);
+const ohlcvPage = JSON.parse(readFileSync(path.join(fixturesDir, "meteora-ohlcv.json"), "utf8"));
+const volumeHistoryPage = JSON.parse(
+  readFileSync(path.join(fixturesDir, "meteora-volume-history.json"), "utf8"),
 );
 
 const fastLimiter = () => new TokenBucket(1000);
@@ -439,5 +455,147 @@ describe("MeteoraAdapter", () => {
 
     expect(pool.binStep).toBe(100);
     expect(pool.mintY).toBe("So11111111111111111111111111111111111111112");
+  });
+});
+
+describe("MeteoraAdapter — Sammelabruf", () => {
+  const addressA = "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y";
+
+  it("holt viele Pools über filter_by statt einzeln", async () => {
+    const { fetchImpl, calls } = fetchQueue([jsonResponse({ data: [datapiPage.data[0]] })]);
+    const adapter = new MeteoraAdapter({ fetchImpl, limiter: fastLimiter() });
+
+    const pools = await adapter.getPairsByAddresses([addressA, "Zweite", "Dritte"]);
+
+    expect(calls).toHaveLength(1);
+    const url = new URL(calls[0]!);
+    expect(url.searchParams.get("filter_by")).toBe(`pool_address=[${addressA}|Zweite|Dritte]`);
+    // Nur was angefragt wurde, zählt: Die Antwort könnte mehr enthalten.
+    expect(pools.map((p) => p.poolAddress)).toEqual([addressA]);
+  });
+
+  it("teilt große Adresslisten auf, damit die URL nicht überläuft", async () => {
+    const addresses = Array.from({ length: MAX_ADDRESSES_PER_QUERY + 5 }, (_, i) => `Pool${i}`);
+    const { fetchImpl, calls } = fetchQueue([
+      jsonResponse({ data: [] }),
+      jsonResponse({ data: [] }),
+    ]);
+    const adapter = new MeteoraAdapter({ fetchImpl, limiter: fastLimiter() });
+
+    await adapter.getPairsByAddresses(addresses);
+
+    expect(calls).toHaveLength(2);
+    expect(new URL(calls[1]!).searchParams.get("filter_by")).toContain(
+      `Pool${MAX_ADDRESSES_PER_QUERY}`,
+    );
+  });
+
+  it("dedupliziert Adressen, statt denselben Pool zweimal anzufragen", async () => {
+    const { fetchImpl, calls } = fetchQueue([jsonResponse({ data: [] })]);
+    const adapter = new MeteoraAdapter({ fetchImpl, limiter: fastLimiter() });
+
+    await adapter.getPairsByAddresses(["A", "B", "A"]);
+
+    expect(new URL(calls[0]!).searchParams.get("filter_by")).toBe("pool_address=[A|B]");
+  });
+
+  it("verweigert den Sammelabruf über die ältere Schnittstelle", async () => {
+    // Ohne filter_by käme irgendeine Seite zurück — ein falscher Pool ist
+    // schlimmer als keiner.
+    const { fetchImpl } = fetchQueue([
+      jsonResponse({ error: "not found" }, 404),
+      jsonResponse([legacyPair]),
+    ]);
+    const adapter = new MeteoraAdapter({ fetchImpl, limiter: fastLimiter() });
+
+    await expect(adapter.getPairsByAddresses(["A"])).rejects.toMatchObject({
+      kind: "validation",
+    });
+  });
+});
+
+describe("MeteoraAdapter — Historie", () => {
+  const query = { timeframe: "5m" } as const;
+  const historyResponses = () =>
+    fetchQueue([jsonResponse(ohlcvPage), jsonResponse(volumeHistoryPage)]);
+
+  it("führt Preis- und Gebührenhistorie je Fenster zusammen", async () => {
+    const { fetchImpl } = historyResponses();
+    const adapter = new MeteoraAdapter({ fetchImpl, limiter: fastLimiter() });
+
+    const candles = await adapter.getHistory("PoolA", query);
+
+    expect(candles).toHaveLength(3);
+    const first = candles[0]!;
+    expect(first.ts.toISOString()).toBe("2026-07-29T12:00:00.000Z");
+    expect(first.timeframe).toBe("5m");
+    expect(first.high).toBeCloseTo(0.000026);
+    expect(first.low).toBeCloseTo(0.000019);
+    expect(first.feesUsd).toBeCloseTo(110);
+    expect(first.protocolFeesUsd).toBeCloseTo(11);
+  });
+
+  it("liefert Kerzen auch dort, wo nur eine der beiden Quellen etwas hat", async () => {
+    const { fetchImpl } = historyResponses();
+    const adapter = new MeteoraAdapter({ fetchImpl, limiter: fastLimiter() });
+
+    const candles = await adapter.getHistory("PoolA", query);
+
+    // Die dritte Kerze fehlt in der Gebührenhistorie: Preis ja, Gebühren null.
+    const third = candles[2]!;
+    expect(third.close).toBeCloseTo(0.000017);
+    expect(third.feesUsd).toBeNull();
+    expect(candleFeePct(third)).toBeNull();
+  });
+
+  it("gibt den Gebührensatz skalenfrei aus dem Fenster zurück", async () => {
+    const { fetchImpl } = historyResponses();
+    const adapter = new MeteoraAdapter({ fetchImpl, limiter: fastLimiter() });
+
+    const candles = await adapter.getHistory("PoolA", query);
+
+    // 110 / 7333,3 = 1,5 % — unabhängig davon, ob das Fenster 5 min oder 24 h ist.
+    expect(candleFeePct(candles[0]!)).toBeCloseTo(1.5, 2);
+    // Die Menge dagegen muss auf eine Tagesrate hochgerechnet werden: 288 × 5 min.
+    expect(candleVolumeRate24hUsd(candles[0]!)).toBeCloseTo(7333.3 * 288, 1);
+  });
+
+  it("übergibt Zeitraum und Fensterlänge als Unix-Sekunden", async () => {
+    const { fetchImpl, calls } = historyResponses();
+    const adapter = new MeteoraAdapter({ fetchImpl, limiter: fastLimiter() });
+
+    await adapter.getHistory("PoolA", {
+      timeframe: "1h",
+      startTime: new Date("2026-07-29T00:00:00Z"),
+      endTime: new Date("2026-07-29T12:00:00Z"),
+    });
+
+    const url = new URL(calls[0]!);
+    expect(url.pathname).toBe("/pools/PoolA/ohlcv");
+    expect(url.searchParams.get("timeframe")).toBe("1h");
+    expect(url.searchParams.get("start_time")).toBe("1785283200");
+    expect(url.searchParams.get("end_time")).toBe("1785326400");
+    expect(new URL(calls[1]!).pathname).toBe("/pools/PoolA/volume/history");
+  });
+
+  it("überspringt Zeilen ohne verwertbaren Zeitstempel", async () => {
+    const broken = { data: [{ close: 1 }, { timestamp: 1785312000, close: 2 }] };
+    const { fetchImpl } = fetchQueue([jsonResponse(broken), jsonResponse({ data: [] })]);
+    const adapter = new MeteoraAdapter({ fetchImpl, limiter: fastLimiter() });
+
+    const candles = await adapter.getHistory("PoolA", query);
+
+    expect(candles).toHaveLength(1);
+    expect(candles[0]!.close).toBe(2);
+  });
+
+  it("fällt für die Historie nicht auf die ältere Schnittstelle zurück", async () => {
+    // Die kennt keine Historie; ein Rückfall würde den 404 verschleiern.
+    const { fetchImpl, calls } = fetchQueue([jsonResponse({ error: "nope" }, 404)]);
+    const adapter = new MeteoraAdapter({ fetchImpl, limiter: fastLimiter() });
+
+    await expect(adapter.getOhlcv("PoolA", query)).rejects.toMatchObject({ kind: "http" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("dlmm.datapi.meteora.ag");
   });
 });

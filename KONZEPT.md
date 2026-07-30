@@ -58,7 +58,23 @@ Für Design-Entscheidungen relevante Eigenschaften des DLMM (Dynamic Liquidity M
 | Quotes/Swaps im Pool | `swapQuote()`, `swap()` |
 | Fee-Zustand | `getFeeInfo()`, `getDynamicFee()` |
 
-**Pool-Marktdaten:** Öffentliche Meteora-API (`dlmm-api.meteora.ag`, neuere Variante `dlmm.datapi.meteora.ag/pools`) liefert pro Pool u. a. `liquidity` (TVL), `trade_volume_24h`, `fees_24h`, `apr/apy`, `bin_step`, `base_fee_percentage`, `current_price` sowie stundenbasierte Fee/TVL-Fenster — Grundlage für eigenes Scoring und Fabriq-Abgleich.
+**Pool-Marktdaten:** Öffentliche Meteora-API (`dlmm.datapi.meteora.ag`, ältere
+Variante `dlmm-api.meteora.ag`) liefert pro Pool u. a. `tvl`, Volumen und
+Gebühren je Zeitfenster (30 m…24 h), `apr/apy`, `bin_step`, `base_fee_pct`,
+`dynamic_fee_pct`, `protocol_fee_pct`, `collect_fee_mode` und `current_price` —
+Grundlage für eigenes Scoring. Dokumentiertes Limit: **30 Anfragen/s**.
+
+Drei Eigenschaften der Schnittstelle prägen die Umsetzung:
+
+| Fähigkeit | Wozu genutzt |
+|---|---|
+| `sort_by=<metrik>_<fenster>:<richtung>` | mehrere Sortierungen zusammenführen, damit frische Pools überhaupt sichtbar werden (Abschnitt 4.1) |
+| `filter_by=pool_address=[a\|b\|…]` | Sammelabruf: Messpunkte für alle verfolgten Pools in ~50 statt 2.000 Anfragen |
+| `/pools/{address}/ohlcv` und `/volume/history` | **rückwirkender** Preis-, Volumen- und Gebührenverlauf bis auf 5-Minuten-Kerzen (siehe KONZEPT-ML.md 3.3) |
+
+Der letzte Punkt hat Konsequenzen weit über die Discovery hinaus: Ein Teil der
+Zeitreihe, die die Optimierung braucht, ist nachholbar. TVL und SOL-Kurs sind es
+nicht — die gibt es nur als Momentaufnahme.
 
 ---
 
@@ -479,6 +495,7 @@ Datensatz soll gerade auch die Pools enthalten, in die nie investiert wurde:
 - `tracked_pools` — welche Pools verfolgt werden, seit wann und bis wann.
 - `candidate_features` — Merkmalsvektor je Kandidat zum **Entscheidungszeitpunkt**, versioniert über `feature_version`.
 - `candidate_outcomes` — Ergebnis-Labels je Horizont (1 h/6 h/24 h/72 h/7 d), ausschließlich aus der Zeit **nach** der Entscheidung, mit Abdeckungsangaben (`observations`, `covered_hours`).
+- `pool_history_candles` — nachgeladene Kerzen (Open/High/Low/Close, Volumen, Gebühren, Protokollanteil je Fenster). Bewusst getrennt von `pool_snapshots`: Eine Kerze ist eine Menge je abgeschlossenem Fenster, ein Messpunkt eine gleitende 24-Stunden-Summe.
 
 ---
 

@@ -43,11 +43,20 @@ export {
 } from "./lifecycle/states";
 export type { LifecycleState, TransitionTrigger } from "./lifecycle/states";
 
-export { METRIC_WINDOWS, feeCurrencyOf } from "./domain/types";
+export {
+  METRIC_WINDOWS,
+  HISTORY_TIMEFRAMES,
+  TIMEFRAME_MINUTES,
+  candleFeePct,
+  candleVolumeRate24hUsd,
+  feeCurrencyOf,
+} from "./domain/types";
 export type {
   TokenRef,
   PoolMetrics,
   PoolTokenInfo,
+  PoolCandle,
+  HistoryTimeframe,
   CollectFeeMode,
   MetricWindow,
   WindowedMetric,

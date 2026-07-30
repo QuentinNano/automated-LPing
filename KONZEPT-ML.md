@@ -133,17 +133,39 @@ bleiben über die 24-Stunden-Rückfallebene nutzbar.
 
 **Ergebnisse** (`candidate_outcomes`): abgeleitete Labels je Horizont
 (1 h / 6 h / 24 h / 72 h / 7 d): Preisänderung, TVL-Änderung, aufgelaufene
-Gebühren je TVL-Einheit, sowie ein Rug-Indikator (Preis −90 % oder Verkauf
-unmöglich).
+Gebühren je TVL-Einheit, maximaler Drawdown sowie ein Rug-Indikator
+(Preis oder TVL −90 %).
 
-**Datenvolumen:** ~200 verfolgte Pools × 7 Tage bei genanntem Raster ≈ 130.000
-Zeilen/Tag, rund 4 Mio./Monat. Für PostgreSQL unkritisch; ältere Verläufe werden
-auf Stundenraster ausgedünnt.
+> **Was `feeYieldPct` ist und was nicht.** Das Label rechnet die laufende
+> 24-Stunden-Rate `Gebühren / TVL` über den Horizont hoch. Das ist die
+> Ertragskraft des **Pools**, nicht der Ertrag einer Position: Es fehlen die
+> Bin-Konzentration, die Zeit in Range, der Protokollanteil und die Kosten. Als
+> **Rangsignal** für Teil A ist das richtig und ausreichend — die Frage dort ist
+> „welcher Pool verdient mehr?", nicht „wie viel verdienen wir?". Die zweite
+> Frage beantwortet ausschließlich der Replay. Wer `feeYieldPct` als
+> Ertragsprognose liest, überschätzt jede Strategie.
 
-**Aufwand:** Die Verlaufsaufzeichnung kostet fast nichts — Meteora erlaubt 30
-Anfragen/s, 200 Pools alle 15 min sind ein Bruchteil davon. Die teuren
-Per-Token-Abrufe (RugCheck, Jupiter, DexScreener) fallen nur einmal beim
-Entdecken an.
+**Datenvolumen** (aktualisiert, mit nachgeladener Historie):
+
+| Bestand | Zeilen |
+|---|---|
+| Messpunkte: 2.000 Pools × 96/Tag (15-min-Raster) | ~190.000/Tag |
+| Kerzen: 2.000 Pools × 288/Tag (5-min-Raster) | ~580.000/Tag |
+| Merkmale + Labels | wenige Tausend/Tag |
+
+Zusammen rund 0,8 Mio. Zeilen/Tag, ~23 Mio./Monat — eine Größenordnung mehr als
+die ursprüngliche Schätzung, weil sowohl die Pool-Zahl als auch die Auflösung
+gestiegen sind. Für PostgreSQL auf einem kleinen VPS ist das handhabbar
+(Kerzen sind schmale Zeilen mit zusammengesetztem Primärschlüssel), verlangt aber
+eine **Ausdünnungsstrategie**: Kerzen älter als 30 Tage auf ein gröberes Raster
+verdichten oder verwerfen — sie sind ohnehin jederzeit wieder abrufbar. Das ist
+der praktische Nutzen daran, dass die Historie nicht mehr unwiederbringlich ist.
+
+**Aufwand:** Die Aufzeichnung kostet wenig — Meteora erlaubt 30 Anfragen/s, und
+seit dem Sammelabruf (`filter_by=pool_address=[…]`) sind 2.000 Pools rund 50
+Anfragen je Messrunde statt 2.000. Das Nachladen ist teurer, aber selten: je Pool
+und Tag zwei Anfragen. Die teuren Per-Token-Abrufe (RugCheck, Jupiter,
+DexScreener) fallen weiterhin nur einmal beim Entdecken an.
 
 ### 3.3 Konsequenz für den Zeitplan
 
@@ -245,14 +267,68 @@ bräuchte dieselbe Kalenderzeit **und** lieferte je Preset weniger Beobachtungen
 
 Die Replay-Engine ist überwiegend vorhanden — sie braucht:
 
-- einen Tick-Reader aus `pool_tracks` statt Live-Abrufen,
+- einen Tick-Reader aus der Datenbank statt Live-Abrufen. Vorhanden sind beide
+  Hälften: `loadTrack()` liest die Messpunkte, `loadHistory()` die nachgeladenen
+  Kerzen samt fortgetragenem TVL.
 - die Fähigkeit, Einstiege an beliebigen Zeitpunkten zu simulieren (nicht nur
   dort, wo real eröffnet wurde),
-- deterministische Ausführung (feste Zufallssaat, keine Wanduhr).
+- deterministische Ausführung (feste Zufallssaat, keine Wanduhr),
+- Nutzung von `high`/`low` je Kerze für Zeit-in-Range und Gebühren-Akkrual
+  (Begründung unten).
 
 **Nicht verhandelbar:** Replay und Live-Betrieb müssen denselben Codepfad nutzen.
 Sobald es zwei Implementierungen gibt, optimiert man gegen die eine und handelt
 mit der anderen.
+
+### 5.1 Woraus ein Tick besteht — und was fehlt
+
+Der Replay setzt einen `MarketTick` aus zwei Quellen zusammen, weil die API die
+Bestandteile getrennt führt:
+
+| Größe | Quelle | Auflösung |
+|---|---|---|
+| Preis, High/Low | Kerzen (`/ohlcv`) | 5 min, rückwirkend |
+| Volumen, Gebühren, Protokollanteil | Kerzen (`/volume/history`) | 5 min, rückwirkend |
+| **TVL** | nur Messpunkte der Aufzeichnung | Messraster, nicht nachladbar |
+| SOL-Kurs | nur Messpunkte der Aufzeichnung | Messraster, nicht nachladbar |
+
+Der TVL ist die unangenehme Zeile. Das Gebührenmodell braucht ihn: Der eigene
+Anteil ist `eigene Liquidität im aktiven Bin / Gesamtliquidität dort`, und der
+Nenner folgt aus dem Pool-TVL. Ohne TVL **darf** die Simulation keine Gebühren
+buchen — sonst rechnet sie einen Anteil an einer unbekannten Größe aus.
+
+Umgesetzte Regelung: `loadHistory()` trägt den TVL des letzten Messpunkts
+höchstens sechs Stunden nach vorne und liefert danach `null`. Zwei Folgen, die
+man kennen muss:
+
+1. **Nachgeladene Zeiträume ohne jede Aufzeichnung sind gebührenfrei** und damit
+   für die Ertragsoptimierung wertlos. Sie taugen für Preisverlauf und
+   Drawdown-Statistik, nicht für Teil B.
+2. **Die Aufzeichnung bleibt Pflicht.** Das Nachladen verdichtet und repariert
+   ihre Zeitreihe; es ersetzt sie nicht. Wer die Aufzeichnung abschaltet, hat
+   nach sechs Stunden nur noch Preisdaten.
+
+Die Länge des Forttragens ist eine **Modellannahme** und gehört in die
+Sensitivitätsanalyse (Abschnitt 6.1): Hängt ein Ergebnis daran, hängt es an einer
+Interpolation, nicht an einer Messung.
+
+### 5.2 Warum High und Low nicht optional sind
+
+Die Paper-Engine bewertet jeden Tick an **einem** Preis. Zeit-in-Range und
+Gebühren-Akkrual werden damit an den Intervallgrenzen abgelesen: Verlässt der
+Preis zwischen zwei Beobachtungen die Range und kehrt zurück, sieht die
+Simulation davon nichts und bucht die volle Zeit als „in Range". Bei einer
+Konservativ-Position (65 Bins × 10 bps ≈ ±6,7 %) ist das im
+15-Minuten-Raster keine Randerscheinung.
+
+Der Fehler wächst genau mit der Volatilität — also dort, wo entschieden wird. Und
+er wirkt einseitig zugunsten der Strategie, weil eine Position nie für
+Ausflüge bestraft wird, die sie nicht überlebt hätte. `high`/`low` je Kerze
+lösen das: Sie machen aus einer Stichprobe ein Intervall.
+
+Bei den **Labels** ist das bereits umgesetzt — `maxDrawdownPct` nutzt `low`, wo
+es vorliegt, und misst den Einbruch statt ihn zu verpassen. Im Replay steht es
+noch aus und ist Teil von M2.
 
 ---
 
@@ -273,6 +349,22 @@ Manche Parameter werden gar nicht optimiert, sondern **hergeleitet**: Der optima
 Fee-Claim-Zeitpunkt etwa folgt direkt aus „claimen, wenn erwartete Gebühren >
 k × Transaktionskosten". Für so etwas eine Suche laufen zu lassen, verbrennt
 Freiheitsgrade ohne Erkenntnisgewinn.
+
+**Mit in die Analyse gehören die Modellannahmen selbst**, nicht nur die
+Strategieparameter. Sie sehen im Code wie Konstanten aus, sind aber Schätzungen,
+und ein Ergebnis, das an einer Schätzung hängt, ist keins:
+
+| Annahme | Wo | Warum sie das Ergebnis verschiebt |
+|---|---|---|
+| `poolLiquidityBins` (Default 70) | `global.paper` | Skaliert den Gebührenanteil linear und entscheidet, ob sich Konzentration auszahlt |
+| `feeShareHaircutPct` (Default 30) | `global.paper` | Pauschaler Sicherheitsabschlag auf den Gebührenanteil |
+| TVL-Forttragen (6 h) | `loadHistory` | Bestimmt, welche nachgeladenen Zeiträume überhaupt Gebühren buchen (Abschnitt 5.1) |
+| `costs.swapSlippagePct` | `global.paper` | Der größte variable Kostenposten, aktuell größenunabhängig |
+
+Die Sensitivitätsanalyse variiert sie wie jeden anderen Parameter. Anders als
+diese werden sie danach aber **nicht optimiert** — sie werden auf dem
+konservativen Ende festgesetzt. Einen Modellfehler zu „optimieren" heißt, ihn
+auszunutzen.
 
 ### 6.2 Teil B (Führung): simulationsbasierte Suche
 
@@ -431,7 +523,7 @@ Schritt von „im Test gut" zu „echtes Geld" bleibt eine menschliche Entscheid
 | Grenze | Bedeutung |
 |---|---|
 | **Regimewechsel** | Auf Juli-Daten optimierte Parameter können im September versagen. Memecoin-Marktphasen wechseln schnell. Gegenmaßnahme: rollierende Neu-Optimierung, Überwachung auf Leistungsabfall, Neubewertung bei Abweichung |
-| **Simulatorfehler** | Der Optimierer beutet jede Ungenauigkeit aus. Gegenmaßnahme: konservative Abschläge, echte Bin-Liquidität statt Schätzung, Live-Paper als letzte Instanz |
+| **Simulatorfehler** | Der Optimierer beutet jede Ungenauigkeit aus. Gegenmaßnahme: konservative Abschläge, echte Bin-Liquidität statt Schätzung, Live-Paper als letzte Instanz. Die vier bekannten Abweichungen und ihre Richtung stehen unten |
 | **Seltene Ereignisse** | Rugs, Netzwerkausfälle, Liquiditätskrisen sind in wenigen Wochen kaum enthalten. Die harten Sicherheitsfilter bleiben deshalb **außerhalb** der Optimierung — sie werden nicht wegoptimiert, nur ihre Schwellwerte justiert |
 | **Kausalität** | Das Modell findet Zusammenhänge, keine Ursachen. Ein Merkmal kann Vorhersagekraft haben und trotzdem morgen wertlos sein |
 | **Datenmenge** | Vier Wochen sind für Auswahlentscheidungen ausreichend, für Aussagen über seltene Marktphasen nicht |
@@ -440,6 +532,36 @@ Schritt von „im Test gut" zu „echtes Geld" bleibt eine menschliche Entscheid
 Blacklist-Status, die Verlustlimits und der Kill-Switch. Diese Regeln schützen vor
 Totalverlust; sie stehen nicht zur Disposition eines Optimierers, der sie
 kurzfristig als ertragsmindernd erkennen würde.
+
+### 10.1 Die bekannten Abweichungen des Simulators, mit Vorzeichen
+
+Ein Optimierer sucht nicht die beste Strategie, sondern das Maximum der
+**Zielfunktion** — und die enthält jeden Modellfehler. Deshalb genügt es nicht zu
+wissen, *dass* es Fehler gibt; man muss wissen, **in welche Richtung** sie wirken,
+denn dorthin wird die Suche laufen.
+
+| Abweichung | Richtung | Wohin der Optimierer dadurch gezogen wird |
+|---|---|---|
+| Nur der aktive Bin verdient. Die DLMM-Doku sagt: **alle am Swap beteiligten Bins** verdienen | unterschätzt Gebühren, und breite Positionen stärker als enge | zu **enge** Ranges |
+| Fremde Liquidität gilt als gleichmäßig über `poolLiquidityBins` verteilt | unbekannt, skaliert den Gebührenanteil linear | zu **konzentrierte** Verteilungen, wenn der Wert zu hoch steht |
+| Zeit-in-Range und Gebühren an Intervallgrenzen abgelesen (bis `high`/`low` im Replay genutzt werden) | überschätzt beides, mit der Volatilität wachsend | zu **volatile** Pools |
+| Exit-Slippage pauschal statt größen- und liquiditätsabhängig | unterschätzt Verluste im Tail | zu **große** Positionen, zu **illiquide** Pools |
+
+Praktische Konsequenz für M3/M4: Diese vier Annahmen gehören **als Parameter** in
+die Sensitivitätsanalyse, nicht als Konstanten in den Code. Ein Ergebnis, das
+gegen ihre Variation nicht stabil ist, ist ein Ergebnis über den Simulator und
+nicht über den Markt.
+
+### 10.2 Was der Datensatz kann und was nicht
+
+| Frage | Beantwortbar? |
+|---|---|
+| Welche Merkmale sagen die Pool-Entwicklung vorher? | **ja** — dafür ist der Datensatz gebaut |
+| Welche Filter-Schwellen sind zu streng/zu lasch? | **ja** — jeder gescreente Kandidat wird verfolgt, auch der abgelehnte |
+| Wie verhält sich eine Position in einem gegebenen Verlauf? | **ja**, wo TVL vorliegt (Abschnitt 5.1) |
+| Wie hoch ist der reale Ertrag inklusive Ausführung? | **nein** — dafür braucht es Phase 2 mit echten Mikro-Positionen |
+| Wie oft passieren Rugs? | **eingeschränkt** — wenige Wochen enthalten wenige seltene Ereignisse |
+| Wie verhält sich die Strategie in einer anderen Marktphase? | **nein** |
 
 ---
 
@@ -452,8 +574,9 @@ kurzfristig als ertragsmindernd erkennen würde.
 | **M1c — Zeitreihe für den Replay** ✅ | `pool_snapshots` trägt Gebührenstruktur, SOL-Kurs und alle Zeitfenster je Messpunkt; `effectiveFeePct()` als Genauigkeits-Rangfolge; `loadTrack()` als gemeinsamer Lesepfad von Replay und Label-Berechnung | umgesetzt | **läuft** |
 | **M1d — Simulator repariert** ✅ | Aktiv-Bin-Gebührenmodell statt TVL-Anteil, Protokollanteil, Gesamtgebühr statt Basisgebühr, Composition Fee, Rebalancing als ein Ablauf, Wartezustand einseitiger Positionen | umgesetzt | — |
 | **M1e — Label-Nachberechnung** ✅ | Auswahl nur noch über offene Horizonte statt „älteste zuerst"; Rückstand als Kennzahl im Prüfbericht | umgesetzt | — |
-| **M2 — Replay** | Tick-Reader, Einstiege an beliebigen Zeitpunkten, Determinismus, Gleichheitstest Replay ↔ Live; **zusätzlich Nachladen der Verläufe** über `/ohlcv` und `/volume/history` (Abschnitt 3.3) | mittel | sofort startbar |
-| **M3 — Sensitivität** | Einzelparameter-Analyse, Auswahl der 5–10 relevanten, Bericht | gering | nach M2 |
+| **M1f — Durchsatz und Nachladen** ✅ | Sammelabruf der Messpunkte (`filter_by=pool_address=[…]`, ~50 statt 2.000 Anfragen je Runde); `pool_history_candles` samt `backfill`-Kommando; `loadHistory()` als Lesepfad; `low` in der Drawdown-Messung | umgesetzt | — |
+| **M2 — Replay** | Tick-Reader auf `loadTrack()`/`loadHistory()`, Einstiege an beliebigen Zeitpunkten, Determinismus, `high`/`low` für Zeit-in-Range (Abschnitt 5.2), Gleichheitstest Replay ↔ Live | mittel | **sofort startbar** — die Verläufe sind nachladbar |
+| **M3 — Sensitivität** | Einzelparameter-Analyse **inklusive der Modellannahmen** (Abschnitt 6.1), Auswahl der 5–10 relevanten, Bericht | gering | nach M2 |
 | **M4 — Suche** | Zufallssuche + Verfeinerung, Zielfunktion, Plateau-Bewertung | mittel | nach M3 |
 | **M5 — Validierung** | Vorwärts-Testen, Sperrzonen, Mehrfachtestkorrektur, Zufallsvergleich | mittel | mit M4 |
 | **M6 — Auswahl & UI** | Pareto-Front, Diversitätsfilter, Strategie-Labor-Seite, Preset-Export | mittel | nach M5 |
@@ -482,6 +605,20 @@ Tagesstunden kennt, lernt eine Marktrealität, die es so nicht gibt.
 
 Das `track --status`-Kommando meldet erkannte Lücken ausdrücklich, damit ein
 verzerrter Datensatz nicht unbemerkt zur Grundlage einer Optimierung wird.
+
+**Wie sehr eine Lücke schadet, hängt jetzt davon ab, was in ihr fehlt.** Das
+Nachladen (Abschnitt 3.3) läuft im Dauerbetrieb mit und schließt sie teilweise:
+
+| In der Lücke fehlt | Reparierbar? |
+|---|---|
+| Preis, High/Low, Volumen, Gebühren, Protokollanteil | **ja**, vollständig und feiner als das Messraster |
+| TVL, SOL-Kurs | **nein** — nur Momentaufnahmen |
+| Merkmale nicht entdeckter Kandidaten | **nein** — und das ist der schwerste Verlust: Wer in der Lücke nicht gescreent hat, hat diese Pools nie gesehen |
+
+Eine durchlaufende Maschine bleibt damit die Anforderung — aber eine Nacht
+Unterbrechung entwertet den Datensatz nicht mehr, sie verdünnt ihn. Nach einer
+längeren Unterbrechung lohnt ein ausdrücklicher `pnpm nachladen`, statt auf den
+nächsten automatischen Durchgang zu warten.
 
 ### Unterbrechungen sind unkritisch für den Bestand
 

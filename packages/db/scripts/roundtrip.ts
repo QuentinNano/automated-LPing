@@ -8,6 +8,7 @@ import {
   buildFeatureVector,
   effectiveFeePct,
   parseBotConfig,
+  type PoolCandle,
   type PoolMetrics,
   type ScreeningResult,
 } from "@lping/core";
@@ -278,6 +279,7 @@ async function main(): Promise<void> {
     );
 
     await checkOutcomeBacklog(prisma, track, decisionAt);
+    await checkHistory(prisma, track, decisionAt);
 
     const stats = await track.stats();
     assert(stats.features >= 1 && stats.outcomes >= 3, "Statistik zählt Merkmale und Labels");
@@ -390,6 +392,88 @@ async function checkOutcomeBacklog(
 }
 
 /**
+ * Nachgeladene Historie: idempotent schreiben, zusammengeführt lesen.
+ *
+ * Der Lesepfad ist der Grund für diesen Abschnitt. Kerzen und Messpunkte tragen
+ * verschiedene Bedeutungen — eine Kerze ist eine **Menge** je Fenster, ein
+ * Messpunkt eine gleitende 24-Stunden-Summe. Wer sie verwechselt, überschätzt
+ * eine 5-Minuten-Kerze um den Faktor 288. Und der TVL, den die Historie nicht
+ * kennt, muss aus der Aufzeichnung kommen.
+ */
+async function checkHistory(
+  prisma: ReturnType<typeof createPrisma>,
+  track: TrackRepo,
+  decisionAt: Date,
+): Promise<void> {
+  console.log("\nNachgeladene Historie:");
+
+  const start = new Date(decisionAt.getTime() + 3_600_000);
+  const candles: PoolCandle[] = [0, 5, 10].map((offsetMin) => ({
+    poolAddress: TEST_POOL,
+    ts: new Date(start.getTime() + offsetMin * 60_000),
+    timeframe: "5m",
+    open: 0.001,
+    high: 0.0012,
+    // Der Tiefstkurs liegt unter jedem Messpunkt: Genau diesen Einbruch würde
+    // eine Stichprobe verpassen.
+    low: 0.0004,
+    close: 0.0009,
+    volumeUsd: 2_000,
+    feesUsd: 30,
+    protocolFeesUsd: 3,
+  }));
+
+  const written = await track.recordCandles(candles);
+  assert(written === 3, `Kerzen geschrieben (${written})`);
+
+  // Zweiter Lauf über denselben Zeitraum: ersetzen, nicht verdoppeln. Sonst
+  // wächst die Historie mit jedem Nachladen statt sich zu aktualisieren.
+  await track.recordCandles(candles);
+  const stored = await prisma.poolHistoryCandle.count({ where: { poolAddress: TEST_POOL } });
+  assert(stored === 3, `Nachladen ist idempotent (${stored} Zeilen nach zwei Läufen)`);
+
+  const newest = await track.newestCandleAt([TEST_POOL], "5m");
+  assert(
+    newest.get(TEST_POOL)?.getTime() === candles[2]!.ts.getTime(),
+    "Jüngste Kerze als Fortsetzungspunkt lesbar",
+  );
+
+  const points = await track.loadHistory(TEST_POOL, start, new Date(start.getTime() + 3_600_000));
+  assert(points.length === 3, `Historie als Zeitreihe gelesen (${points.length})`);
+
+  const first = points[0]!;
+  // 2.000 USD in 5 Minuten sind 288 × 2.000 als Tagesrate — die Engine erwartet
+  // eine Rate und skaliert selbst auf das Intervall.
+  assert(
+    first.volume24hUsd !== null && Math.abs(first.volume24hUsd - 2_000 * 288) < 1,
+    `Fenstermenge als 24-Stunden-Rate umgerechnet (${first.volume24hUsd})`,
+  );
+  // Der Satz bleibt davon unberührt: 30 / 2.000 = 1,5 %.
+  assert(
+    effectiveFeePct(first) !== null && Math.abs(effectiveFeePct(first)! - 1.5) < 0.001,
+    `Gebührensatz aus der Kerze bestimmbar (${effectiveFeePct(first)})`,
+  );
+  // Protokollanteil gemessen statt geschätzt: 3 / 30 = 10 %.
+  const protocolFeePct = first.protocolFeePct ?? null;
+  assert(
+    protocolFeePct !== null && Math.abs(protocolFeePct - 10) < 0.001,
+    `Protokollanteil je Kerze gemessen (${protocolFeePct})`,
+  );
+  assert(first.low === 0.0004, `Tiefstkurs erhalten (${first.low})`);
+  // Den TVL kennt die Historie nicht — er kommt aus der Aufzeichnung.
+  assert(first.tvlUsd === 123_456, `TVL aus dem Messpunkt fortgetragen (${first.tvlUsd})`);
+  assert(first.solPriceUsd === 180, `SOL-Kurs fortgetragen (${first.solPriceUsd})`);
+  // Gleitende Fenster gibt es für eine Kerze nicht; sie zu erfinden wäre falsch.
+  assert(first.windows === null, "Keine gleitenden Fenster erfunden");
+
+  const stats = await track.historyStats("5m");
+  assert(
+    stats.candles >= 3 && stats.pools >= 1,
+    `Bestand der Historie ausgewiesen (${stats.candles} Kerzen, ${stats.pools} Pools)`,
+  );
+}
+
+/**
  * Entfernt alle Spuren des Selbsttests.
  *
  * Der Test schreibt bewusst in die echte Datenbank — nur so beweist er, dass
@@ -405,6 +489,9 @@ async function cleanup(client: ReturnType<typeof createPrisma>): Promise<void> {
     // Outcomes hängen per Cascade an den Features.
     await client.candidateFeature.deleteMany({ where: { poolAddress: { startsWith: TEST_PREFIX } } });
     await client.trackedPool.deleteMany({ where: { poolAddress: { startsWith: TEST_PREFIX } } });
+    await client.poolHistoryCandle.deleteMany({
+      where: { poolAddress: { startsWith: TEST_PREFIX } },
+    });
     // Die vom Test erzeugte Config-Version zurücknehmen, damit die Historie
     // in der Oberfläche nur echte Änderungen zeigt.
     await client.configVersion.deleteMany({ where: { actor: "db:check" } });

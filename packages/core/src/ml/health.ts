@@ -189,7 +189,14 @@ export function evaluateTrackHealth(input: TrackHealthInput): HealthCheck[] {
       ...(status === "ok"
         ? {}
         : {
-            hint: "Längere Unterbrechungen verzerren den Datensatz systematisch (meist fehlen Nachtstunden). Rechner durchlaufen lassen oder auf einen Server umziehen.",
+            // Preis-, Volumen- und Gebührenverlauf sind rückwirkend abrufbar;
+            // TVL-Messpunkte und Merkmale nicht. Eine Lücke ist damit teilweise
+            // reparierbar — und wer das nicht weiß, verliert den Rest auch.
+            hint:
+              "Längere Unterbrechungen verzerren den Datensatz systematisch (meist fehlen " +
+              "Nachtstunden). `pnpm nachladen` holt Preis-, Volumen- und Gebührenverlauf " +
+              "nachträglich; TVL-Messpunkte und Merkmale bleiben verloren. Gegen die " +
+              "Ursache: Rechner durchlaufen lassen oder auf einen Server umziehen.",
           }),
     });
   }

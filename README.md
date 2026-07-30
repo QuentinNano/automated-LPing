@@ -22,8 +22,9 @@ packages/
                   # PnL, HODL-Benchmark), Positions-Lebenszyklus, ML-Merkmale/Labels
   adapters/       # Meteora-API, DexScreener, RugCheck, Jupiter (+ Fabriq-Spike),
                   # HTTP-Infra: Retry/Backoff, Rate-Limiting, zod-Validierung
-  db/             # Prisma-Schema (11 Tabellen: 8 aus KONZEPT.md 10.2 plus die drei
-                  # Aufzeichnungstabellen), Migrationen, PrismaConfigStore
+  db/             # Prisma-Schema (12 Tabellen: 8 aus KONZEPT.md 10.2, drei für die
+                  # Aufzeichnung, eine für die nachgeladene Historie),
+                  # Migrationen, PrismaConfigStore
 config/           # global.json + ein JSON je Preset (konservativ, balanced, degen)
 ```
 
@@ -43,6 +44,28 @@ Umbenennen einzelner Felder legt die Discovery damit nicht sofort lahm.
 Gebührenstruktur (dynamische Gebühr, Protokollanteil, `collect_fee_mode`) und
 Pool-Alter gelesen werden. Fällt eines davon aus, verarmt die Aufzeichnung
 still — und aufgezeichnete Zeit lässt sich nicht nachholen.
+
+## Datenaufzeichnung: Momentaufnahmen und Historie
+
+Die Aufzeichnung führt zwei verschiedene Arten von Beobachtungen, und der
+Unterschied ist wichtig:
+
+| | **Messpunkte** (`pool_snapshots`) | **Kerzen** (`pool_history_candles`) |
+|---|---|---|
+| Woher | laufende Abfrage im Messraster | Historien-Endpunkte, rückwirkend |
+| Auflösung | 15 min | 5 min |
+| Enthält | TVL, SOL-Kurs, dynamische Gebühr, gleitende Zeitfenster | Open/High/Low/Close, Volumen, Gebühren, Protokollanteil je Fenster |
+| Nachholbar | **nein** | **ja**, jederzeit |
+
+Beide zusammen ergeben die Zeitreihe, gegen die später optimiert wird: Preis und
+Gebühren fein aufgelöst aus den Kerzen, der TVL aus den Messpunkten. Deshalb
+ersetzt das Nachladen die Aufzeichnung nicht — es verdichtet sie und repariert
+Lücken.
+
+Ein Hinweis zur Einheit: Volumen und Gebühren einer Kerze gelten **für ihr
+Fenster**, nicht als Tagessumme. Wer eine 5-Minuten-Kerze als 24-Stunden-Wert
+liest, liegt um den Faktor 288 daneben; die Umrechnung passiert einmal zentral in
+`loadHistory()`.
 
 ## Discovery
 
@@ -149,6 +172,14 @@ pnpm aufzeichnen
 # Preset tief geprüft (und damit verfolgt) werden — Default 40.
 TOP=60 SCAN_EVERY=8 pnpm aufzeichnen
 
+# Historie nachladen: Preis-, Volumen- und Gebührenverlauf rückwirkend holen.
+# Läuft im Dauerbetrieb automatisch mit; von Hand sinnvoll nach einer längeren
+# Unterbrechung. Braucht keine Kalenderzeit — im Gegensatz zur Aufzeichnung.
+pnpm nachladen
+pnpm nachladen -- --status                    # Bestand der Historie
+pnpm nachladen -- --timeframe 1h              # gröber (schneller, weniger Zeilen)
+pnpm nachladen -- --lookback-hours 336        # weiter zurück als 7 Tage
+
 # Prüfen, ob die Aufzeichnung wie erwartet arbeitet (Urteil je Aspekt):
 pnpm pruefen
 
@@ -158,6 +189,8 @@ pnpm --filter @lping/bot track -- --status           # Fortschritt
 pnpm --filter @lping/bot track -- --top 60           # mehr verschiedene Pools verfolgen
 pnpm --filter @lping/bot track -- --scan-every 8     # seltener nach neuen Pools suchen
 pnpm --filter @lping/bot track -- --no-scan          # nur verfolgen, nichts Neues suchen
+pnpm --filter @lping/bot track -- --backfill-every 6 # häufiger nachladen
+pnpm --filter @lping/bot track -- --no-backfill      # ohne Nachladen
 
 # Datensicherung (Merkmale und TVL-Verlauf sind nicht wiederbeschaffbar):
 pnpm sichern                                    # Sicherung anlegen
@@ -210,9 +243,10 @@ und `paperTrading` steht auf `true`.
    → Score 0–100 → Kandidaten-Persistenz mit Shadow-Tracking.
 4. ✅ Paper-Trading-Engine (bin-genaues DLMM-Modell, Fee-Akkrual, On-Chain-Kosten,
    HODL-Benchmark, Exit-Regeln) mit Multi-Preset-Vergleich, plus Web-UI.
-5. ✅ Datenaufzeichnung für die Strategie-Optimierung (KONZEPT-ML.md M1–M1d):
+5. ✅ Datenaufzeichnung für die Strategie-Optimierung (KONZEPT-ML.md M1–M1f):
    `track`-Kommando, Merkmale je Kandidat, Verlaufsaufzeichnung, Ergebnis-Labels,
-   Prüfbericht.
+   Prüfbericht, Sammelabruf der Messpunkte und rückwirkendes Nachladen der
+   Historie (`backfill`).
 
 **Aktueller Arbeitsschwerpunkt** ist die Aufzeichnung, nicht die Execution
 Engine: Sie ist die einzige Komponente, deren Wert von verstrichener Zeit
@@ -220,9 +254,11 @@ abhängt, und sie läuft parallel zum Paper-Vergleich (`pnpm aufzeichnen`).
 
 **Als Nächstes**, in dieser Reihenfolge:
 
-1. **Replay-Engine** (KONZEPT-ML.md M2) — aufgezeichnete und über die
-   Meteora-Historie nachgeladene Verläufe als `MarketTick`s durch dieselbe
-   Paper-Engine schicken. Voraussetzung für alles Weitere der Optimierung.
+1. **Replay-Engine** (KONZEPT-ML.md M2) — die vorhandenen Lesepfade
+   (`loadTrack()`, `loadHistory()`) als `MarketTick`s durch dieselbe Paper-Engine
+   schicken, Einstiege an beliebigen Zeitpunkten, High/Low für Zeit-in-Range.
+   Voraussetzung für alles Weitere der Optimierung — und nicht mehr an Wartezeit
+   gebunden, weil die Verläufe nachladbar sind.
 2. **Sensitivitätsanalyse** (M3) — welche Parameter überhaupt etwas bewirken.
 3. **Execution Engine** (KONZEPT.md Schritt 5) — Transaktionsbau, Simulation vor
    dem Senden, Reconciliation nach Neustart, RPC-Failover, Telegram-Alerts.

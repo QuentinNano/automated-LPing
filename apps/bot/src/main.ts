@@ -17,12 +17,19 @@ import { loadDefaultsFromDir } from "./loadConfig";
 import { cmdFabriqCheck } from "./fabriqCheck";
 import { cmdApiCheck } from "./apiCheck";
 import {
+  DEFAULT_CYCLE_LIMIT,
   formatFeatureVersions,
   formatHealthReport,
   formatTrackStatus,
   runTrackCycle,
   type TrackDeps,
 } from "./track";
+import {
+  formatHistoryStats,
+  parseTimeframe,
+  runBackfill,
+  type BackfillDeps,
+} from "./backfill";
 import { formatScanTable, runScan, type ScanDeps } from "./scan";
 import {
   formatComparison,
@@ -57,10 +64,12 @@ async function main(): Promise<number> {
       return cmdPaper(process.argv.slice(3));
     case "track":
       return cmdTrack(process.argv.slice(3));
+    case "backfill":
+      return cmdBackfill(process.argv.slice(3));
     default:
       console.error(
         `Unbekanntes Kommando: ${command}\n` +
-          `Verfügbar: validate | health | scan | paper | track | api:check | fabriq:check <URL>`,
+          `Verfügbar: validate | health | scan | paper | track | backfill | api:check | fabriq:check <URL>`,
       );
       return 2;
   }
@@ -328,8 +337,14 @@ async function cmdTrack(args: string[]): Promise<number> {
 
   const statusOnly = args.includes("--status");
   const intervalMin = intFlag(args, "--interval") ?? 0;
-  const limit = intFlag(args, "--limit") ?? 300;
+  const limit = intFlag(args, "--limit") ?? DEFAULT_CYCLE_LIMIT;
   const scanEvery = args.includes("--no-scan") ? 0 : (intFlag(args, "--scan-every") ?? 6);
+  // Nachladen schließt Lücken und gibt neu entdeckten Pools ihre Vorgeschichte.
+  // Es gehört in den Dauerbetrieb, nicht in die Handarbeit: Wer eine Nacht
+  // Unterbrechung erst Tage später bemerkt, hat sie bis dahin im Datensatz.
+  const backfillEvery = args.includes("--no-backfill")
+    ? 0
+    : (intFlag(args, "--backfill-every") ?? 12);
   const pages = intFlag(args, "--pages");
   // Breite vor Tiefe: Für die Aufzeichnung zählen verschiedene Pools, nicht
   // wiederholte Messungen derselben (KONZEPT-ML.md 3.1).
@@ -378,7 +393,7 @@ async function cmdTrack(args: string[]): Promise<number> {
 
   const deps: TrackDeps = {
     store,
-    getPool: (address) => meteora.getPair(address),
+    getPools: (addresses) => meteora.getPairsByAddresses(addresses),
     log: (line) => console.log(`  ${line}`),
   };
 
@@ -419,11 +434,34 @@ async function cmdTrack(args: string[]): Promise<number> {
         console.log(`  ! Suche fehlgeschlagen: ${error instanceof Error ? error.message : error}`);
       }
     }
-    cycle++;
-
     // Verfolgung: Messpunkte der bekannten Pools schreiben.
     const result = await runTrackCycle(deps, { limit, denseIntervalMin });
     for (const note of result.notes) console.log(`  ! ${note}`);
+
+    // Nachladen: Preis-, Volumen- und Gebührenverlauf rückwirkend holen.
+    // Läuft nach der Verfolgung, weil das Messraster Vorrang hat — eine
+    // Momentaufnahme ist nicht nachholbar, die Historie schon.
+    if (backfillEvery > 0 && cycle % backfillEvery === 0) {
+      console.log("Historie nachladen…");
+      try {
+        const backfill = await runBackfill(
+          {
+            store,
+            getHistory: (address, query) => meteora.getHistory(address, query),
+            log: (line) => console.log(`  ${line}`),
+          },
+          {},
+        );
+        for (const note of backfill.notes) console.log(`  ! ${note}`);
+      } catch (error) {
+        // Wie beim Scan: Das Nachladen darf die Aufzeichnung nicht aufhalten.
+        console.log(
+          `  ! Nachladen fehlgeschlagen: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+    }
+
+    cycle++;
     console.log("\n" + formatTrackStatus(await store.stats()));
   };
 
@@ -448,6 +486,69 @@ async function cmdTrack(args: string[]): Promise<number> {
     }
   }
   return 0;
+}
+
+/**
+ * Historie nachladen (KONZEPT-ML.md 3.3).
+ *
+ * Anders als die Aufzeichnung braucht dieses Kommando keine Kalenderzeit: Es
+ * holt Preis-, Volumen- und Gebührenverlauf rückwirkend. Zwei Anwendungsfälle:
+ * Lücken schließen, die eine Unterbrechung gerissen hat, und neu entdeckten
+ * Pools ihre Vorgeschichte mitgeben.
+ */
+async function cmdBackfill(args: string[]): Promise<number> {
+  const databaseUrl = process.env["DATABASE_URL"];
+  if (databaseUrl === undefined || databaseUrl === "") {
+    console.error(
+      "backfill benötigt eine Datenbank.\n" +
+        "Setup: docker compose up -d && pnpm db:generate && pnpm db:migrate",
+    );
+    return 1;
+  }
+
+  const db = await import("@lping/db");
+  const store = new db.TrackRepo(db.createPrisma());
+  const meteora = new MeteoraAdapter();
+
+  let timeframe;
+  try {
+    timeframe = parseTimeframe(stringFlag(args, "--timeframe"));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+
+  if (args.includes("--status")) {
+    console.log(formatHistoryStats(await store.historyStats(timeframe)));
+    return 0;
+  }
+
+  const deps: BackfillDeps = {
+    store,
+    getHistory: (address, query) => meteora.getHistory(address, query),
+    log: (line) => console.log(`  ${line}`),
+  };
+
+  console.log(`Lade Historie nach (${timeframe})…\n`);
+  try {
+    const result = await runBackfill(deps, {
+      timeframe,
+      ...(intFlag(args, "--lookback-hours") !== undefined
+        ? { lookbackHours: intFlag(args, "--lookback-hours")! }
+        : {}),
+      ...(intFlag(args, "--limit") !== undefined ? { limit: intFlag(args, "--limit")! } : {}),
+      ...(intFlag(args, "--chunk-hours") !== undefined
+        ? { chunkHours: intFlag(args, "--chunk-hours")! }
+        : {}),
+      ...(args.includes("--active-only") ? { activeOnly: true } : {}),
+    });
+    for (const note of result.notes) console.log(`  ! ${note}`);
+    console.log("\n" + formatHistoryStats(await store.historyStats(timeframe)));
+    return 0;
+  } catch (error) {
+    console.error("\n" + explainFailure(error));
+    return 1;
+  }
 }
 
 /** Übersetzt technische Fehler in eine Meldung, mit der man etwas anfangen kann. */
@@ -500,6 +601,16 @@ function safeHost(url: string): string {
   } catch {
     return url;
   }
+}
+
+function stringFlag(args: string[], name: string): string | undefined {
+  const index = args.indexOf(name);
+  if (index === -1) return undefined;
+  const raw = args[index + 1];
+  if (raw === undefined || raw.startsWith("--")) {
+    throw new Error(`${name} erwartet einen Wert`);
+  }
+  return raw;
 }
 
 function intFlag(args: string[], name: string): number | undefined {
