@@ -110,9 +110,23 @@ Information ist Look-Ahead-Bias und macht das Modell wertlos.
   Token-Alter. Ein neuer Pool auf einem älteren Token ist ein anderer Fall als
   ein neuer Token.
 
-**Verlauf nach der Entscheidung** (`pool_tracks`): Preis, TVL, Volumen, Gebühren
+**Verlauf nach der Entscheidung** (`pool_snapshots`): Preis, TVL, Volumen, Gebühren
 in dichten Abständen — 15 min für die ersten 48 h, danach stündlich bis Tag 7.
 Das ist die Grundlage des Replays.
+
+Je Messpunkt wird zusätzlich die **Gebührenstruktur** mitgeschrieben
+(`dynamic_fee_pct`, `base_fee_pct`, `protocol_fee_pct`) sowie alle Zeitfenster
+als JSON (`windows`). Grund: Der Replay rekonstruiert aus diesen Zeilen die
+`MarketTick`-Objekte, gegen die optimiert wird. Ein Replay auf
+24-Stunden-Mittelwerten kann Volatilitätsphasen nicht auflösen — und genau in
+denen verdient eine DLMM-Position. `effectiveFeePct()` bestimmt daraus den
+Gebührensatz nach einer Genauigkeits-Rangfolge: gemeldete Gesamtgebühr, sonst
+realisierte Rate aus dem kürzesten belegten Fenster, sonst über 24 h, zuletzt
+die Basisgebühr. Ist keine davon bestimmbar, liefert sie `null` — die Simulation
+darf dann keine Gebühren buchen, statt eine Zahl zu erfinden.
+
+Messpunkte von vor dieser Erweiterung tragen die neuen Spalten als `NULL` und
+bleiben über die 24-Stunden-Rückfallebene nutzbar.
 
 **Ergebnisse** (`candidate_outcomes`): abgeleitete Labels je Horizont
 (1 h / 6 h / 24 h / 72 h / 7 d): Preisänderung, TVL-Änderung, aufgelaufene
@@ -400,6 +414,7 @@ kurzfristig als ertragsmindernd erkennen würde.
 |---|---|---|---|
 | **M1 — Aufzeichnung** ✅ | `tracked_pools`, `candidate_features`, `candidate_outcomes`; `track`-Kommando; Jupiter-Token-API-Adapter (Organic Score); Fortschritts- und Lückenüberwachung | umgesetzt | **läuft** |
 | **M1b — Merkmalsbreite** ✅ | Alle sechs Zeitfenster der Pool-API (`30m`–`24h`) samt Trend- und Stetigkeitsmerkmalen, Gebührenstruktur (dynamische Gebühr, Protokollanteil, `collect_fee_mode`), Farm-Rewards, Pool-Alter, Token-Angaben aus der Pool-API; Discovery über mehrere Sortierungen (`FEATURE_VERSION` 2) | umgesetzt | **läuft** |
+| **M1c — Zeitreihe für den Replay** ✅ | `pool_snapshots` trägt Gebührenstruktur und alle Zeitfenster je Messpunkt; `effectiveFeePct()` als Genauigkeits-Rangfolge; `loadTrack()` als gemeinsamer Lesepfad von Replay und Label-Berechnung | umgesetzt | **läuft** |
 | **M2 — Replay** | Tick-Reader, Einstiege an beliebigen Zeitpunkten, Determinismus, Gleichheitstest Replay ↔ Live | mittel | parallel zu M1 |
 | **M3 — Sensitivität** | Einzelparameter-Analyse, Auswahl der 5–10 relevanten, Bericht | gering | nach ~1 Woche Daten |
 | **M4 — Suche** | Zufallssuche + Verfeinerung, Zielfunktion, Plateau-Bewertung | mittel | nach M3 |

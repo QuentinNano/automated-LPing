@@ -54,6 +54,21 @@ const WATCHED_FIELDS: { key: string; label: string; source: string; minShare: nu
   { key: "risk_score", label: "Risiko-Report", source: "RugCheck", minShare: 0.5 },
   { key: "roundtrip_loss_pct", label: "Verkaufbarkeit", source: "Jupiter", minShare: 0.5 },
   { key: "organic_score", label: "Organic Score", source: "Jupiter Token API", minShare: 0.3 },
+  // Merkmalsschema v2. Diese Felder stehen im selben Response wie die
+  // Pool-Kennzahlen — fehlen sie, liegt es nicht an der Quelle, sondern am
+  // Aufzeichner.
+  {
+    key: "dynamic_fee_pct",
+    label: "Gebührenstruktur",
+    source: "Meteora (Schema v2)",
+    minShare: 0.8,
+  },
+  {
+    key: "fee_tvl_1h_pct",
+    label: "Kurze Zeitfenster",
+    source: "Meteora (Schema v2)",
+    minShare: 0.8,
+  },
 ];
 
 export function evaluateTrackHealth(input: TrackHealthInput): HealthCheck[] {
@@ -173,10 +188,7 @@ export function evaluateTrackHealth(input: TrackHealthInput): HealthCheck[] {
       ...(status === "ok"
         ? {}
         : {
-            hint:
-              share === 0
-                ? `${field.source} liefert gar nichts — vermutlich ein API-Fehler oder eine Formatänderung.`
-                : `${field.source} liefert nur teilweise. Bei anhaltend niedrigem Wert melden.`,
+            hint: coverageHint(field.source, share),
           }),
     });
   }
@@ -213,6 +225,25 @@ export function evaluateTrackHealth(input: TrackHealthInput): HealthCheck[] {
   }
 
   return checks;
+}
+
+/**
+ * Handlungsanweisung bei lückenhaften Merkmalen.
+ *
+ * Bei den v2-Feldern ist die häufigste Ursache nicht die API, sondern ein
+ * Aufzeichner, der noch mit altem Code läuft — die Werte stehen im selben
+ * Response wie die Pool-Kennzahlen. Deshalb hier ein anderer Hinweis: Wer beim
+ * falschen Ende sucht, verliert Aufzeichnungszeit, die nicht nachholbar ist.
+ */
+function coverageHint(source: string, share: number): string {
+  if (source.includes("Schema v2")) {
+    return share === 0
+      ? "Diese Felder stehen im selben Response wie die Pool-Kennzahlen. Läuft der Aufzeichner noch mit altem Code? Beenden, `git pull`, `pnpm db:migrate`, `pnpm aufzeichnen`."
+      : "Nur teilweise belegt — die älteren Aufzeichnungen stammen noch aus Schema v1. Der Anteil sollte mit jedem Zyklus steigen.";
+  }
+  return share === 0
+    ? `${source} liefert gar nichts — vermutlich ein API-Fehler oder eine Formatänderung.`
+    : `${source} liefert nur teilweise. Bei anhaltend niedrigem Wert melden.`;
 }
 
 /** Gesamturteil: der schlechteste Einzelbefund entscheidet. */

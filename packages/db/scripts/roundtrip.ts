@@ -6,6 +6,7 @@ import {
   ConfigService,
   FEATURE_VERSION,
   buildFeatureVector,
+  effectiveFeePct,
   parseBotConfig,
   type PoolMetrics,
   type ScreeningResult,
@@ -57,6 +58,12 @@ function testPool(): PoolMetrics {
     mintY: "So11111111111111111111111111111111111111112",
     binStep: 100,
     tvlUsd: 123_456,
+    // Gebührenstruktur: dynamisch > base, Protokoll nimmt 10 % der Gebühr.
+    baseFeePct: 1,
+    dynamicFeePct: 1.4,
+    maxFeePct: 10,
+    protocolFeePct: 10,
+    collectFeeMode: "only_y",
     volumeUsd: { h1: 21_000, h24: 500_000 },
     feesUsd: { h1: 210, h24: 5_000 },
     feeTvlPct: { h1: 0.17, h24: 4.05 },
@@ -174,21 +181,38 @@ async function main(): Promise<void> {
     );
 
     // Verlauf simulieren: Preis fällt über 26 Stunden um 20 %.
+    // Geschrieben über recordPoint, nicht direkt — nur so wird der Pfad geprüft,
+    // den die Aufzeichnung wirklich benutzt (inkl. Gebühren und Zeitfenster).
     for (const hours of [0, 1, 6, 24, 26]) {
       const factor = 1 - 0.2 * (hours / 26);
-      await prisma.poolSnapshot.create({
-        data: {
-          poolAddress: TEST_POOL,
-          ts: new Date(decisionAt.getTime() + hours * 3_600_000),
-          tvlUsd: 123_456,
-          volume24hUsd: 500_000,
-          fees24hUsd: 5_000,
-          feeTvl24hPct: 4.05,
-          priceNative: 0.001 * factor,
-          binStep: 100,
-        },
-      });
+      await track.recordPoint(
+        { ...testPool(), priceNative: 0.001 * factor },
+        new Date(decisionAt.getTime() + hours * 3_600_000),
+      );
     }
+
+    // Gebührenstruktur und Zeitfenster müssen den Weg durch Postgres überleben:
+    // sie sind die Grundlage des Replays (KONZEPT-ML.md 5).
+    const points = await track.loadTrack(TEST_POOL, decisionAt);
+    assert(points.length === 5, `Zeitreihe über loadTrack gelesen (${points.length})`);
+    const firstPoint = points[0];
+    assert(
+      firstPoint !== undefined && firstPoint.dynamicFeePct !== null,
+      "Dynamische Gebühr je Messpunkt gespeichert",
+    );
+    assert(
+      firstPoint !== undefined && firstPoint.protocolFeePct !== null,
+      "Protokollanteil je Messpunkt gespeichert",
+    );
+    assert(
+      firstPoint?.windows?.volume?.h1 === 21_000,
+      `Zeitfenster als JSON erhalten (h1=${firstPoint?.windows?.volume?.h1})`,
+    );
+    // Der Replay leitet daraus den Satz ab, mit dem er Gebühren buchet.
+    assert(
+      firstPoint !== undefined && effectiveFeePct(firstPoint) === 1.4,
+      `Effektive Gebührenrate bestimmbar (${firstPoint && effectiveFeePct(firstPoint)})`,
+    );
 
     const written = await track.computeDueOutcomes();
     assert(written > 0, `Ergebnis-Labels berechnet (${written})`);

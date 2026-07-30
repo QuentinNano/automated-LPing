@@ -6,9 +6,24 @@
  * ist die einzige Absicherung gegen Look-Ahead-Bias.
  */
 
+import { METRIC_WINDOWS, type WindowedMetric } from "../domain/types";
+
 /** Auswertungshorizonte in Stunden. */
 export const OUTCOME_HORIZONS_HOURS = [1, 6, 24, 72, 168] as const;
 export type OutcomeHorizon = (typeof OUTCOME_HORIZONS_HOURS)[number];
+
+/**
+ * Kennzahlen eines Messpunkts über alle Zeitfenster.
+ *
+ * Als JSON geführt statt als 24 Spalten: Kommt bei Meteora ein Fenster hinzu,
+ * braucht es keine Migration, und der Datensatz bleibt selbstbeschreibend.
+ */
+export interface SnapshotWindows {
+  volume?: WindowedMetric;
+  fees?: WindowedMetric;
+  feeTvl?: WindowedMetric;
+  protocolFees?: WindowedMetric;
+}
 
 /** Eine Beobachtung der Zeitreihe eines Pools. */
 export interface TrackPoint {
@@ -17,6 +32,61 @@ export interface TrackPoint {
   tvlUsd: number | null;
   fees24hUsd: number | null;
   volume24hUsd: number | null;
+  /** Gesamtgebühr (Basis + Volatilitätsaufschlag) zum Messzeitpunkt, in %. */
+  dynamicFeePct?: number | null;
+  baseFeePct?: number | null;
+  /** Protokollanteil in % **der Gebühr** — der LP erhält nur den Rest. */
+  protocolFeePct?: number | null;
+  windows?: SnapshotWindows | null;
+}
+
+/**
+ * Effektiver Swap-Gebührensatz eines Messpunkts in Prozent — die Größe, mit der
+ * die Simulation den Gebührenfluss berechnet.
+ *
+ * Die Reihenfolge ist eine Genauigkeits-Rangfolge, keine Bequemlichkeit:
+ * 1. `dynamicFeePct` — von der API gemeldete Gesamtgebühr zum Messzeitpunkt.
+ * 2. Realisierte Rate aus dem kürzesten belegten Fenster (`fees/volume`). Das
+ *    ist ein Ist-Wert statt einer Momentaufnahme und deckt auch Pools ab, deren
+ *    Gebühr zwischen zwei Messpunkten geschwankt hat.
+ * 3. Realisierte Rate über 24 h — träge, aber immer vorhanden.
+ * 4. `baseFeePct` als Untergrenze. Unterschätzt volatile Pools deutlich, ist
+ *    aber besser als die Position gebührenfrei zu rechnen.
+ *
+ * `null` heißt: nicht bestimmbar. Dann darf die Simulation keine Gebühren
+ * buchen, statt eine Zahl zu erfinden.
+ */
+export function effectiveFeePct(point: TrackPoint): number | null {
+  if (isPositive(point.dynamicFeePct)) return point.dynamicFeePct;
+
+  const windows = point.windows;
+  if (windows !== undefined && windows !== null) {
+    // Kürzestes Fenster zuerst: es liegt dem Messintervall am nächsten.
+    for (const window of METRIC_WINDOWS) {
+      const fees = windows.fees?.[window];
+      const volume = windows.volume?.[window];
+      if (fees !== undefined && volume !== undefined && volume > 0 && fees >= 0) {
+        return (fees / volume) * 100;
+      }
+    }
+  }
+
+  if (
+    point.fees24hUsd !== null &&
+    point.fees24hUsd !== undefined &&
+    point.fees24hUsd >= 0 &&
+    point.volume24hUsd !== null &&
+    point.volume24hUsd !== undefined &&
+    point.volume24hUsd > 0
+  ) {
+    return (point.fees24hUsd / point.volume24hUsd) * 100;
+  }
+
+  return isPositive(point.baseFeePct) ? point.baseFeePct : null;
+}
+
+function isPositive(value: number | null | undefined): value is number {
+  return value !== null && value !== undefined && Number.isFinite(value) && value > 0;
 }
 
 export interface OutcomeLabel {
