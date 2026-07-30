@@ -329,9 +329,11 @@ async function cmdTrack(args: string[]): Promise<number> {
   const statusOnly = args.includes("--status");
   const intervalMin = intFlag(args, "--interval") ?? 0;
   const limit = intFlag(args, "--limit") ?? 300;
-  const scanEvery = args.includes("--no-scan") ? 0 : (intFlag(args, "--scan-every") ?? 4);
+  const scanEvery = args.includes("--no-scan") ? 0 : (intFlag(args, "--scan-every") ?? 6);
   const pages = intFlag(args, "--pages");
-  const top = intFlag(args, "--top") ?? 12;
+  // Breite vor Tiefe: Für die Aufzeichnung zählen verschiedene Pools, nicht
+  // wiederholte Messungen derselben (KONZEPT-ML.md 3.1).
+  const top = intFlag(args, "--top") ?? 40;
 
   // Prüfbericht: beurteilt die Aufzeichnung, statt nur Zahlen zu zeigen.
   if (args.includes("--check")) {

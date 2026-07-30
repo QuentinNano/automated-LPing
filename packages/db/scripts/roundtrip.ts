@@ -64,6 +64,8 @@ function testPool(): PoolMetrics {
     maxFeePct: 10,
     protocolFeePct: 10,
     collectFeeMode: "only_y",
+    tokenX: { mint: "TestMint1111111111111111111111111111111111", priceUsd: 0.18 },
+    tokenY: { mint: "So11111111111111111111111111111111111111112", priceUsd: 180 },
     volumeUsd: { h1: 21_000, h24: 500_000 },
     feesUsd: { h1: 210, h24: 5_000 },
     feeTvlPct: { h1: 0.17, h24: 4.05 },
@@ -208,6 +210,10 @@ async function main(): Promise<void> {
       firstPoint?.windows?.volume?.h1 === 21_000,
       `Zeitfenster als JSON erhalten (h1=${firstPoint?.windows?.volume?.h1})`,
     );
+    assert(
+      firstPoint?.solPriceUsd === 180,
+      `SOL-Preis je Messpunkt gespeichert (${firstPoint?.solPriceUsd})`,
+    );
     // Der Replay leitet daraus den Satz ab, mit dem er Gebühren buchet.
     assert(
       firstPoint !== undefined && effectiveFeePct(firstPoint) === 1.4,
@@ -262,6 +268,16 @@ async function main(): Promise<void> {
 
     const stats = await track.stats();
     assert(stats.features >= 1 && stats.outcomes >= 3, "Statistik zählt Merkmale und Labels");
+    // Die Rohabfrage COUNT(DISTINCT (a,b)) ist die einzige Stelle mit
+    // handgeschriebenem SQL — sie wird hier gegen echtes Postgres geprüft.
+    assert(
+      stats.distinctCandidates >= 1 && stats.distinctCandidates <= stats.features,
+      `Verschiedene Kandidaten gezählt (${stats.distinctCandidates} von ${stats.features} Zeilen)`,
+    );
+    assert(
+      stats.distinctPools >= 1 && stats.distinctPools <= stats.distinctCandidates,
+      `Verschiedene Pools gezählt (${stats.distinctPools})`,
+    );
 
     console.log("\nDB-Roundtrip OK ✔");
   } finally {

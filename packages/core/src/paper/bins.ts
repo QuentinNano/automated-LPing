@@ -172,3 +172,57 @@ export function isInRange(bins: SimBin[], price: number): boolean {
   if (first === undefined || last === undefined) return false;
   return price >= first.price && price <= last.price;
 }
+
+/**
+ * Liquiditätswert des **aktiven** Bins in SOL — der einzige Bin, der Gebühren
+ * verdient.
+ *
+ * Die DLMM-Doku definiert den Anteil am Gebührenfluss als
+ * `eigene Liquidität in den berechtigten Bins / Gesamtliquidität dort`,
+ * berechtigt ist der aktive Bin (bei Mehr-Bin-Swaps zusätzlich die überquerten,
+ * bis zu 15). Der Liquiditätswert eines Bins ist `L = P·x + y` — bei unserer
+ * Darstellung also genau sein SOL-Wert.
+ *
+ * Ist der aktive Bin nicht Teil der Position, ist der Wert 0: dann verdient sie
+ * nichts, unabhängig davon, wie viel Kapital in den übrigen Bins liegt.
+ */
+export function activeBinValueSol(bins: SimBin[], price: number, binStep: number): number {
+  const activeId = binIdFromPrice(price, binStep);
+  for (const bin of bins) {
+    if (bin.id === activeId) return bin.sol + bin.token * bin.price;
+  }
+  return 0;
+}
+
+/**
+ * Legt die Bins um einen neuen Preis herum neu an und verteilt den vorhandenen
+ * Wert nach der Preset-Strategie. Grundlage des Rebalancings.
+ *
+ * Rückgabe enthält den Betrag, der dafür die Seite wechseln muss — daraus
+ * ergeben sich Swap- und Composition-Kosten.
+ */
+export interface RecenterResult {
+  bins: SimBin[];
+  minBinId: number;
+  maxBinId: number;
+  /** SOL-Gegenwert, der zwischen den Seiten getauscht werden muss. */
+  swappedSol: number;
+  /** Wert, der in den aktiven Bin eingezahlt wird (Composition-Fee-Basis). */
+  activeBinDepositSol: number;
+}
+
+export function recenterBins(params: OpenPositionParams): RecenterResult {
+  const opened = openBins(params);
+  const activeId = binIdFromPrice(params.price, params.binStep);
+  const activeBin = opened.bins.find((bin) => bin.id === activeId);
+  const activeBinDepositSol =
+    activeBin === undefined ? 0 : activeBin.sol + activeBin.token * activeBin.price;
+
+  return {
+    bins: opened.bins,
+    minBinId: opened.minBinId,
+    maxBinId: opened.maxBinId,
+    swappedSol: opened.swappedSol,
+    activeBinDepositSol,
+  };
+}

@@ -14,6 +14,7 @@
       "priorityFeeSol": 0.0005,
       "swapSlippagePct": 0.5
     },
-    "feeShareHaircutPct": 30
+    "feeShareHaircutPct": 30,
+    "poolLiquidityBins": 70
   }
 }

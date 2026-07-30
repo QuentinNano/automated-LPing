@@ -273,6 +273,7 @@ describe("HODL-Vergleich", () => {
       binStep: 100,
       price: 1,
       depositSol: 1,
+      feePct: 1,
       at: T0,
     });
     const valuation = valuePosition(state, 1);

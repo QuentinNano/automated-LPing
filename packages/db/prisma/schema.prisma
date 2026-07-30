@@ -194,6 +194,9 @@ model PoolSnapshot {
   /// Protokollanteil in % **der Gebühr** (10 % Standard, 20 % Launch-Pool).
   /// Ohne diesen Abzug wird der LP-Ertrag systematisch zu hoch angesetzt.
   protocolFeePct Decimal? @map("protocol_fee_pct") @db.Decimal(10, 4)
+  /// USD-Preis von SOL zum Messzeitpunkt — für die Umrechnung des Pool-TVL
+  /// in SOL. Im Bin-Modell des Gebührenanteils kürzt sich der Kurs nicht heraus.
+  solPriceUsd    Decimal? @map("sol_price_usd") @db.Decimal(20, 6)
   /// Volumen/Gebühren/Fee-TVL/Protokollgebühren je Zeitfenster (30m…24h).
   /// Als JSON, damit ein zusätzliches Fenster keine Migration braucht.
   windows        Json?

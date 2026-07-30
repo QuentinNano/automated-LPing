@@ -525,10 +525,23 @@ stammt ausschließlich aus Gebühren, nicht aus dem Durchlaufen der Range.
 
 Bewusste Vereinfachungen (dokumentiert, weil sie die Ergebnisse beeinflussen):
 
-- **Fee-Anteil geschätzt:** Der eigene Anteil am Gebührenfluss wird über den
-  Anteil am Pool-TVL angenähert — die tatsächliche Liquiditätsverteilung anderer
-  LPs ist von außen nicht beobachtbar. Ein konfigurierbarer Abschlag
-  (`feeShareHaircutPct`, Default 30 %) korrigiert konservativ nach unten.
+- **Fee-Anteil teilweise geschätzt:** Nach der DLMM-Doku verdient nur der
+  **aktive Bin**, und der Anteil daran ist `eigene Liquidität dort / gesamte
+  Liquidität dort`. Die eigene Seite wird exakt gerechnet (`L = P·x + y` des
+  aktiven Bins); geschätzt wird nur die fremde: Sie gilt als gleichmäßig über
+  `poolLiquidityBins` Bins verteilt (Default 70 = DLMM-Standardbreite). Dadurch
+  zahlt sich Konzentration nahe am Preis aus — über den bloßen TVL-Anteil
+  gerechnet wären Spot, Curve und BidAsk ununterscheidbar gewesen, und genau
+  dieser Parameter soll optimiert werden. Ein Abschlag (`feeShareHaircutPct`,
+  Default 30 %) korrigiert zusätzlich konservativ nach unten.
+- **Protokollanteil wird abgezogen:** 10 % der Gebühr bei Standard-Pools, 20 %
+  bei Launch-Pools gehen ans Protokoll, nicht an den LP.
+- **Maßgeblich ist die Gesamtgebühr** (Basis + Volatilitätsaufschlag), nicht die
+  Basisgebühr. Das Volumen wird aus dem kürzesten verfügbaren Zeitfenster als
+  24-Stunden-Rate hochgerechnet, damit Volatilitätsphasen nicht weggeglättet
+  werden.
+- **Composition Fee:** Einzahlungen in den aktiven Bin kosten extra — beim
+  Eröffnen einer 50/50-Position und bei jedem Rebalance.
 - **Kosten nur On-Chain:** Priority Fees je Transaktion und Slippage je Swap.
   Positions-Rent ist erstattungsfähig und damit gebundenes Kapital, kein Aufwand.
   **Infrastrukturkosten (VPS, RPC-Tarife) bleiben außen vor** — monatlicher
@@ -537,6 +550,23 @@ Bewusste Vereinfachungen (dokumentiert, weil sie die Ergebnisse beeinflussen):
   weiterhin in Abschnitt 15 zu berücksichtigen.
 - **Slippage innerhalb eines Bins** wird vernachlässigt (bei üblichen Bin-Steps
   unter 1 % je Bin).
+
+**Einseitige Positionen warten außerhalb der Range.** Eine `quote_only`-Position
+liegt per Konstruktion unterhalb des aktiven Bins — Meteora beschreibt das als
+DCA-Muster ("Deposit quote token single-sided … below the current price";
+Bid-Ask "may sit away from the active price until the market moves into the edge
+bins"). Die Simulation schließt sie deshalb erst, wenn der Markt die Range
+einmal erreicht hatte und sie wieder verlassen hat. Wird sie nie befüllt, greift
+das Zeitlimit — der richtige Exit für eine Kauforder, die der Markt nicht
+erreicht hat.
+
+**Rebalancing** ist als ein Ablauf modelliert (claim → resize → add), wie es die
+DLMM-Instruktion `rebalance_liquidity` vorsieht: Die Position wird nicht
+geschlossen und neu eröffnet, es fällt also keine erneute Rent an. Ausgelöst
+wird es, wenn der aktive Bin den Puffer verlässt; Cooldown und Tageslimit
+verhindern Zappeln, und ein EV-Check verlangt, dass der erwartete Zusatzertrag
+die Kosten um `minEvFactor` übersteigt. Steht ohnehin ein Exit an, hat dieser
+Vorrang — nie in einen fallenden Preis nachzentrieren.
 
 Jede Position führt zusätzlich einen **HODL-Benchmark** mit: Was wäre der Einsatz
 wert, hätte man ihn in der Eröffnungszusammensetzung einfach gehalten? Das ist die

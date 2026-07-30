@@ -35,6 +35,8 @@ class FakeStore implements TrackStore {
       trackedTotal: 12,
       points: 5000,
       features: 1500,
+      distinctCandidates: 1500,
+      distinctPools: 500,
       outcomes: 3000,
       firstCaptureAt: new Date(T0.getTime() - 5 * 86_400_000),
       recordingDays: 5,
@@ -119,20 +121,22 @@ describe("formatTrackStatus", () => {
     trackedTotal: 12,
     points: 5000,
     features: 1500,
+    distinctCandidates: 1500,
+    distinctPools: 500,
     outcomes: 3000,
     firstCaptureAt: new Date(T0.getTime() - 5 * 86_400_000),
     recordingDays: 5,
   };
 
   it("schätzt die Restdauer aus der tatsächlichen Sammelrate", () => {
-    // 1500 Merkmale in 5 Tagen = 300/Tag → 1500 fehlende ≈ 5 Tage
+    // 1500 verschiedene Kandidaten in 5 Tagen = 300/Tag → 1500 fehlende ≈ 5 Tage
     const text = formatTrackStatus(base, 3000);
-    expect(text).toContain("300/Tag");
+    expect(text).toContain("300 neue Kandidaten/Tag");
     expect(text).toContain("Noch ca. 5 Tage");
   });
 
   it("meldet das Erreichen der Zielmenge", () => {
-    expect(formatTrackStatus({ ...base, features: 3500 }, 3000)).toContain("Zielmenge");
+    expect(formatTrackStatus({ ...base, distinctCandidates: 3500 }, 3000)).toContain("Zielmenge");
   });
 
   it("hält sich bei zu kurzer Laufzeit mit Schätzungen zurück", () => {
@@ -148,8 +152,38 @@ describe("formatTrackStatus", () => {
   });
 
   it("meldet Stillstand, wenn nichts mehr dazukommt", () => {
-    const text = formatTrackStatus({ ...base, features: 0 }, 3000);
+    const text = formatTrackStatus(
+      { ...base, features: 0, distinctCandidates: 0, distinctPools: 0 },
+      3000,
+    );
     expect(text).toContain("läuft der Scan");
+  });
+
+  it("zählt Wiederholungen nicht als eigene Beobachtungen", () => {
+    // Der reale Fall: 34 Pools, stündlich neu erfasst. Wer Zeilen zählt, sieht
+    // scheinbaren Fortschritt, obwohl die Breite des Datensatzes stillsteht.
+    const text = formatTrackStatus(
+      { ...base, features: 1298, distinctCandidates: 102, distinctPools: 34, recordingDays: 0.5 },
+      3000,
+    );
+    expect(text).toContain("102 verschiedene Kandidaten");
+    expect(text).toContain("34 Pools");
+    // Die Zeilenzahl bleibt sichtbar, aber als Wiederholung ausgewiesen.
+    expect(text).toContain("1298 Merkmalszeilen");
+    expect(text).toContain("12.7× erfasst");
+  });
+
+  it("warnt, wenn die Suche zu wenige verschiedene Pools sieht", () => {
+    const narrow = formatTrackStatus(
+      { ...base, distinctCandidates: 100, distinctPools: 34, recordingDays: 5 },
+      3000,
+    );
+    // 20 neue Kandidaten/Tag: längeres Warten verlängert nur die Zeitreihen.
+    expect(narrow).toContain("zu wenige");
+    expect(narrow).toContain("TOP=");
+
+    // Bei ausreichender Breite bleibt die Anzeige ruhig.
+    expect(formatTrackStatus(base, 3000)).not.toContain("zu wenige");
   });
 });
 

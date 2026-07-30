@@ -69,6 +69,7 @@ export {
   aggregateMarket,
   tokenSideOf,
   poolPriceInSol,
+  solPriceUsdOf,
   priceDivergencePct,
 } from "./screening/aggregate";
 export { runHardFilters } from "./screening/filters";
