@@ -34,6 +34,10 @@ export interface TrackStore {
     trackedTotal: number;
     points: number;
     features: number;
+    /** Verschiedene Pool×Preset-Kombinationen — die Einheit aus KONZEPT-ML 3.1. */
+    distinctCandidates: number;
+    /** Verschiedene Pools, unabhängig vom Preset. */
+    distinctPools: number;
     outcomes: number;
     firstCaptureAt: Date | null;
     recordingDays: number;
@@ -124,15 +128,29 @@ export async function runTrackCycle(
  */
 export function formatTrackStatus(
   stats: Awaited<ReturnType<TrackStore["stats"]>>,
-  targetFeatures = 3000,
+  targetCandidates = 3000,
 ): string {
   const lines: string[] = [];
   const days = stats.recordingDays;
+  // Maßgeblich sind **verschiedene** Pool×Preset-Kombinationen, nicht Zeilen:
+  // Derselbe Pool wird bei jedem Scan erneut erfasst. Die Zeilen sind nicht
+  // wertlos (Merkmale und Horizonte unterscheiden sich), aber sie sind stark
+  // korreliert — als unabhängige Beobachtungen zählen sie nicht.
+  const distinct = stats.distinctCandidates;
 
   lines.push(
-    `Aufzeichnung: ${stats.features} Kandidaten-Merkmale, ${stats.points} Messpunkte, ` +
+    `Aufzeichnung: ${distinct} verschiedene Kandidaten (Pool×Preset) ` +
+      `aus ${stats.distinctPools} Pools, ${stats.points} Messpunkte, ` +
       `${stats.outcomes} Ergebnis-Labels`,
   );
+  if (stats.features > distinct) {
+    const perCandidate = stats.features / Math.max(1, distinct);
+    lines.push(
+      `  ${stats.features} Merkmalszeilen insgesamt — jeder Kandidat im Schnitt ` +
+        `${perCandidate.toFixed(1)}× erfasst (Wiederholungen zählen nicht als` +
+        ` eigene Beobachtung).`,
+    );
+  }
   lines.push(
     `Verfolgte Pools: ${stats.trackedActive} aktiv (${stats.trackedTotal} insgesamt)`,
   );
@@ -142,18 +160,27 @@ export function formatTrackStatus(
     return lines.join("\n");
   }
 
-  lines.push(`Läuft seit ${days.toFixed(1)} Tagen (${(stats.features / days).toFixed(0)}/Tag)`);
+  const perDay = distinct / days;
+  lines.push(`Läuft seit ${days.toFixed(1)} Tagen (${perDay.toFixed(0)} neue Kandidaten/Tag)`);
 
-  if (stats.features >= targetFeatures) {
-    lines.push(`✓ Zielmenge von ${targetFeatures} Merkmalen erreicht.`);
+  if (distinct >= targetCandidates) {
+    lines.push(`✓ Zielmenge von ${targetCandidates} verschiedenen Kandidaten erreicht.`);
   } else {
-    const perDay = stats.features / days;
-    const remainingDays = perDay > 0 ? (targetFeatures - stats.features) / perDay : Infinity;
+    const remainingDays = perDay > 0 ? (targetCandidates - distinct) / perDay : Infinity;
     lines.push(
       Number.isFinite(remainingDays)
-        ? `Noch ca. ${Math.ceil(remainingDays)} Tage bis ${targetFeatures} Merkmale.`
-        : "Es kommen derzeit keine neuen Merkmale dazu — läuft der Scan?",
+        ? `Noch ca. ${Math.ceil(remainingDays)} Tage bis ${targetCandidates} verschiedene Kandidaten.`
+        : "Es kommen derzeit keine neuen Kandidaten dazu — läuft der Scan?",
     );
+    // Ein Datensatz wächst nur durch neue Pools. Bleibt die Breite klein,
+    // verlängert längeres Warten die Zeitreihen, nicht die Beobachtungszahl.
+    if (perDay > 0 && perDay < 50) {
+      lines.push(
+        `⚠ Nur ${perDay.toFixed(0)} neue Kandidaten pro Tag — die Suche sieht zu wenige`,
+        "  verschiedene Pools. Mehr Breite über TOP=… bei `pnpm aufzeichnen`",
+        "  (Default 40) oder `track -- --top 40`.",
+      );
+    }
   }
 
   // Lücken sind das größte Qualitätsrisiko: ein schlafender Rechner erzeugt

@@ -268,6 +268,16 @@ async function main(): Promise<void> {
 
     const stats = await track.stats();
     assert(stats.features >= 1 && stats.outcomes >= 3, "Statistik zählt Merkmale und Labels");
+    // Die Rohabfrage COUNT(DISTINCT (a,b)) ist die einzige Stelle mit
+    // handgeschriebenem SQL — sie wird hier gegen echtes Postgres geprüft.
+    assert(
+      stats.distinctCandidates >= 1 && stats.distinctCandidates <= stats.features,
+      `Verschiedene Kandidaten gezählt (${stats.distinctCandidates} von ${stats.features} Zeilen)`,
+    );
+    assert(
+      stats.distinctPools >= 1 && stats.distinctPools <= stats.distinctCandidates,
+      `Verschiedene Pools gezählt (${stats.distinctPools})`,
+    );
 
     console.log("\nDB-Roundtrip OK ✔");
   } finally {

@@ -19,6 +19,30 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 INTERVAL_MIN="${INTERVAL_MIN:-5}"
+
+# Wie viele Kandidaten je Preset ein Scan tief prüft — und damit, wie viele
+# **verschiedene** Pools in die Aufzeichnung kommen.
+#
+# Das ist der Engpass des Datensatzes, nicht die Laufzeit: Ein Scan mit TOP=12
+# verfolgt dauerhaft dieselben rund 30 Pools und schreibt sie nur immer wieder
+# neu. Für die Auswahl-Modellierung (KONZEPT-ML.md 3.1) zählen aber verschiedene
+# Pools, nicht Zeilen — 1.000 Messungen an 30 Pools sind keine 1.000
+# Beobachtungen.
+#
+# Kosten: Je Kandidat fällt einmal ein Satz Per-Token-Abrufe an (RugCheck,
+# Jupiter, DexScreener), sequenziell wegen der Rate-Limits. TOP=40 bedeutet
+# also einen längeren Scan, aber nur alle SCAN_EVERY Zyklen.
+TOP="${TOP:-40}"
+
+# Nach wie vielen Zyklen erneut nach neuen Pools gesucht wird.
+#
+# Während ein Scan läuft, werden keine Messpunkte geschrieben — ein breiterer
+# Scan verzögert also das Raster. Mit TOP=40 dauert er einige Minuten, deshalb
+# seltener als früher: bei INTERVAL_MIN=5 ergibt SCAN_EVERY=6 einen Scan pro
+# halber Stunde. Neue Pools gehen dadurch nicht verloren; sie werden nur etwas
+# später entdeckt, und die Zeitreihen der bekannten bleiben dicht.
+SCAN_EVERY="${SCAN_EVERY:-6}"
+
 LOG_DIR="logs"
 LOG_FILE="$LOG_DIR/track.log"
 RESTART_DELAY=30
@@ -78,7 +102,8 @@ ensure_database() {
   return 1
 }
 
-log "Start. Intervall ${INTERVAL_MIN} min, Protokoll: $LOG_FILE"
+log "Start. Intervall ${INTERVAL_MIN} min, ${TOP} Kandidaten je Preset, Suche alle ${SCAN_EVERY} Zyklen."
+log "Protokoll: $LOG_FILE"
 log "Beenden mit Strg+C."
 
 ATTEMPT=0
@@ -94,7 +119,8 @@ while true; do
     continue
   fi
 
-  pnpm --filter @lping/bot track -- --interval "$INTERVAL_MIN" 2>&1 | tee -a "$LOG_FILE"
+  pnpm --filter @lping/bot track -- \
+    --interval "$INTERVAL_MIN" --top "$TOP" --scan-every "$SCAN_EVERY" 2>&1 | tee -a "$LOG_FILE"
 
   # Hierhin kommt die Schleife nur, wenn der Prozess beendet wurde.
   log "Aufzeichnung gestoppt — neuer Versuch in ${RESTART_DELAY}s."

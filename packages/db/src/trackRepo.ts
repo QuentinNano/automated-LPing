@@ -301,21 +301,34 @@ export class TrackRepo {
     trackedTotal: number;
     points: number;
     features: number;
+    /** Verschiedene Pool×Preset-Kombinationen — die Einheit aus KONZEPT-ML 3.1. */
+    distinctCandidates: number;
+    /** Verschiedene Pools, unabhängig vom Preset. */
+    distinctPools: number;
     outcomes: number;
     firstCaptureAt: Date | null;
     recordingDays: number;
   }> {
-    const [trackedActive, trackedTotal, points, features, outcomes, first] = await Promise.all([
-      this.prisma.trackedPool.count({ where: { active: true } }),
-      this.prisma.trackedPool.count(),
-      this.prisma.poolSnapshot.count(),
-      this.prisma.candidateFeature.count(),
-      this.prisma.candidateOutcome.count(),
-      this.prisma.candidateFeature.findFirst({
-        orderBy: { capturedAt: "asc" },
-        select: { capturedAt: true },
-      }),
-    ]);
+    const [trackedActive, trackedTotal, points, features, outcomes, first, distinct] =
+      await Promise.all([
+        this.prisma.trackedPool.count({ where: { active: true } }),
+        this.prisma.trackedPool.count(),
+        this.prisma.poolSnapshot.count(),
+        this.prisma.candidateFeature.count(),
+        this.prisma.candidateOutcome.count(),
+        this.prisma.candidateFeature.findFirst({
+          orderBy: { capturedAt: "asc" },
+          select: { capturedAt: true },
+        }),
+        // COUNT(DISTINCT …) statt groupBy: Bei Millionen Zeilen soll die
+        // Zählung in der Datenbank bleiben, nicht als Zeilenmenge herüberkommen.
+        this.prisma.$queryRaw<{ candidates: bigint; pools: bigint }[]>`
+          SELECT
+            COUNT(DISTINCT (pool_address, preset)) AS candidates,
+            COUNT(DISTINCT pool_address)           AS pools
+          FROM candidate_features
+        `,
+      ]);
 
     const firstCaptureAt = first?.capturedAt ?? null;
     return {
@@ -323,6 +336,8 @@ export class TrackRepo {
       trackedTotal,
       points,
       features,
+      distinctCandidates: Number(distinct[0]?.candidates ?? 0),
+      distinctPools: Number(distinct[0]?.pools ?? 0),
       outcomes,
       firstCaptureAt,
       recordingDays:

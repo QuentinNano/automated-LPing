@@ -143,12 +143,18 @@ pnpm --filter @lping/bot paper -- --tick-only        # nur bestehende Positionen
 # selbst neu, hält den Mac wach, protokolliert nach logs/track.log:
 pnpm aufzeichnen
 
+# Breite statt Tiefe: Für die Auswahl-Modellierung zählen **verschiedene** Pools,
+# nicht wiederholte Messungen derselben. TOP steuert, wie viele Kandidaten je
+# Preset tief geprüft (und damit verfolgt) werden — Default 40.
+TOP=60 SCAN_EVERY=8 pnpm aufzeichnen
+
 # Prüfen, ob die Aufzeichnung wie erwartet arbeitet (Urteil je Aspekt):
 pnpm pruefen
 
 # Einzelne Durchgänge / Statusabfrage:
 pnpm --filter @lping/bot track                       # ein Durchgang
 pnpm --filter @lping/bot track -- --status           # Fortschritt
+pnpm --filter @lping/bot track -- --top 60           # mehr verschiedene Pools verfolgen
 pnpm --filter @lping/bot track -- --scan-every 8     # seltener nach neuen Pools suchen
 pnpm --filter @lping/bot track -- --no-scan          # nur verfolgen, nichts Neues suchen
 
