@@ -8,6 +8,7 @@ import {
   buildFeatureVector,
   effectiveFeePct,
   parseBotConfig,
+  replayPosition,
   type PoolCandle,
   type PoolMetrics,
   type ScreeningResult,
@@ -200,14 +201,18 @@ async function main(): Promise<void> {
     // Gebührenstruktur und Zeitfenster müssen den Weg durch Postgres überleben:
     // sie sind die Grundlage des Replays (KONZEPT-ML.md 5).
     const points = await track.loadTrack(TEST_POOL, decisionAt);
-    // Gezählt werden die Messpunkte der Aufzeichnung, nicht alle Zeilen: Der
-    // Scan schreibt in dieselbe Tabelle, aber ohne Gebührenstruktur, SOL-Kurs
-    // und Zeitfenster. Beide Schreiber zu haben ist ein bekannter Mangel — die
-    // Zusicherung darf davon nur nicht abhängen.
-    const recorded = points.filter((p) => p.dynamicFeePct !== null);
+    // Zwei Schreiber (Scan und Aufzeichnung), aber nur **eine** Sorte Zeilen:
+    // Seit beide dieselbe Abbildung benutzen, ist jeder Messpunkt vollständig.
+    // Vorher schrieb der Scan eine abgespeckte Variante ohne Gebührenstruktur
+    // und SOL-Kurs — im Replay sah sie aus wie ein vollwertiger Messpunkt,
+    // konnte aber keinen Gebührenanteil liefern.
     assert(
-      recorded.length === 5,
-      `Zeitreihe über loadTrack gelesen (${recorded.length} Messpunkte von ${points.length} Zeilen)`,
+      points.length === 7,
+      `Zeitreihe über loadTrack gelesen (5 Messpunkte + 2 aus dem Scan = ${points.length})`,
+    );
+    assert(
+      points.every((p) => p.dynamicFeePct !== null && p.solPriceUsd !== null),
+      "Jeder Messpunkt ist vollständig, unabhängig davon, wer ihn geschrieben hat",
     );
     const firstPoint = points[0];
     assert(
@@ -470,6 +475,50 @@ async function checkHistory(
   assert(
     stats.candles >= 3 && stats.pools >= 1,
     `Bestand der Historie ausgewiesen (${stats.candles} Kerzen, ${stats.pools} Pools)`,
+  );
+
+  // --- Zusammengeführter Lesepfad ------------------------------------------
+  // Replay und Label-Berechnung müssen dieselbe Zeitreihe sehen. Kerzen bilden
+  // das Raster; ein Messpunkt kommt nur dazu, wo keine Kerze in der Nähe liegt.
+  const merged = await track.loadSeries(TEST_POOL, decisionAt, new Date());
+  const fromCandles = merged.filter((p) => p.low !== null && p.low !== undefined);
+  const fromSnapshots = merged.filter((p) => p.low === null || p.low === undefined);
+  assert(
+    fromCandles.length === 3,
+    `Kerzen bilden das Raster (${fromCandles.length} von ${merged.length} Punkten)`,
+  );
+  assert(
+    fromSnapshots.length > 0,
+    `Messpunkte außerhalb des Kerzen-Zeitraums bleiben erhalten (${fromSnapshots.length})`,
+  );
+  const sorted = merged.every(
+    (p, i) => i === 0 || p.ts.getTime() >= merged[i - 1]!.ts.getTime(),
+  );
+  assert(sorted, "Zusammengeführte Reihe ist zeitlich sortiert");
+
+  // --- Replay über echte Datenbankinhalte ----------------------------------
+  const replayPools = await track.replayPools([TEST_POOL]);
+  const replayPool = replayPools[0];
+  assert(
+    replayPool !== undefined && replayPool.binStep === 100,
+    `Pool-Stammdaten für den Replay gelesen (${replayPool?.mintY?.slice(0, 6)}…, binStep ${replayPool?.binStep})`,
+  );
+
+  const config = parseBotConfig(loadDefaults());
+  const position = replayPosition(merged, replayPool!, {
+    preset: config.presets["balanced"]!,
+    global: config.global,
+  });
+  assert(position !== null, "Position aus aufgezeichneten Daten abgespielt");
+  assert(
+    position!.state.costsSol > 0,
+    `Replay bucht Kosten wie das Paper-Trading (${position!.state.costsSol.toFixed(6)} SOL)`,
+  );
+  // Der Preis fällt im Testverlauf um 20 % — die Position darf das nicht
+  // ignorieren, sonst rechnet der Replay an den Daten vorbei.
+  assert(
+    position!.valuation.pnlPct !== 0,
+    `Preisbewegung wirkt sich aus (PnL ${position!.valuation.pnlPct.toFixed(2)} %)`,
   );
 }
 

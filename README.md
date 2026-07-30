@@ -7,19 +7,20 @@ Parametersteuerung und Analyse-Dashboard.
 
 ➡️ **[KONZEPT.md](./KONZEPT.md)** — vollständiges Umsetzungs- und Risikokonzept.
 ➡️ **[KONZEPT-ML.md](./KONZEPT-ML.md)** — datengetriebene Optimierung von Parametern
-und Indikatoren. Die Datenaufzeichnung (M1) **läuft**; Replay und Optimierer stehen aus.
+und Indikatoren. Aufzeichnung (M1) und Replay (M2) **laufen**; der Optimierer steht aus.
 
 ## Projektstruktur (Monorepo, pnpm)
 
 ```
 apps/
-  bot/            # CLI: validate, health, scan, paper, track
+  bot/            # CLI: validate, health, scan, paper, track, backfill, replay
                   # (später: Execution-Loop)
   web/            # Next.js-UI: Preset-Vergleich, Positionen, Scanner, Parameter
 packages/
   core/           # Pure Domänenlogik: Config-Schemas + versionierter ConfigService,
                   # Screening/Scoring, Paper-Trading-Engine (Bin-Modell, Fees,
-                  # PnL, HODL-Benchmark), Positions-Lebenszyklus, ML-Merkmale/Labels
+                  # PnL, HODL-Benchmark), Positions-Lebenszyklus, ML-Merkmale/Labels,
+                  # Replay-Engine
   adapters/       # Meteora-API, DexScreener, RugCheck, Jupiter (+ Fabriq-Spike),
                   # HTTP-Infra: Retry/Backoff, Rate-Limiting, zod-Validierung
   db/             # Prisma-Schema (12 Tabellen: 8 aus KONZEPT.md 10.2, drei für die
@@ -192,6 +193,13 @@ pnpm --filter @lping/bot track -- --no-scan          # nur verfolgen, nichts Neu
 pnpm --filter @lping/bot track -- --backfill-every 6 # häufiger nachladen
 pnpm --filter @lping/bot track -- --no-backfill      # ohne Nachladen
 
+# Replay: aufgezeichnete Verläufe durch dieselbe Engine wie das Paper-Trading.
+# Eröffnet Positionen an beliebigen Zeitpunkten — daher weit mehr Beobachtungen
+# als der Paper-Betrieb, ohne dafür Kalenderzeit zu brauchen.
+pnpm abspielen
+pnpm abspielen -- --days 14 --every 30      # längerer Zeitraum, engere Einstiege
+pnpm abspielen -- --pool <Pool-Adresse>     # ein einzelner Pool
+
 # Datensicherung (Merkmale und TVL-Verlauf sind nicht wiederbeschaffbar):
 pnpm sichern                                    # Sicherung anlegen
 bash scripts/backup.sh liste                    # vorhandene anzeigen
@@ -203,6 +211,45 @@ pnpm --filter @lping/web dev
 # Fabriq-Endpoint prüfen (optional, URL aus den Browser-Entwicklertools, siehe SPIKE.md):
 pnpm --filter @lping/bot fabriq:check "https://…"
 ```
+
+### Aufzeichnung neu beginnen
+
+Manchmal will man von vorn anfangen — etwa nachdem sich die Aufzeichnung
+geändert hat. Die entscheidende Frage vorher: **Welcher Teil ist ersetzbar?**
+
+| Tabelle | Ersetzbar? | Empfehlung |
+|---|---|---|
+| `candidate_outcomes` | **ja**, wird aus der Zeitreihe neu berechnet | löschen, wenn sich die Label-Berechnung geändert hat |
+| `pool_history_candles` | **ja**, jederzeit über `pnpm nachladen` | löschen unkritisch |
+| `pool_snapshots` | **nein** — TVL und SOL-Kurs gibt es nur als Momentaufnahme | behalten |
+| `candidate_features` | **nein** — Stand von RugCheck/Jupiter/DexScreener zum Entscheidungszeitpunkt | behalten |
+
+Daraus folgt die Regel: **Das Ersetzbare löschen, das Unersetzliche behalten.**
+Alles wegzuwerfen, um Ableitungen loszuwerden, tauscht das Wertvolle gegen das
+Wiederbeschaffbare — und der Datensatz wächst nur mit der Kalenderzeit nach.
+
+Der übliche Fall, nach einer Änderung an der Label-Berechnung:
+
+```bash
+pnpm sichern                       # immer zuerst
+psql "$DATABASE_URL" -c "DELETE FROM candidate_outcomes;"
+pnpm nachladen                     # Historie holen (macht die Labels genauer)
+pnpm --filter @lping/bot track     # ein Durchgang rechnet die Labels neu
+```
+
+Wirklich alles verwerfen (bewusst ohne Skript — das soll man einmal von Hand
+tippen):
+
+```bash
+pnpm sichern
+psql "$DATABASE_URL" -c "TRUNCATE candidate_outcomes, candidate_features,
+  pool_history_candles, pool_snapshots, tracked_pools, pool_candidates
+  RESTART IDENTITY CASCADE;"
+```
+
+Positionen und Konfigurations-Historie bleiben dabei unberührt. Wer auch die
+Paper-Ergebnisse zurücksetzen will, nimmt zusätzlich `positions`,
+`position_events`, `transactions` und `fee_claims` dazu.
 
 ### Was `pnpm pruefen` beurteilt
 
@@ -247,6 +294,9 @@ und `paperTrading` steht auf `true`.
    `track`-Kommando, Merkmale je Kandidat, Verlaufsaufzeichnung, Ergebnis-Labels,
    Prüfbericht, Sammelabruf der Messpunkte und rückwirkendes Nachladen der
    Historie (`backfill`).
+6. ✅ Replay-Engine (KONZEPT-ML.md M2): aufgezeichnete Verläufe durch **dieselbe**
+   Paper-Engine, Einstiege an beliebigen Zeitpunkten, deterministisch,
+   Gleichheitstest gegen den Live-Pfad (`replay`).
 
 **Aktueller Arbeitsschwerpunkt** ist die Aufzeichnung, nicht die Execution
 Engine: Sie ist die einzige Komponente, deren Wert von verstrichener Zeit
@@ -254,12 +304,12 @@ abhängt, und sie läuft parallel zum Paper-Vergleich (`pnpm aufzeichnen`).
 
 **Als Nächstes**, in dieser Reihenfolge:
 
-1. **Replay-Engine** (KONZEPT-ML.md M2) — die vorhandenen Lesepfade
-   (`loadTrack()`, `loadHistory()`) als `MarketTick`s durch dieselbe Paper-Engine
-   schicken, Einstiege an beliebigen Zeitpunkten, High/Low für Zeit-in-Range.
-   Voraussetzung für alles Weitere der Optimierung — und nicht mehr an Wartezeit
-   gebunden, weil die Verläufe nachladbar sind.
-2. **Sensitivitätsanalyse** (M3) — welche Parameter überhaupt etwas bewirken.
+1. **Sensitivitätsanalyse** (KONZEPT-ML.md M3) — welche Parameter überhaupt
+   etwas bewirken, und wie stark ein Ergebnis an den Modellannahmen hängt statt
+   an den Daten. Baut auf dem Replay auf und ist der wirksamste Einzelschritt
+   gegen Überanpassung.
+2. **Parametersuche und Validierung** (M4, M5) — Zufallssuche, Verfeinerung,
+   rollierendes Vorwärts-Testen mit Sperrzonen.
 3. **Execution Engine** (KONZEPT.md Schritt 5) — Transaktionsbau, Simulation vor
    dem Senden, Reconciliation nach Neustart, RPC-Failover, Telegram-Alerts.
    Frühestens, wenn Phase 1 ihre Go-Kriterien erfüllt (KONZEPT.md 13).

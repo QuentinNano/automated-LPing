@@ -265,20 +265,37 @@ Eine Woche Aufzeichnung lässt sich in Minuten zehntausendfach durchspielen. Das
 ist der Unterschied zu „50 Presets live parallel laufen lassen": Letzteres
 bräuchte dieselbe Kalenderzeit **und** lieferte je Preset weniger Beobachtungen.
 
-Die Replay-Engine ist überwiegend vorhanden — sie braucht:
+**Umsetzungsstand:** Die Replay-Engine steht (`replayPosition`, `replayEntries`,
+`summarizeReplay`; Kommando `pnpm abspielen`). Sie besitzt **keine eigene
+Positionslogik** — sie ruft `openPaperPosition`, `tickPaperPosition` und
+`closePaperPosition`, also genau die Funktionen des Paper-Betriebs.
 
-- einen Tick-Reader aus der Datenbank statt Live-Abrufen. Vorhanden sind beide
-  Hälften: `loadTrack()` liest die Messpunkte, `loadHistory()` die nachgeladenen
-  Kerzen samt fortgetragenem TVL.
-- die Fähigkeit, Einstiege an beliebigen Zeitpunkten zu simulieren (nicht nur
-  dort, wo real eröffnet wurde),
-- deterministische Ausführung (feste Zufallssaat, keine Wanduhr),
-- Nutzung von `high`/`low` je Kerze für Zeit-in-Range und Gebühren-Akkrual
-  (Begründung unten).
+| Anforderung | Stand |
+|---|---|
+| Tick-Reader aus der Datenbank | ✅ `loadSeries()` — ein Pfad für Replay **und** Label-Berechnung |
+| Einstiege an beliebigen Zeitpunkten | ✅ `replayEntries` mit einstellbarem Abstand |
+| Determinismus | ✅ keine Wanduhr, kein Zufall; durch Tests festgehalten |
+| Gleichheit Replay ↔ Live | ✅ beide Wege bauen ihren Tick in derselben Datei, ein Test hält sie aneinander |
+| `high`/`low` für Zeit-in-Range | offen (Abschnitt 5.2) — bei den Labels bereits genutzt |
 
 **Nicht verhandelbar:** Replay und Live-Betrieb müssen denselben Codepfad nutzen.
 Sobald es zwei Implementierungen gibt, optimiert man gegen die eine und handelt
-mit der anderen.
+mit der anderen. Der Gleichheitstest ist die Absicherung dagegen: Er vergleicht
+den Tick aus frischen Pool-Metriken mit dem aus einer aufgezeichneten
+Beobachtung desselben Pools. Ohne ihn liefen beide Seiten für sich plausibel
+auseinander, und niemand würde es merken.
+
+### 5.0 Zensierte Positionen zählen anders
+
+Ein Replay-Lauf endet dort, wo die Daten enden — mitten in offenen Positionen.
+Diese Beobachtungen sind **rechtszensiert**: Wie sie ausgegangen wären, ist
+unbekannt.
+
+Sie einfach mitzuzählen wäre ein Fehler mit Richtung: Jede Strategie, die ihre
+Verlierer lange hält, sähe dadurch besser aus, weil ihre schlechten Positionen
+überproportional oft im offenen Zustand enden. Deshalb fließen zensierte
+Positionen in Ertrag und Kosten ein (sie haben stattgefunden), aber **nicht** in
+Trefferquote und Ausstiegsgründe. Der Bericht weist ihre Zahl aus.
 
 ### 5.1 Woraus ein Tick besteht — und was fehlt
 
@@ -575,8 +592,8 @@ nicht über den Markt.
 | **M1d — Simulator repariert** ✅ | Aktiv-Bin-Gebührenmodell statt TVL-Anteil, Protokollanteil, Gesamtgebühr statt Basisgebühr, Composition Fee, Rebalancing als ein Ablauf, Wartezustand einseitiger Positionen | umgesetzt | — |
 | **M1e — Label-Nachberechnung** ✅ | Auswahl nur noch über offene Horizonte statt „älteste zuerst"; Rückstand als Kennzahl im Prüfbericht | umgesetzt | — |
 | **M1f — Durchsatz und Nachladen** ✅ | Sammelabruf der Messpunkte (`filter_by=pool_address=[…]`, ~50 statt 2.000 Anfragen je Runde); `pool_history_candles` samt `backfill`-Kommando; `loadHistory()` als Lesepfad; `low` in der Drawdown-Messung | umgesetzt | — |
-| **M2 — Replay** | Tick-Reader auf `loadTrack()`/`loadHistory()`, Einstiege an beliebigen Zeitpunkten, Determinismus, `high`/`low` für Zeit-in-Range (Abschnitt 5.2), Gleichheitstest Replay ↔ Live | mittel | **sofort startbar** — die Verläufe sind nachladbar |
-| **M3 — Sensitivität** | Einzelparameter-Analyse **inklusive der Modellannahmen** (Abschnitt 6.1), Auswahl der 5–10 relevanten, Bericht | gering | nach M2 |
+| **M2 — Replay** ✅ | `loadSeries()` als **ein** Lesepfad für Replay und Labels; `replayPosition`/`replayEntries` über dieselbe Paper-Engine; Einstiege an beliebigen Zeitpunkten; Determinismus geprüft; Gleichheitstest Replay ↔ Live; `replay`-Kommando mit Preset-Vergleich. Offen: `high`/`low` für Zeit-in-Range (Abschnitt 5.2) | umgesetzt | — |
+| **M3 — Sensitivität** | Einzelparameter-Analyse **inklusive der Modellannahmen** (Abschnitt 6.1), Auswahl der 5–10 relevanten, Bericht | gering | **nächster Schritt** |
 | **M4 — Suche** | Zufallssuche + Verfeinerung, Zielfunktion, Plateau-Bewertung | mittel | nach M3 |
 | **M5 — Validierung** | Vorwärts-Testen, Sperrzonen, Mehrfachtestkorrektur, Zufallsvergleich | mittel | mit M4 |
 | **M6 — Auswahl & UI** | Pareto-Front, Diversitätsfilter, Strategie-Labor-Seite, Preset-Export | mittel | nach M5 |

@@ -113,6 +113,35 @@ function snapshotWindows(pool: PoolMetrics): Prisma.InputJsonValue | undefined {
     : undefined;
 }
 
+/**
+ * Ein Messpunkt als Datenbankzeile.
+ *
+ * Öffentlich, weil zwei Stellen Messpunkte schreiben: die Aufzeichnung und der
+ * Scan. Früher schrieb der Scan eine abgespeckte Variante ohne Gebührenstruktur,
+ * SOL-Kurs und Zeitfenster — was in derselben Tabelle zwei Sorten Zeilen ergab,
+ * die sich nur beim Lesen unterschieden. Für den Replay ist das gefährlich: Eine
+ * Zeile ohne SOL-Kurs liefert keinen Gebührenanteil, sieht aber aus wie ein
+ * vollwertiger Messpunkt. Es gibt deshalb genau eine Stelle, die festlegt, was
+ * ein Messpunkt enthält.
+ */
+export function snapshotDataOf(pool: PoolMetrics, ts?: Date) {
+  return {
+    poolAddress: pool.poolAddress,
+    ...(ts !== undefined ? { ts } : {}),
+    tvlUsd: pool.tvlUsd ?? null,
+    volume24hUsd: pool.volume24hUsd ?? null,
+    fees24hUsd: pool.fees24hUsd ?? null,
+    feeTvl24hPct: pool.feeTvl24hPct ?? null,
+    priceNative: pool.priceNative ?? null,
+    binStep: pool.binStep,
+    dynamicFeePct: pool.dynamicFeePct ?? null,
+    baseFeePct: pool.baseFeePct ?? null,
+    protocolFeePct: pool.protocolFeePct ?? null,
+    solPriceUsd: solPriceUsdOf(pool),
+    windows: snapshotWindows(pool),
+  };
+}
+
 /** Millisekunden bis zur Fälligkeit; <= 0 bedeutet "jetzt fällig". */
 function dueInMs(
   row: { firstSeenAt: Date; lastTrackedAt: Date | null },
@@ -275,21 +304,7 @@ export class TrackRepo {
 
     await this.prisma.$transaction([
       this.prisma.poolSnapshot.createMany({
-        data: writable.map((pool) => ({
-          poolAddress: pool.poolAddress,
-          ts: now,
-          tvlUsd: pool.tvlUsd ?? null,
-          volume24hUsd: pool.volume24hUsd ?? null,
-          fees24hUsd: pool.fees24hUsd ?? null,
-          feeTvl24hPct: pool.feeTvl24hPct ?? null,
-          priceNative: pool.priceNative ?? null,
-          binStep: pool.binStep,
-          dynamicFeePct: pool.dynamicFeePct ?? null,
-          baseFeePct: pool.baseFeePct ?? null,
-          protocolFeePct: pool.protocolFeePct ?? null,
-          solPriceUsd: solPriceUsdOf(pool),
-          windows: snapshotWindows(pool),
-        })),
+        data: writable.map((pool) => snapshotDataOf(pool, now)),
       }),
       ...writable.map((pool) =>
         this.prisma.trackedPool.update({
@@ -403,7 +418,11 @@ export class TrackRepo {
       // Über den längsten Horizont hinaus sieht kein Label — den Rest des
       // Verlaufs zu laden kostet nur Speicher und wächst mit der Laufzeit.
       const until = new Date(feature.capturedAt.getTime() + MAX_HORIZON_HOURS * 3_600_000);
-      const points = await this.loadTrack(feature.poolAddress, feature.capturedAt, until);
+      // Derselbe Lesepfad wie der Replay: Labels und Optimierung müssen
+      // dieselbe Zeitreihe sehen. Nebeneffekt, der die Labels ehrlicher macht:
+      // Wo Kerzen vorliegen, misst `maxDrawdownPct` den Einbruch über `low`,
+      // statt ihn zwischen zwei Stichproben zu verpassen.
+      const points = await this.loadSeries(feature.poolAddress, feature.capturedAt, until);
 
       for (const label of computeOutcomes(feature.capturedAt, points)) {
         if (done.has(label.horizonHours)) continue;
@@ -583,6 +602,55 @@ export class TrackRepo {
   }
 
   /**
+   * Zeitreihe eines Pools aus **beiden** Quellen — der Lesepfad für Replay und
+   * Label-Berechnung.
+   *
+   * Es gibt genau einen solchen Pfad, und das ist Absicht (KONZEPT-ML.md 5):
+   * Sobald Optimierung und Auswertung verschiedene Zeitreihen sehen, optimiert
+   * man gegen die eine und bewertet mit der anderen.
+   *
+   * Regel: **Kerzen bilden das Raster, wo es sie gibt.** Sie sind feiner
+   * aufgelöst und tragen High/Low; die Messpunkte steuern den TVL bei (siehe
+   * `loadHistory`). Ein Messpunkt kommt nur dann als eigener Punkt dazu, wenn in
+   * seiner Nähe keine Kerze liegt — sonst stünden zwei Beobachtungen desselben
+   * Moments in der Reihe, und die Simulation zählte das Intervall doppelt.
+   */
+  async loadSeries(
+    poolAddress: string,
+    since: Date,
+    until: Date,
+    options: { timeframe?: HistoryTimeframe } = {},
+  ): Promise<TrackPoint[]> {
+    const timeframe = options.timeframe ?? DEFAULT_HISTORY_TIMEFRAME;
+    const [candles, snapshots] = await Promise.all([
+      this.loadHistory(poolAddress, since, until, { timeframe }),
+      this.loadTrack(poolAddress, since, until),
+    ]);
+
+    if (candles.length === 0) return snapshots;
+    if (snapshots.length === 0) return candles;
+
+    const stepMs = TIMEFRAME_MINUTES[timeframe] * 60_000;
+    const merged = [...candles];
+
+    // Beide Listen sind aufsteigend sortiert, ein Durchlauf genügt.
+    let index = 0;
+    for (const point of snapshots) {
+      const ts = point.ts.getTime();
+      while (index + 1 < candles.length && candles[index + 1]!.ts.getTime() <= ts) index++;
+      const before = Math.abs(ts - candles[index]!.ts.getTime());
+      const after =
+        index + 1 < candles.length
+          ? Math.abs(candles[index + 1]!.ts.getTime() - ts)
+          : Number.POSITIVE_INFINITY;
+      if (Math.min(before, after) > stepMs) merged.push(point);
+    }
+
+    merged.sort((a, b) => a.ts.getTime() - b.ts.getTime());
+    return merged;
+  }
+
+  /**
    * Jüngste Kerze je Pool — der Startpunkt eines Nachlade-Laufs.
    *
    * Ohne diese Auskunft würde jeder Lauf den gesamten Zeitraum neu holen. Mit
@@ -603,6 +671,38 @@ export class TrackRepo {
       if (row._max.ts !== null) newest.set(row.poolAddress, row._max.ts);
     }
     return newest;
+  }
+
+  /**
+   * Stammdaten für den Replay: Mints und Bin Step je Pool.
+   *
+   * Die Zeitreihe allein reicht nicht. Sie enthält `price_native` genau so, wie
+   * die API sie liefert — den Preis von X in Y —, und ob das der Token in SOL
+   * oder SOL im Token ist, steht nur in den Mints. Ohne sie läge jede
+   * Bin-Zuordnung falsch herum.
+   *
+   * Quelle sind die gescreenten Kandidaten: Dort liegen die vollständigen
+   * Pool-Metriken des Entdeckungszeitpunkts. Ein verfolgter Pool ohne
+   * Kandidatenzeile lässt sich nicht abspielen und fehlt im Ergebnis.
+   */
+  async replayPools(
+    poolAddresses?: string[],
+  ): Promise<{ poolAddress: string; mintX: string; mintY: string; binStep: number }[]> {
+    const rows = await this.prisma.poolCandidate.findMany({
+      ...(poolAddresses !== undefined ? { where: { poolAddress: { in: poolAddresses } } } : {}),
+      orderBy: { discoveredAt: "desc" },
+      distinct: ["poolAddress"],
+      select: { poolAddress: true, rawMetrics: true },
+    });
+
+    return rows.flatMap((row) => {
+      const metrics = row.rawMetrics as { mintX?: unknown; mintY?: unknown; binStep?: unknown };
+      const { mintX, mintY, binStep } = metrics;
+      if (typeof mintX !== "string" || typeof mintY !== "string" || typeof binStep !== "number") {
+        return [];
+      }
+      return [{ poolAddress: row.poolAddress, mintX, mintY, binStep }];
+    });
   }
 
   /** Bestand der nachgeladenen Historie, für Bericht und Fortschritt. */

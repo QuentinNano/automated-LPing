@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import type { CandidateSource, PoolMetrics, PresetKind, ScreeningResult } from "@lping/core";
+import { snapshotDataOf } from "./trackRepo";
 
 /** Ergebnis einer Kandidaten-Persistierung. */
 export interface RecordedCandidate {
@@ -78,17 +79,11 @@ export class ScanRepo {
       created = true;
     }
 
-    await this.prisma.poolSnapshot.create({
-      data: {
-        poolAddress: input.poolAddress,
-        tvlUsd: input.pool.tvlUsd ?? null,
-        volume24hUsd: input.pool.volume24hUsd ?? null,
-        fees24hUsd: input.pool.fees24hUsd ?? null,
-        feeTvl24hPct: input.pool.feeTvl24hPct ?? null,
-        priceNative: input.pool.priceNative ?? null,
-        binStep: input.pool.binStep,
-      },
-    });
+    // Vollständig wie die Aufzeichnung, nicht abgespeckt: Die Zeile landet in
+    // derselben Tabelle und wird vom Replay genauso gelesen. Eine Zeile ohne
+    // SOL-Kurs oder Gebührenstruktur sieht dort aus wie ein Messpunkt, liefert
+    // aber keinen Gebührenanteil — der Fehler fällt erst in den Ergebnissen auf.
+    await this.prisma.poolSnapshot.create({ data: snapshotDataOf(input.pool) });
 
     return { candidateId, created };
   }

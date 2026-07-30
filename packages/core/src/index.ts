@@ -44,6 +44,25 @@ export {
 export type { LifecycleState, TransitionTrigger } from "./lifecycle/states";
 
 export {
+  marketTickFromPool,
+  marketTickFromPoint,
+  trackPointFromPool,
+  poolFeePct,
+  volumeRate24hUsd,
+} from "./paper/ticks";
+export type { TickPool } from "./paper/ticks";
+
+export { replayPosition, replayEntries, summarizeReplay } from "./replay/engine";
+export type {
+  ReplayPool,
+  ReplayOptions,
+  ReplaySweepOptions,
+  ReplayPosition,
+  ReplayCloseReason,
+  ReplaySummary,
+} from "./replay/engine";
+
+export {
   METRIC_WINDOWS,
   HISTORY_TIMEFRAMES,
   TIMEFRAME_MINUTES,

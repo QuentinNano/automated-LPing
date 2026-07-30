@@ -30,6 +30,7 @@ import {
   runBackfill,
   type BackfillDeps,
 } from "./backfill";
+import { formatReplayResult, runReplay } from "./replay";
 import { formatScanTable, runScan, type ScanDeps } from "./scan";
 import {
   formatComparison,
@@ -66,10 +67,13 @@ async function main(): Promise<number> {
       return cmdTrack(process.argv.slice(3));
     case "backfill":
       return cmdBackfill(process.argv.slice(3));
+    case "replay":
+      return cmdReplay(process.argv.slice(3));
     default:
       console.error(
         `Unbekanntes Kommando: ${command}\n` +
-          `Verfügbar: validate | health | scan | paper | track | backfill | api:check | fabriq:check <URL>`,
+          `Verfügbar: validate | health | scan | paper | track | backfill | replay |\n` +
+            `            api:check | fabriq:check <URL>`,
       );
       return 2;
   }
@@ -486,6 +490,60 @@ async function cmdTrack(args: string[]): Promise<number> {
     }
   }
   return 0;
+}
+
+/**
+ * Replay: aufgezeichnete Verläufe durch dieselbe Engine schicken, mit der auch
+ * das Paper-Trading rechnet (KONZEPT-ML.md 5).
+ *
+ * Der Unterschied zum Paper-Vergleich ist die Zahl der Beobachtungen: Hier
+ * entstehen Positionen an beliebigen Zeitpunkten jedes Verlaufs, nicht nur dort,
+ * wo gerade ein Kandidat akzeptiert wurde.
+ */
+async function cmdReplay(args: string[]): Promise<number> {
+  const databaseUrl = process.env["DATABASE_URL"];
+  if (databaseUrl === undefined || databaseUrl === "") {
+    console.error(
+      "replay benötigt eine Datenbank mit aufgezeichneten Verläufen.\n" +
+        "Setup: docker compose up -d && pnpm db:generate && pnpm db:migrate",
+    );
+    return 1;
+  }
+
+  let config: BotConfig;
+  try {
+    config = loadDefaultsFromDir(configDir);
+  } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      console.error(error.message);
+      return 1;
+    }
+    throw error;
+  }
+
+  const db = await import("@lping/db");
+  const store = new db.TrackRepo(db.createPrisma());
+  const pool = stringFlag(args, "--pool");
+
+  console.log("Replay über die aufgezeichneten Verläufe…\n");
+  try {
+    const result = await runReplay({ store, log: (line) => console.log(`  ${line}`) }, config, {
+      ...(pool !== undefined ? { pools: [pool] } : {}),
+      ...(intFlag(args, "--days") !== undefined ? { days: intFlag(args, "--days")! } : {}),
+      ...(intFlag(args, "--every") !== undefined
+        ? { everyMinutes: intFlag(args, "--every")! }
+        : {}),
+      ...(intFlag(args, "--max-per-pool") !== undefined
+        ? { maxPositionsPerPool: intFlag(args, "--max-per-pool")! }
+        : {}),
+    });
+    for (const note of result.notes) console.log(`  ! ${note}`);
+    console.log("\n" + formatReplayResult(result));
+    return 0;
+  } catch (error) {
+    console.error("\n" + explainFailure(error));
+    return 1;
+  }
 }
 
 /**

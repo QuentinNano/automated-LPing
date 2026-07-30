@@ -1,12 +1,12 @@
 import {
   closePaperPosition,
-  effectiveFeePct,
+  marketTickFromPool,
   openPaperPosition,
+  poolFeePct,
   poolPriceInSol,
   tickPaperPosition,
   valuePosition,
   type BotConfig,
-  type MarketTick,
   type PaperPositionState,
   type PoolMetrics,
   type PresetKind,
@@ -188,18 +188,9 @@ export async function tickOpenPositions(
     }
     if (pool === null) continue;
 
-    const price = poolPriceInSol(pool);
-    if (price === null || price <= 0) continue;
-
-    const tick: MarketTick = {
-      priceInSol: price,
-      poolTvlUsd: pool.tvlUsd ?? 0,
-      poolVolume24hUsd: volumeRate24hUsd(pool),
-      poolFeePct: poolFeePct(pool),
-      solPriceUsd,
-      ...(pool.protocolFeePct !== undefined ? { protocolFeePct: pool.protocolFeePct } : {}),
-      at: now,
-    };
+    // Denselben Weg wie der Replay: Ein Tick entsteht an genau einer Stelle.
+    const tick = marketTickFromPool(pool, { solPriceUsd, at: now });
+    if (tick === null) continue;
 
     const result = tickPaperPosition(position.simState, tick, preset, config.global);
     ticked++;
@@ -213,7 +204,7 @@ export async function tickOpenPositions(
       continue;
     }
 
-    const closeResult = closePaperPosition(result.state, price, config.global);
+    const closeResult = closePaperPosition(result.state, tick.priceInSol, config.global);
     await deps.store.close({
       positionId: position.id,
       state: closeResult.state,
@@ -232,53 +223,6 @@ export async function tickOpenPositions(
   return { ticked, closed, notes };
 }
 
-/**
- * Effektive Swap-Gebühr eines Pools in Prozent.
- *
- * Reihenfolge nach Genauigkeit: gemeldete Gesamtgebühr (Basis +
- * Volatilitätsaufschlag), sonst die realisierte Rate aus dem kürzesten
- * belegten Fenster, sonst über 24 h, zuletzt die Basisgebühr. Die Basisgebühr
- * allein — der bisherige Wert — unterschätzt volatile Pools deutlich, und genau
- * in deren volatilen Phasen verdient eine DLMM-Position.
- */
-export function poolFeePct(pool: PoolMetrics): number {
-  return (
-    effectiveFeePct({
-      ts: pool.fetchedAt,
-      priceNative: pool.priceNative ?? null,
-      tvlUsd: pool.tvlUsd ?? null,
-      fees24hUsd: pool.fees24hUsd ?? null,
-      volume24hUsd: pool.volume24hUsd ?? null,
-      dynamicFeePct: pool.dynamicFeePct ?? null,
-      baseFeePct: pool.baseFeePct ?? null,
-      windows: { volume: pool.volumeUsd, fees: pool.feesUsd },
-    }) ?? 0
-  );
-}
-
-/**
- * Handelsvolumen als 24-Stunden-Rate, aus dem kürzesten belegten Fenster
- * hochgerechnet.
- *
- * Der rohe 24-Stunden-Wert glättet genau die Volatilitätsspitzen weg, in denen
- * Gebühren anfallen. `volume.h1 × 24` beschreibt den aktuellen Durchsatz
- * erheblich besser und kostet nichts — die Zahl steht im selben Response.
- */
-export function volumeRate24hUsd(pool: PoolMetrics): number {
-  const windows: [keyof typeof pool.volumeUsd, number][] = [
-    ["m30", 48],
-    ["h1", 24],
-    ["h2", 12],
-    ["h4", 6],
-    ["h12", 2],
-    ["h24", 1],
-  ];
-  for (const [window, factor] of windows) {
-    const value = pool.volumeUsd[window];
-    if (value !== undefined && Number.isFinite(value)) return value * factor;
-  }
-  return pool.volume24hUsd ?? 0;
-}
 
 export function presetLabels(config: BotConfig): Record<string, string> {
   return Object.fromEntries(Object.entries(config.presets).map(([id, p]) => [id, p.label]));
