@@ -120,7 +120,7 @@ export function marketTickFromPoint(point: TrackPoint, pool: TickPool): MarketTi
     priceInSol: price,
     // Fehlender TVL oder SOL-Kurs heißt: Der Gebührenanteil ist nicht
     // bestimmbar. Die Engine bucht bei 0 keine Gebühren — gewollt, siehe
-    // KONZEPT-ML.md 5.1.
+    // KONZEPT-ML.md 5.2.
     poolTvlUsd: point.tvlUsd ?? 0,
     poolVolume24hUsd: point.volume24hUsd ?? 0,
     poolFeePct: feePct ?? 0,

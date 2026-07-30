@@ -2,7 +2,7 @@ import type { BotConfig } from "../config/schema";
 import { minTvlAcrossPresets } from "./replicate";
 
 /**
- * Abfragestrategien für die Pool-Discovery (KONZEPT.md 4.1, Weg 2).
+ * Abfragestrategien für die Pool-Discovery (KONZEPT.md 4.1).
  *
  * Hintergrund: Die Meteora-Pool-API sortiert standardmäßig nach
  * 24-Stunden-Volumen. Wer nur die ersten Seiten dieser Sortierung liest, sieht

@@ -114,7 +114,7 @@ describe("replayPosition", () => {
   });
 
   it("bucht ohne TVL keine Gebühren, statt sie zu erfinden", () => {
-    // Genau der Fall aus KONZEPT-ML.md 5.1: nachgeladener Zeitraum ohne
+    // Genau der Fall aus KONZEPT-ML.md 5.2: nachgeladener Zeitraum ohne
     // Messpunkt in der Nähe. Der eigene Anteil am aktiven Bin wäre ein Anteil
     // an einer unbekannten Größe.
     const series = flatSeries(20).map((p) => ({ ...p, tvlUsd: null }));

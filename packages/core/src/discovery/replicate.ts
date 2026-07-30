@@ -3,9 +3,9 @@ import type { PoolMetrics } from "../domain/types";
 import { tokenSideOf } from "../screening/aggregate";
 
 /**
- * Eigene Replikation der Fabriq-Kategorien (KONZEPT.md Abschnitt 4.1, Weg 2):
- * billiger Vor-Filter auf reinen Meteora-Daten, der die Shortlist für das
- * teure Deep-Screening (DexScreener/RugCheck/Jupiter) bestimmt.
+ * Vor-Filter der Discovery (KONZEPT.md Abschnitt 4.2): billig und rein lokal auf
+ * Meteora-Daten, bestimmt die Shortlist für das teure Deep-Screening über
+ * DexScreener, RugCheck und Jupiter.
  *
  * Bewusst großzügiger als die Hard Filters (Faktor 0,5–0,75 auf Schwellwerte):
  * Ablehnen ist Aufgabe des Screenings, nicht der Discovery. Das Token-Alter

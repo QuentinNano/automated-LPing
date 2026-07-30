@@ -1,9 +1,15 @@
 # Konzept: Automatisierter Meteora-DLMM-LP-Bot (Solana)
 
-> Automatisiertes Liquidity Providing auf Meteora DLMM: Pool-Discovery über Fabriq
-> (Presets **Degen** und **Multiday**), mehrstufige Filterung bösartiger/schlechter Pools,
-> automatisches Eröffnen, Rebalancen und Schließen von Positionen, Web-UI zur
-> Parametersteuerung sowie ein Analyse-Dashboard zur Effizienzmessung.
+> Automatisiertes Liquidity Providing auf Meteora DLMM: eigene Pool-Discovery,
+> mehrstufige Filterung bösartiger und schlechter Pools, automatisches Eröffnen,
+> Rebalancen und Schließen von Positionen, Web-UI zur Parametersteuerung sowie
+> ein Analyse-Dashboard zur Effizienzmessung.
+
+Dieses Dokument beschreibt **Strategie und Risikomodell**. Die datengetriebene
+Optimierung steht in [KONZEPT-ML.md](./KONZEPT-ML.md), die Bedienung in
+[README.md](./README.md). Der Umsetzungsstand ist in Abschnitt 16
+zusammengefasst; einzelne Abschnitte markieren Abweichungen dort, wo sie für das
+Verständnis wichtig sind.
 
 ---
 
@@ -11,44 +17,95 @@
 
 **Ziele**
 
-1. Kontinuierliche Entdeckung attraktiver DLMM-Pools (Quelle: Fabriq Trending, Kategorien Degen/Multiday, abgesichert über Meteora-Daten).
-2. Systematisches Aussortieren von Rug-/Honeypot-/Wash-Trading-Pools **bevor** Kapital eingesetzt wird.
-3. Vollautomatischer Positions-Lebenszyklus: Eröffnen → Überwachen → Fees claimen → Rebalancen → Schließen (inkl. Notausstieg).
-4. Web-UI: alle Strategie- und Risikoparameter zur Laufzeit anpassbar, Kill-Switch, Positionsübersicht.
-5. Analyse-Dashboard: PnL, Fee-Erträge, Impermanent Loss, Kostenaufschlüsselung, Filter-Trefferquote — pro Position, Pool und Preset.
-6. Risikominimierung als durchgängiges Designprinzip (Kapital-Caps, Circuit Breaker, Paper-Trading-Modus, Schlüsselsicherheit).
+1. Kontinuierliche Entdeckung attraktiver DLMM-Pools aus den Meteora-Marktdaten.
+2. Systematisches Aussortieren von Rug-, Honeypot- und Wash-Trading-Pools
+   **bevor** Kapital eingesetzt wird.
+3. Vollautomatischer Positions-Lebenszyklus: Eröffnen → Überwachen → Fees
+   claimen → Rebalancen → Schließen, inklusive Notausstieg.
+4. Web-UI: alle Strategie- und Risikoparameter zur Laufzeit anpassbar,
+   Kill-Switch, Positionsübersicht.
+5. Analyse-Dashboard: PnL, Fee-Erträge, Impermanent Loss, Kostenaufschlüsselung,
+   Filter-Trefferquote — pro Position, Pool und Preset.
+6. Risikominimierung als durchgängiges Designprinzip: Kapital-Caps, Circuit
+   Breaker, Paper-Trading-Modus, Schlüsselsicherheit.
 
 **Nicht-Ziele (v1)**
 
 - Kein Hebel, keine Derivate, kein Cross-Chain.
-- Kein HFT/MEV-Searching — der Bot ist ein LP-Manager, kein Sniper.
-- Keine DAMM-v2-Pools in v1 (Architektur lässt spätere Erweiterung zu).
+- Kein HFT oder MEV-Searching — der Bot ist ein LP-Manager, kein Sniper.
+- Keine DAMM-v2-Pools; die Architektur lässt eine spätere Erweiterung zu.
 
-**Grundhaltung:** Degen-LPing auf frische Memecoin-Pools ist strukturell hochriskant.
-Das Konzept behandelt Totalverlust einzelner Positionen als *erwartbares* Ereignis und
-steuert deshalb primär über Positionsgrößen, Limits und schnelle Exits — nicht über die
-Illusion, jeden Rug erkennen zu können.
+**Grundhaltung:** LPing auf frische Memecoin-Pools ist strukturell hochriskant.
+Das Konzept behandelt den Totalverlust einzelner Positionen als *erwartbares*
+Ereignis und steuert deshalb primär über Positionsgrößen, Limits und schnelle
+Exits — nicht über die Illusion, jeden Rug erkennen zu können.
 
 ---
 
-## 2. Fachlicher Hintergrund: Meteora DLMM in Kürze
+## 2. Fachlicher Hintergrund: Meteora DLMM
 
-Für Design-Entscheidungen relevante Eigenschaften des DLMM (Dynamic Liquidity Market Maker):
+Für die Design-Entscheidungen relevante Eigenschaften des Dynamic Liquidity
+Market Maker:
 
-- **Bins:** Liquidität liegt in diskreten Preis-Bins. Nur der **aktive Bin** verdient Fees. Der Abstand zwischen Bins ist der **Bin Step** (in Basispunkten); Degen-Pools nutzen typischerweise große Bin Steps (100–400 bps), stabile Paare kleine (1–25 bps).
-- **Dynamische Fees:** Basisgebühr + volatilitätsabhängige Zusatzgebühr. In volatilen Phasen steigen die LP-Erträge — genau dann ist aber auch das Verlustrisiko am höchsten.
-- **Positionsform:** Beim Einzahlen wählt man eine Liquiditätsverteilung: `Spot` (gleichmäßig), `Curve` (um den aktiven Bin konzentriert), `BidAsk` (an den Rändern konzentriert). Einseitige Positionen sind möglich (nur SOL unterhalb des Preises = gestaffelte Kauforder, nur Token oberhalb = gestaffelte Verkaufsorder).
-- **Kein Auto-Compounding:** Fees müssen aktiv geclaimt werden.
-- **Standardposition ≈ 69 Bins** (erweiterbar); Range-Breite = Bins × Bin Step.
-- **Impermanent Loss:** Läuft der Preis durch die Range, hält die Position am Ende nur noch den schwächeren Token. Bei Memecoins heißt das: Wer nicht rechtzeitig aussteigt, hält Bags eines toten Tokens. Fees kompensieren IL nur bei ausreichend Volumen und begrenztem Drawdown.
+- **Bins.** Liquidität liegt in diskreten Preis-Bins. Gebühren verdienen die
+  Bins, die ein Swap **durchläuft** — bei kleinen Swaps also der aktive Bin, bei
+  großen mehrere. Der Abstand zwischen Bins ist der **Bin Step** in Basispunkten;
+  volatile Paare nutzen große Schritte (100–400 bps), stabile kleine (1–25 bps).
+- **Bin-Preis** `p(i) = (1 + binStep/10000)^i`; die Range-Breite ist
+  Bins × Bin Step. Eine Position startet mit 70 Bins und ist auf bis zu 1.400
+  erweiterbar.
+- **Dynamische Gebühr.** Basisgebühr + volatilitätsabhängiger Aufschlag, gedeckelt
+  bei 10 %. In volatilen Phasen steigen die LP-Erträge — genau dann ist aber auch
+  das Verlustrisiko am höchsten.
+- **Protokollanteil.** 10 % der Handelsgebühr bei Standard-Pools, 20 % bei
+  Launch-Pools gehen ans Protokoll. Der LP erhält nur den Rest.
+- **Positionsform.** Beim Einzahlen wählt man eine Liquiditätsverteilung: `Spot`
+  (gleichmäßig), `Curve` (um den aktiven Bin konzentriert), `BidAsk` (an den
+  Rändern konzentriert). Einseitige Positionen sind möglich — nur SOL unterhalb
+  des Preises entspricht einer gestaffelten Kauforder, nur Token oberhalb einer
+  gestaffelten Verkaufsorder.
+- **Composition Fee.** Eine Einzahlung in den **aktiven** Bin, die dessen
+  Zusammensetzung verändert, kostet zusätzlich — sie ähnelt einem Swap.
+- **Kein Auto-Compounding.** Fees müssen aktiv geclaimt werden.
+- **Impermanent Loss.** Läuft der Preis durch die Range, hält die Position am
+  Ende nur noch den schwächeren Token. Bei Memecoins heißt das: Wer nicht
+  rechtzeitig aussteigt, hält Bags eines toten Tokens. Gebühren kompensieren IL
+  nur bei ausreichend Volumen und begrenztem Drawdown.
 
-**SDK-Abdeckung** (`@meteora-ag/dlmm`, TypeScript, v1.9.x — verifiziert am Quellcode):
+### 2.1 Gebührenwährung: `collect_fee_mode`
+
+DLMM erhebt die Swap-Gebühr je nach Pool-Konfiguration unterschiedlich, und für
+das Risikoprofil ist das eine Größe erster Ordnung:
+
+| Modus | Wert | Bedeutung |
+|---|---|---|
+| `InputOnly` | `0` | Gebühr im **Input-Token** des Swaps — folgt der Handelsrichtung |
+| `OnlyY` | `1` | Gebühr **immer in Token Y**, auch wenn Y der Output ist |
+
+Bei `InputOnly` in einem X/SOL-Pool fallen Gebühren gemischt an: Käufe zahlen in
+SOL, Verkäufe im Token. Eine einseitige SOL-Bid-Position wird gefüllt, während
+Verkäufer in sie hineinhandeln — sie verdient also überwiegend **Token-Gebühren**,
+und die sind offenes Exposure bis zur Konvertierung.
+
+Bei `OnlyY` **und SOL auf der Y-Seite** entfällt dieses Exposure vollständig: alle
+Gebühren fallen in SOL an. Die Seitenprüfung ist dabei entscheidend — steht SOL
+auf der X-Seite, kehrt derselbe Modus den Vorteil ins Gegenteil, weil dann alle
+Gebühren im Memecoin anfallen. Maßgeblich ist also
+`collect_fee_mode == 1 && mintY == WSOL`, implementiert als `feeCurrencyOf()`.
+
+Der Modus steht in jeder `/pools`-Antwort und wird als Merkmal aufgezeichnet. Er
+ist damit ein Kandidat für einen Discovery-Filter, nicht eine Fußnote.
+
+### 2.2 SDK-Abdeckung
+
+`@meteora-ag/dlmm` (TypeScript), verifiziert am Quellcode. Wird erst mit der
+Execution Engine gebraucht — bislang ist keine dieser Methoden im Einsatz.
 
 | Bedarf | SDK-Methode |
 |---|---|
 | Pool instanziieren | `DLMM.create(connection, poolAddress)` |
 | Aktiven Bin/Preis lesen | `getActiveBin()`, `getBinsAroundActiveBin()` |
-| Position eröffnen | `initializePositionAndAddLiquidityByStrategy()` (StrategyType `Spot`/`Curve`/`BidAsk`) |
+| Position eröffnen | `initializePositionAndAddLiquidityByStrategy()` |
 | Liquidität nachlegen | `addLiquidityByStrategy()` |
 | Fees claimen | `claimSwapFee()` / `claimAllSwapFee()` / `claimAllRewards()` |
 | Liquidität abziehen | `removeLiquidity()` |
@@ -58,23 +115,25 @@ Für Design-Entscheidungen relevante Eigenschaften des DLMM (Dynamic Liquidity M
 | Quotes/Swaps im Pool | `swapQuote()`, `swap()` |
 | Fee-Zustand | `getFeeInfo()`, `getDynamicFee()` |
 
-**Pool-Marktdaten:** Öffentliche Meteora-API (`dlmm.datapi.meteora.ag`, ältere
-Variante `dlmm-api.meteora.ag`) liefert pro Pool u. a. `tvl`, Volumen und
-Gebühren je Zeitfenster (30 m…24 h), `apr/apy`, `bin_step`, `base_fee_pct`,
-`dynamic_fee_pct`, `protocol_fee_pct`, `collect_fee_mode` und `current_price` —
-Grundlage für eigenes Scoring. Dokumentiertes Limit: **30 Anfragen/s**.
+### 2.3 Die Pool-API und was sie ermöglicht
 
-Drei Eigenschaften der Schnittstelle prägen die Umsetzung:
+`dlmm.datapi.meteora.ag` (ältere Variante: `dlmm-api.meteora.ag`) liefert pro
+Pool `tvl`, Volumen und Gebühren je Zeitfenster (30 m…24 h), `apr`/`apy`,
+`bin_step`, `base_fee_pct`, `dynamic_fee_pct`, `protocol_fee_pct`,
+`collect_fee_mode`, `current_price` sowie Token-Angaben. Dokumentiertes Limit:
+**30 Anfragen/s**.
+
+Drei Fähigkeiten prägen die Umsetzung:
 
 | Fähigkeit | Wozu genutzt |
 |---|---|
-| `sort_by=<metrik>_<fenster>:<richtung>` | mehrere Sortierungen zusammenführen, damit frische Pools überhaupt sichtbar werden (Abschnitt 4.1) |
+| `sort_by=<metrik>_<fenster>:<richtung>` | mehrere Sortierungen zusammenführen, damit frische Pools überhaupt sichtbar werden (Abschnitt 4) |
 | `filter_by=pool_address=[a\|b\|…]` | Sammelabruf: Messpunkte für alle verfolgten Pools in ~50 statt 2.000 Anfragen |
-| `/pools/{address}/ohlcv` und `/volume/history` | **rückwirkender** Preis-, Volumen- und Gebührenverlauf bis auf 5-Minuten-Kerzen (siehe KONZEPT-ML.md 3.3) |
+| `/pools/{address}/ohlcv` und `/volume/history` | **rückwirkender** Preis-, Volumen- und Gebührenverlauf bis auf 5-Minuten-Kerzen |
 
-Der letzte Punkt hat Konsequenzen weit über die Discovery hinaus: Ein Teil der
-Zeitreihe, die die Optimierung braucht, ist nachholbar. TVL und SOL-Kurs sind es
-nicht — die gibt es nur als Momentaufnahme.
+Der letzte Punkt wirkt weit über die Discovery hinaus: Ein Teil der Zeitreihe,
+die die Optimierung braucht, ist nachholbar. TVL und SOL-Kurs sind es nicht —
+die gibt es nur als Momentaufnahme. Ausführlich in KONZEPT-ML.md Abschnitt 3.3.
 
 ---
 
@@ -85,16 +144,15 @@ nicht — die gibt es nur als Momentaufnahme.
 ```mermaid
 flowchart LR
     subgraph Extern["Externe Datenquellen"]
-        FAB[Fabriq Trending<br/>Degen / Multiday]
-        MET[Meteora DLMM API<br/>Pools & Metriken]
+        MET[Meteora DLMM API<br/>Pools, Metriken, Historie]
         RUG[RugCheck API]
-        DEX[DexScreener /<br/>Birdeye]
+        DEX[DexScreener]
+        JUP[Jupiter<br/>Quote + Token API]
         RPC[Solana RPC<br/>Helius + Fallback]
-        JUP[Jupiter Swap API]
     end
 
     subgraph Core["Bot-Core (Node.js / TypeScript)"]
-        DISC[Discovery Service]
+        DISC[Discovery]
         SCRN[Screening & Scoring]
         STRAT[Strategy Engine]
         EXEC[Execution Engine]
@@ -107,354 +165,382 @@ flowchart LR
     end
 
     subgraph UIx["Bedienung"]
-        API[REST/WS API]
         UI[Web-UI Next.js<br/>Config + Dashboard]
-        ALERT[Alerts<br/>Telegram/Discord]
+        ALERT[Alerts<br/>Telegram]
     end
 
-    FAB --> DISC
     MET --> DISC
     DISC --> SCRN
     RUG --> SCRN
     DEX --> SCRN
+    JUP --> SCRN
     SCRN --> STRAT
     STRAT --> EXEC
     EXEC --> RPC
-    JUP --> EXEC
     RPC --> MON
     MON --> STRAT
     RISK -.überwacht alles.-> STRAT
     RISK -.-> EXEC
     Core <--> DB
-    DB --> API
-    API --> UI
+    DB --> UI
     MON --> ALERT
     RISK --> ALERT
 ```
+
+Execution Engine, Position Monitor und Risk Manager sind geplant, aber noch nicht
+umgesetzt (Abschnitt 16).
 
 ### 3.2 Tech-Stack
 
 | Schicht | Wahl | Begründung |
 |---|---|---|
-| Sprache/Runtime | TypeScript auf Node.js 20+ | Offizielles DLMM-SDK ist TS; ein Ökosystem für Bot + UI |
-| Solana | `@solana/web3.js`, `@meteora-ag/dlmm`, Jupiter Swap API | Offizielle/etablierte Bausteine |
-| RPC | Helius (Primär) + zweiter Anbieter (Fallback), eigene Priority-Fee-Schätzung | Zuverlässige Tx-Landung ist kritisch |
-| Persistenz | PostgreSQL (Prisma ORM) | Relationale Auswertbarkeit für Analytics; ein einziges zusätzliches System |
-| Jobs/Scheduling | In-Process-Scheduler + BullMQ (Redis) nur falls nötig | So wenig Infrastruktur wie möglich |
-| UI | Next.js + tRPC/REST + WebSocket, Recharts | Schnelle Entwicklung, Live-Updates |
-| Deployment | Docker Compose auf VPS; `.env` für Secrets | Reproduzierbar, einfach |
-| Alerting | Telegram-Bot (kritisch + täglicher Report) | Sofortige Reaktionsfähigkeit |
+| Sprache/Runtime | TypeScript auf Node.js 20+ | Offizielles DLMM-SDK ist TS; ein Ökosystem für Bot und UI |
+| Solana | `@solana/web3.js`, `@meteora-ag/dlmm`, Jupiter Swap API | Offizielle und etablierte Bausteine |
+| RPC | Helius (primär) + Zweitanbieter (Fallback), eigene Priority-Fee-Schätzung | Zuverlässige Tx-Landung ist kritisch |
+| Persistenz | PostgreSQL mit Prisma | Relationale Auswertbarkeit; ein einziges zusätzliches System |
+| UI | Next.js | Schnelle Entwicklung |
+| Deployment | Docker Compose auf VPS, `.env` für Secrets | Reproduzierbar, einfach |
+| Alerting | Telegram-Bot | Sofortige Reaktionsfähigkeit |
 
-### 3.3 Repo-Layout (Monorepo)
-
-```
-/apps
-  /bot        # Core-Services (Discovery, Screening, Strategy, Execution, Monitor)
-  /web        # Next.js UI (Config, Positionen, Dashboard)
-/packages
-  /core       # Domänenmodelle, Zustandsmaschine, Scoring, Risk-Regeln (pure, testbar)
-  /adapters   # Fabriq, Meteora-API, RugCheck, DexScreener, Jupiter, RPC
-  /db         # Prisma-Schema + Migrationen
-/config       # Preset-Defaults (degen.json, multiday.json), zod-validiert
-```
-
-Kernprinzip: **Alle Entscheidungslogik (Scoring, Strategie, Risk) ist pure und ohne
-Netzwerk/Chain testbar**; Adapter und Execution sind dünne, austauschbare Schalen.
-Dadurch sind Backtests und Paper-Trading mit identischem Code möglich.
+**Kernprinzip:** Alle Entscheidungslogik — Scoring, Strategie, Risk — ist pure
+und ohne Netzwerk oder Chain testbar; Adapter und Execution sind dünne,
+austauschbare Schalen. Genau das macht Paper-Trading und Replay auf **identischem
+Codepfad** möglich (Abschnitt 13, KONZEPT-ML.md 5).
 
 ---
 
-## 4. Pool-Discovery (Fabriq + Meteora)
+## 4. Pool-Discovery
 
-### 4.1 Quellenstrategie
+Die Discovery arbeitet ausschließlich auf den Meteora-Marktdaten. Sie bildet die
+Preset-Kategorien selbst nach, statt sich auf eine fremde Trending-Liste zu
+stützen.
 
-**Fabriq** (fabriq.trade/trending) ist die gewünschte primäre Discovery-Quelle mit den
-Kategorien **Degen** (frische, hochaktive Pools, kurzer Horizont) und **Multiday**
-(Pools/Token mit mehrtägiger Bestandskraft) sowie einem Aktivitäts-Score
-(Community-Faustregel: Score > 200 = hohe Aktivität). **Fabriq hat jedoch keine
-dokumentierte öffentliche API.** Daraus folgt eine Zwei-Wege-Strategie:
+> **Historie dieser Entscheidung.** Ursprünglich war [Fabriq](https://fabriq.trade)
+> als primäre Quelle vorgesehen. Ein Spike ergab: Die Trending-Seite liefert ihre
+> Daten nicht über abgreifbare JSON-Endpoints, und ein Zugriff über
+> Session-Cookies wurde verworfen (manuelle Token-Erneuerung, Kontoschlüssel im
+> Klartext auf dem Server, ToS-Risiko). Ein defensiver Adapter liegt weiterhin
+> unter `packages/adapters/src/fabriq/` und lässt sich über `fabriq:check`
+> aktivieren, falls je ein stabiler Endpoint auftaucht — der Bot hängt aber an
+> keiner Stelle davon ab.
 
-1. **Fabriq-Adapter (bevorzugt, wenn stabil machbar):** Die interne JSON-API der
-   Trending-Seite wird per Browser-DevTools identifiziert und in einem isolierten
-   Adapter gekapselt (eigenes Modul, defensives Parsing, Schema-Validierung mit zod,
-   Rate-Limit ≤ 1 Request/30 s, User-Agent-Kennzeichnung). Risiken werden explizit
-   akzeptiert und behandelt: Die API kann sich jederzeit ändern oder wegfallen
-   (→ Health-Check + Alert + automatischer Fallback), und die Nutzungsbedingungen von
-   Fabriq sind vorab zu prüfen.
-2. **Fallback/Parallel: Eigene Preset-Replikation.** Aus der Meteora-API +
-   DexScreener-Daten werden die beiden Kategorien nachgebildet, sodass der Bot **nie**
-   hart von Fabriq abhängt:
-   - *Degen-Kandidaten:* Pool-/Token-Alter < 48 h, hohes `volume_1h`/TVL-Verhältnis,
-     Fee/TVL-Rate (1h/24h) über Schwellwert, Bin Step ≥ 100, Basisgebühr ≥ 1 %.
-   - *Multiday-Kandidaten:* Token-Alter > 3–7 Tage, Volumen an ≥ 3 aufeinanderfolgenden
-     Tagen über Schwellwert, TVL stabil/steigend, Fee/TVL 24h attraktiv, Holder-Anzahl
-     wachsend.
+### 4.1 Mehrere Sortierungen statt mehr Seiten
 
-Beide Quellen speisen dieselbe Kandidaten-Pipeline; jeder Kandidat trägt seine Herkunft
-(`source: fabriq_degen | fabriq_multiday | replicated_degen | replicated_multiday`) —
-das Dashboard weist später aus, welche Quelle die besseren Positionen liefert.
+Die Pool-API sortiert standardmäßig nach 24-Stunden-Volumen. Wer nur die ersten
+Seiten davon liest, sieht ausschließlich etablierte Pools — ein Pool, der vor drei
+Stunden entstand, kann per Definition kein hohes Tagesvolumen haben. Genau solche
+Pools sind aber das Degen-Fenster.
 
-> **Spike-Ergebnis (Juli 2026):** Die Trending-Seite liefert ihre Pool-Daten nicht
-> über einfach abgreifbare XHR-JSON-Endpoints (sichtbar waren nur Tracking-Calls;
-> Auslieferung vermutlich im Seitendokument oder per WebSocket). Ein Zugriff über
-> Session-Cookies wurde bewertet und verworfen: regelmäßige manuelle Token-Erneuerung,
-> Kontozugangs-Schlüssel im Klartext auf dem Server, ToS-Risiko. **Entscheidung:
-> Weg 2 (eigene Replikation) ist die primäre Discovery-Quelle.** Der defensive
-> Fabriq-Adapter bleibt im Code und kann jederzeit aktiviert werden, falls ein
-> stabiler Endpoint gefunden wird (`packages/adapters/src/fabriq/SPIKE.md`).
+Die Suche führt deshalb **mehrere Sortierungen** zusammen und dedupliziert nach
+Pool-Adresse:
+
+| Sortierung | Beantwortet |
+|---|---|
+| `volume_24h:desc` | etablierte Aktivität — trägt die längerfristigen Presets |
+| `fee_tvl_ratio_1h:desc` | aktuelle Ertragskraft — Pools, die gerade anfangen zu verdienen |
+| `pool_created_at:desc` | neue Pools — über Volumen nicht erreichbar |
+
+Serverseitig gefiltert wird nur, was für **jedes** Preset gilt
+(`is_blacklisted=false && tvl>=…`). Der Filter ist Vorauswahl, nicht Entscheidung:
+Abgelehnt wird ausschließlich im Screening, mit Begründung im Scanner. Ein zu
+scharfer Serverfilter ließe Kandidaten unsichtbar verschwinden, statt sie
+nachvollziehbar auszuweisen.
+
+Die Quote-Token-Prüfung bleibt clientseitig, weil `filter_by` seine Ausdrücke nur
+mit UND verknüpft und SOL Token X *oder* Token Y sein kann.
 
 ### 4.2 Ablauf
 
-- Poll-Zyklus: Degen alle 60 s, Multiday alle 10 min (konfigurierbar).
-- Dedupe gegen: bereits aktive Positionen, Blacklist, kürzlich geprüfte Kandidaten (Cooldown).
-- Jeder neue Kandidat wird als `PoolCandidate` mit Roh-Metriken persistiert und an das Screening übergeben — auch wenn er später abgelehnt wird (wichtig für Filter-Kalibrierung, siehe 5.5).
+- Jeder gefundene Pool durchläuft einen billigen, rein lokalen Vor-Filter
+  (Bin Step, Basisgebühr, TVL, Volumen/TVL) und wird je Preset in eine Shortlist
+  einsortiert. Die Schwellwerte liegen bewusst unter denen des Screenings —
+  Ablehnen ist Aufgabe des Screenings, nicht der Discovery.
+- Nur die Shortlist geht ins teure Enrichment (DexScreener, RugCheck, Jupiter).
+- Jeder gescreente Kandidat wird persistiert, **auch der abgelehnte** — er ist
+  die Grundlage der Filter-Kalibrierung (5.5) und des Auswahlmodells
+  (KONZEPT-ML.md 3.1).
 
 ---
 
-## 5. Screening & Scoring: schlechte/bösartige Pools herausfiltern
+## 5. Screening & Scoring
 
-Zweistufig: **Hard Filters** (K.o.-Kriterien, billig zuerst) → **Score** (0–100,
-Ranking + Mindestscore pro Preset). Datenquellen: RugCheck-API (Token-Risiko-Report),
-DexScreener/Birdeye (Markt-Querschnitt), eigene On-Chain-Reads (Wahrheit letzter Instanz),
-Jupiter (Ausführbarkeits-Check).
+Zweistufig: **Hard Filters** (K.-o.-Kriterien, billige zuerst) → **Score** (0–100
+für Ranking und Mindestscore je Preset). Quellen sind RugCheck
+(Token-Risiko-Report), DexScreener (Markt-Querschnitt), Jupiter
+(Ausführbarkeit) und perspektivisch eigene On-Chain-Reads als Wahrheit letzter
+Instanz.
 
-### 5.1 Hard Filters — Token-Sicherheit (K.o.)
+**Fail-closed ist das Grundprinzip:** Bei sicherheitskritischen Prüfungen führt
+fehlende Information zur Ablehnung. „Keine Daten" ist nie „unbedenklich".
 
-| Prüfung | Regel | Quelle |
+### 5.1 Token-Sicherheit
+
+| Prüfung | Regel | Quelle | Stand |
+|---|---|---|---|
+| Mint Authority | muss revoked sein | On-Chain (Mint-Account) | über RugCheck |
+| Freeze Authority | muss revoked sein, sonst einfrierbare Wallets = Honeypot-Vektor | On-Chain | über RugCheck |
+| Token-2022-Extensions | Transfer Fee > 0, Transfer Hook, Permanent Delegate, nicht-transferierbar → Ablehnung | On-Chain | **fehlt** |
+| Verkaufbarkeit | Jupiter-Quote in **beide** Richtungen mit plausiblem Preis-Impact | Jupiter | ✅ |
+| RugCheck-Report | normalisierter Score über Schwellwert oder kritische Flags → Ablehnung | RugCheck | ✅ |
+| Metadaten | mutable Metadata nur als Score-Malus, nicht K. o. (zu viele False Positives) | RugCheck | ✅ |
+
+Die beiden Authority-Prüfungen kommen derzeit ausschließlich von RugCheck. Ein
+eigener On-Chain-Read wäre die belastbarere Quelle; die Token-2022-Prüfung fehlt
+mangels RPC-Adapter ganz. Beides gehört zur Execution-Ausbaustufe.
+
+### 5.2 Holder & Verteilung
+
+| Prüfung | Konservativ | Balanced | Degen |
+|---|---|---|---|
+| Top-10-Holder-Anteil | < 20 % | < 25 % | < 30 % |
+| Größter Einzel-Holder | < 6 % | < 8 % | < 10 % |
+| Insider-/Bundler-Anteil | < 8 % | < 12 % | < 20 % |
+| Holder-Anzahl | ≥ 2.000 | ≥ 800 | ≥ 250 |
+
+Der Top-10-Anteil sollte LP- und Burn-Adressen ausnehmen; derzeit tut er das
+nicht, was den Filter strenger macht als beabsichtigt (der Pool-Reserve-Account
+selbst ist bei jungen Token oft ein Top-Holder).
+
+### 5.3 Markt- & Pool-Qualität
+
+| Prüfung | Zweck | Stand |
 |---|---|---|
-| Mint Authority | muss revoked sein | On-Chain (Mint-Account) |
-| Freeze Authority | muss revoked sein (sonst einfrierbare Wallets = Honeypot-Vektor) | On-Chain |
-| Token-2022-Extensions | Transfer Fee > 0, Transfer Hook, Permanent Delegate, nicht-transferierbar → Ablehnung | On-Chain |
-| Verkaufbarkeit (Honeypot-Test) | Jupiter-Quote in **beide** Richtungen (SOL→Token und Token→SOL) muss mit plausiblem Preis­impact möglich sein | Jupiter |
-| RugCheck-Report | normalisierter Risk-Score über Schwellwert bzw. kritische Flags (z. B. „Freeze Authority", „Single holder ownership") → Ablehnung | RugCheck |
-| Metadaten | mutable Metadata nur als Score-Malus, nicht K.o. (zu viele False Positives) | RugCheck/On-Chain |
+| TVL ≥ Preset-Minimum | Exit-Fähigkeit | ✅ |
+| Eigene Positionsgröße ≤ x % des Pool-TVL | eigener Preis- und Exit-Impact | ✅ |
+| Volumen-Plausibilität `vol24h/TVL` im Preset-Band | zu niedrig = tot, absurd hoch = Wash-Trading-Verdacht | ✅ |
+| Wash-Trading-Heuristik über die durchschnittliche Trade-Größe | Fake-Aktivität erkennen | ✅ |
+| Preis-Konsistenz Pool vs. Marktpreis | manipulierte oder illiquide Pools | ✅ |
+| Quote-Token = SOL | ein einziges Bewertungs- und Exit-Asset | ✅ |
+| Token-Alter im Preset-Fenster | Preset-Definition | ✅ |
+| Pool nicht von einer einzigen LP-Wallet dominiert | plötzlicher Liquiditätsabzug Dritter | **fehlt** (braucht RPC) |
 
-### 5.2 Hard Filters — Holder & Verteilung
+### 5.4 Score (0–100)
 
-| Prüfung | Degen-Default | Multiday-Default |
+Gewichtete Summe; die Kennlinien sind bewusst einfache Startwerte, die
+datengetrieben kalibriert werden sollen (KONZEPT-ML.md 6.3).
+
+| Gewicht | Komponente | Grundlage |
 |---|---|---|
-| Top-10-Holder-Anteil (ohne LP/Burn-Adressen) | < 30 % | < 25 % |
-| Größter Einzel-Holder | < 10 % | < 8 % |
-| Insider-/Bundler-Anteil (RugCheck) | < 20 % | < 10 % |
-| Holder-Anzahl | ≥ 250 | ≥ 1000 |
-| Dev-Wallet-Verhalten | kein aktives Abverkaufen erkennbar | dito |
+| 35 | Fee-Ertragskraft | Fee/TVL-Rate |
+| 25 | Markt-Qualität | Kauf/Verkauf-Balance, plausible Trade-Größe, Handelsaktivität |
+| 20 | Sicherheitsmarge | Abstand zu Risk-Score- und Holder-Grenzwerten |
+| 10 | Momentum | Preistrend; über dem Ideal-Band wird abgewertet, denn parabolische Pumps sind Risiko, nicht Qualität |
+| 10 | Quellen-Bonus | ursprünglich für externe Bestätigung gedacht |
 
-### 5.3 Hard Filters — Markt- & Pool-Qualität
+Einstieg nur bei Score ≥ Preset-Mindestscore **und** freiem Positions-Slot; bei
+mehreren Kandidaten gewinnt der höchste Score.
 
-| Prüfung | Zweck |
-|---|---|
-| TVL ≥ Minimum (Degen: 50 k$, Multiday: 150 k$) | Exit-Fähigkeit |
-| Eigene Positionsgröße ≤ x % des Pool-TVL (Default 1 %) | eigener Preis-/Exit-Impact |
-| Volumen-Plausibilität: `vol24h/TVL` innerhalb [Preset-Min, Obergrenze ~50] | zu niedrig = tot, absurd hoch = Wash-Trading-Verdacht |
-| Wash-Trading-Heuristik: Trades-Anzahl vs. Volumen, Anteil Top-Trader-Wallets, Volumen gleichmäßig statt in Bursts weniger Wallets | Fake-Aktivität erkennen |
-| Preis-Konsistenz: Pool-Preis vs. Jupiter-Aggregatorpreis, Abweichung < 2 % | manipulierte/illiquide Pools |
-| Quote-Token = SOL (v1: nur X/SOL-Pools) | ein Bewertungs- und Exit-Asset |
-| Pool nicht von einer einzigen LP-Wallet dominiert (> 80 %) | plötzlicher Liquiditätsabzug Dritter |
-| Token-Alter im Preset-Fenster (Degen: 1 h–48 h; Multiday: ≥ 72 h) | Preset-Definition |
-
-### 5.4 Score (0–100) für das Ranking der Überlebenden
-
-Gewichtete Summe, Startgewichte (per Paper-Trading zu kalibrieren):
-
-- **35 % Fee-Ertragskraft:** Fee/TVL-Rate (1 h, 24 h), Dynamik der letzten Stunden.
-- **25 % Markt-Qualität:** Volumen-Stetigkeit, Trades/Volumen-Verhältnis, Holder-Wachstum.
-- **20 % Sicherheitsmarge:** RugCheck-Score-Abstand zum Schwellwert, Holder-Verteilung, LP-Struktur.
-- **10 % Momentum/Trend:** Preis- und Volumentrend (Multiday: Stetigkeit statt Spike).
-- **10 % Quellen-Bonus:** Fabriq-Score/Ranking (sofern verfügbar), Übereinstimmung beider Quellen.
-
-Einstieg nur bei Score ≥ Preset-Mindestscore **und** freiem Positäts-Slot; bei mehreren
-Kandidaten gewinnt der höchste Score.
+Zwei bekannte Schwächen: Der Quellen-Bonus vergibt mangels zweiter Quelle an alle
+Kandidaten denselben Wert und trägt damit nichts zur Unterscheidung bei. Und die
+Fee-Ertragskraft wird über das 24-Stunden-Fenster gemessen — für einen drei
+Stunden alten Pool ist dieses Fenster naturgemäß dünn belegt, was frische Pools
+gegenüber etablierten systematisch benachteiligt. Beide Punkte sind Kandidaten
+für die Kalibrierung.
 
 ### 5.5 Filter-Kalibrierung durch Shadow-Tracking
 
-Jeder **abgelehnte** Kandidat wird 7 Tage weiterverfolgt (Preis, TVL, Rug-Ereignis).
-Das Dashboard zeigt daraus: False-Positive-Quote (zu Unrecht blockiert und gut gelaufen)
-und False-Negative-Quote (durchgelassen und gerugged). Damit werden Schwellwerte
-datengetrieben statt gefühlt nachjustiert.
+Jeder **abgelehnte** Kandidat wird sieben Tage weiterverfolgt (Preis, TVL,
+Rug-Ereignis). Daraus lassen sich die beiden Fehlerarten messen: zu Unrecht
+blockiert und gut gelaufen (False Positive) gegen durchgelassen und gerugged
+(False Negative). Damit werden Schwellwerte datengetrieben statt gefühlt
+nachjustiert.
+
+Die Daten werden erfasst; die Auswertung im Dashboard steht noch aus.
 
 ---
 
-## 6. Strategy Engine: Risikoprofil-Presets
+## 6. Strategy Engine: Risikoprofile
 
-> **Umsetzungsstand (Juli 2026):** Presets sind frei benennbar; ausgeliefert
-> werden drei Risikoprofile — **Konservativ**, **Balanced**, **Degen**. Sie laufen
-> im Paper-Trading **gleichzeitig auf denselben Marktdaten und mit demselben
-> virtuellen Kapital**, sodass Ergebnisunterschiede ausschließlich von den
-> Parametern stammen (kontrolliertes Experiment statt Vergleich von Äpfeln mit
-> Birnen). Weitere Profile lassen sich durch eine zusätzliche Datei in `config/`
-> ergänzen. Die folgenden Abschnitte 6.1/6.2 beschreiben die beiden Endpunkte des
-> Spektrums; „Balanced" liegt dazwischen.
+Ein Preset bündelt Discovery-Fenster, Filter-Schwellen, Einstiegsform,
+Range-Design, Rebalance- und Exit-Regeln. Presets sind frei benennbar — eine
+zusätzliche Datei in `config/` erscheint automatisch in UI, Paper-Vergleich und
+Replay.
 
+Ausgeliefert werden drei Profile. Sie laufen **gleichzeitig auf denselben
+Marktdaten und mit demselben virtuellen Kapital**, sodass Ergebnisunterschiede
+ausschließlich von den Parametern stammen.
 
+### 6.1 Die drei Profile
 
-Ein Preset bündelt Discovery-Fenster, Filter-Schwellen, Einstiegsform, Range-Design,
-Rebalance- und Exit-Regeln. Beide Presets laufen parallel mit getrennten Kapitaltöpfen.
+| | **Konservativ** | **Balanced** | **Degen** |
+|---|---|---|---|
+| Horizont | Tage bis zwei Wochen | Tage | Stunden |
+| Token-Alter | ≥ 7 Tage | ≥ 2 Tage | 1–48 h |
+| Min. TVL | 250 k$ | 120 k$ | 50 k$ |
+| Vol/TVL-Band | 0,5–15 | 1–25 | 2–50 |
+| Min. Bin Step | 10 | 20 | 100 |
+| Min. Basisgebühr | 0,05 % | 0,2 % | 1 % |
+| Einstieg | Curve, 50/50 | Curve, 50/50 | BidAsk, **einseitig SOL** |
+| Bins | 60–69 | 40–60 | 20–40 |
+| Mindestscore | 65 | 60 | 65 |
+| Fee-Claim | alle 6 h | alle 2 h | alle 30 min |
+| Fees → SOL | 100 % | 75 % | 100 % |
+| Stop-Loss | 15 % | 20 % | 15 % |
+| Take-Profit | 40 % | 50 % | 30 % |
+| Max. Haltedauer | 14 Tage | 4 Tage | 24 h |
+| Rebalancing | ja (Puffer 15 %, Cooldown 4 h, max. 2/Tag, EV ≥ 3×) | ja (10 %, 2 h, 4/Tag, EV ≥ 2×) | nein |
+| Slippage-Cap | 0,5 % | 1 % | 3 % |
+| Kapitalanteil (live) | 40 % | 35 % | 25 % |
+| Positionsgröße | 3 % | 2 % | 1 % |
 
-### 6.1 Preset „Degen" (Stunden-Horizont)
+### 6.2 Warum Degen einseitig einsteigt
 
-- **Kapital:** eigener Topf, z. B. 30 % des Bot-Kapitals; Positionsgröße 0,5–1 % des Gesamtkapitals, hartes Cap in SOL.
-- **Einstieg:** **einseitig SOL** unterhalb des aktiven Bins (BidAsk-Verteilung, Konzentration nahe am aktiven Bin), Range ~20–40 Bins. Logik: Fees verdienen, sobald der Preis in die Range handelt; Token-Exposure entsteht nur durch echte Fills („DCA in the dip"), kein sofortiger 50/50-Kauf eines Degen-Tokens.
-- **Fee-Claim:** alle 30 min oder ab Schwellwert; geclaimte Token-Fees sofort in SOL swappen (Gewinnsicherung, Details: Abschnitt 8.3).
-- **Exit:** Stop-Loss −15 % Positionswert (in SOL), Take-Profit-Ziel, Max-Haltezeit 12–24 h, Notausstieg bei Rug-Signalen (Abschnitt 9).
-- **Kein klassisches Recentering nach oben:** Läuft der Preis über die Range (Position vollständig in SOL + Fees realisiert), wird die Position geschlossen und der Pool neu bewertet — nachjagen ist ein bewusster, separater Entscheid der Engine, kein Automatismus.
+Der Degen-Einstieg legt **nur SOL** unterhalb des aktiven Bins ab, in BidAsk-Form.
+Die Logik: Gebühren fließen, sobald der Preis in die Range handelt, und
+Token-Exposure entsteht nur durch echte Fills — ein DCA in den Rückgang statt
+eines sofortigen 50/50-Kaufs eines frischen Memecoins.
 
-### 6.2 Preset „Multiday" (Tage-Horizont)
+Eine solche Position liegt per Konstruktion **außerhalb** der Range und wartet
+dort auf Befüllung. Das ist kein Fehlzustand, sondern das von Meteora
+beschriebene Muster. Erreicht der Markt sie nie, greift das Zeitlimit — der
+richtige Ausgang für eine Kauforder, zu der der Markt nicht gekommen ist.
 
-- **Kapital:** z. B. 70 % des Bot-Kapitals; Positionsgröße 2–4 %, Cap in SOL.
-- **Einstieg:** 50/50 um den aktiven Bin, `Curve`-Verteilung, volle Standardbreite (~69 Bins). 50 % werden via Jupiter in den Token geswappt (Slippage-Cap, Preis-Impact-Check).
-- **Fee-Claim:** alle 4–6 h; Token-Anteil der Fees wird zu 50/50 rebalanced oder in SOL gesichert (Parameter).
-- **Rebalancing:** aktiv (Abschnitt 8).
-- **Exit:** Stop-Loss −25 % (in SOL), Zeitlimit 7–14 Tage, Verschlechterung der Pool-Qualität (Score-Verfall unter Exit-Schwelle, TVL-Abfluss > 50 %) → geordneter Ausstieg.
+Läuft der Preis über die Range hinaus (Position vollständig in SOL, Gebühren
+realisiert), wird geschlossen und der Pool neu bewertet. Nachjagen ist ein
+bewusster, separater Entscheid, kein Automatismus.
 
-### 6.3 Portfolio-Constraints (Risk Manager, global)
+### 6.3 Portfolio-Constraints (Risk Manager)
 
-> **Umsetzungsstand:** Diese Regeln sind **noch nicht scharf.** Die Parameter
-> existieren, sind zod-validiert und in der UI editierbar — durchgesetzt wird
-> bislang nur das Positionslimit je Preset. Im Paper-Modus ist das folgenlos;
-> vor Phase 2 (echtes Kapital) muss der Risk Manager stehen und getestet sein,
-> sonst geht genau der Pfad ungeprüft live, der Verluste begrenzen soll.
-> Zu beachten: Die Summe der Preset-Limits darf `maxOpenPositions` übersteigen —
-> das Schema prüft jedes Preset einzeln gegen die globale Grenze, nicht die
-> Summe. Erst die globale Durchsetzung macht daraus ein echtes Limit.
+> **Diese Regeln sind noch nicht scharf.** Die Parameter existieren, sind
+> zod-validiert und in der UI editierbar; durchgesetzt wird bislang nur das
+> Positionslimit je Preset. Im Paper-Modus folgenlos — vor Phase 2 muss der Risk
+> Manager stehen und getestet sein, sonst geht genau der Pfad ungeprüft live, der
+> Verluste begrenzen soll.
 
-- Max. gleichzeitige Positionen je Preset; zusätzlich ein globales Limit über alle Presets (`maxOpenPositions`, Default 10).
-- Max. Gesamt-Exposure in SOL; Mindest-SOL-Reserve für Gebühren/Exits (nie < 0,5 SOL).
-- Max. 1 Position pro Token-Mint; Korrelationslimit: max. n neue Degen-Entries pro Stunde.
-- **Circuit Breaker:** Tagesverlustlimit (z. B. −5 % des Bot-Kapitals) → keine neuen Entries für 24 h; zweiter Schwellwert (−10 %) → alles schließen + Kill-Switch + Alert.
+- Max. gleichzeitige Positionen je Preset **und** global (`maxOpenPositions`).
+  Zu beachten: Das Schema prüft jedes Preset einzeln gegen die globale Grenze,
+  nicht die Summe — erst die globale Durchsetzung macht daraus ein echtes Limit.
+- Max. Gesamt-Exposure in SOL; Mindest-SOL-Reserve für Gebühren und Exits.
+- Max. eine Position pro Token-Mint; Obergrenze für neue Entries pro Stunde.
+- **Circuit Breaker:** Tagesverlustlimit → keine neuen Entries für 24 h; zweiter
+  Schwellwert → alles schließen, Kill-Switch, Alert.
 
 ---
 
 ## 7. Execution Engine
 
-Zuständig für jede Chain-Interaktion; Strategy Engine gibt nur Intents („öffne Position
-X mit Parametern Y").
+*Geplant, nicht umgesetzt.* Zuständig für jede Chain-Interaktion; die Strategy
+Engine gibt nur Intents („öffne Position X mit Parametern Y").
 
-- **Tx-Pipeline:** bauen → `simulateTransaction` (Pflicht) → Priority Fee dynamisch (Helius-Schätzung, Cap) → senden → Bestätigung mit Timeout → bei Expiry idempotent neu versuchen (Blockhash-Erneuerung, max. n Versuche, exponentieller Backoff).
-- **Swaps** (Entry-Vorbereitung, Fee-Konvertierung, Exit-Reste) via Jupiter mit hartem Slippage-Cap (Degen 3 %, Multiday 1 %) und Preis-Impact-Check; optional Versand als Jito-Bundle gegen Sandwiching.
-- **Idempotenz & Crash-Sicherheit:** Jeder Intent hat eine ID und wird vor dem Senden persistiert; nach Neustart werden On-Chain-Zustand (`getAllLbPairPositionsByUser`) und DB abgeglichen (Reconciliation) — verwaiste On-Chain-Positionen werden adoptiert, halb ausgeführte Intents aufgeräumt.
-- **RPC-Failover:** Health-Check beider Endpunkte; bei Primärausfall automatischer Wechsel + Alert.
-- **Kostenerfassung:** Jede Tx protokolliert Priority Fee, Signatur-Fee, Swap-Fee und Preis-Impact → fließt in Netto-PnL.
+- **Tx-Pipeline:** bauen → `simulateTransaction` (Pflicht) → Priority Fee
+  dynamisch mit Cap → senden → Bestätigung mit Timeout → bei Expiry idempotent
+  neu versuchen (Blockhash-Erneuerung, begrenzte Versuche, exponentieller
+  Backoff).
+- **Swaps** für Entry-Vorbereitung, Fee-Konvertierung und Exit-Reste via Jupiter
+  mit hartem Slippage-Cap und Preis-Impact-Check; optional als Jito-Bundle gegen
+  Sandwiching.
+- **Idempotenz und Crash-Sicherheit:** Jeder Intent hat eine ID und wird vor dem
+  Senden persistiert. Nach einem Neustart werden On-Chain-Zustand und Datenbank
+  abgeglichen — verwaiste Positionen adoptiert, halb ausgeführte Intents
+  aufgeräumt.
+- **RPC-Failover:** Health-Check beider Endpunkte, bei Primärausfall automatischer
+  Wechsel und Alert.
+- **Kostenerfassung:** Jede Transaktion protokolliert Priority Fee, Signatur-Fee,
+  Swap-Fee und Preis-Impact → fließt in den Netto-PnL.
 
 ---
 
-## 8. Positions-Monitoring, Fee-Management & Rebalancing
+## 8. Monitoring, Fee-Management & Rebalancing
+
+*Überwiegend geplant; im Paper-Modell sind Fee-Claim, Konvertierungskosten und
+Rebalancing simuliert.*
 
 ### 8.1 Monitoring
 
-- Pro aktiver Position: aktiver Bin, Position-vs-Range-Lage, unclaimed Fees, Positionswert in SOL (mark-to-market via Jupiter), Pool-TVL/Volumen-Deltas.
-- Frequenz: Degen 15–30 s, Multiday 60 s; zusätzlich Account-Subscription über WebSocket wo möglich.
-- Abgeleitete Größen: Time-in-Range, realisierte Fee-APR, Drawdown seit Entry.
+- Pro aktiver Position: aktiver Bin, Lage zur Range, unclaimed Fees,
+  Positionswert in SOL, Pool-TVL- und Volumen-Deltas.
+- Frequenz: Degen 15–30 s, längerfristige Presets 60 s; zusätzlich
+  Account-Subscription über WebSocket, wo möglich.
+- Abgeleitet: Time-in-Range, realisierte Fee-APR, Drawdown seit Entry.
 
-### 8.2 Rebalance-Regeln (primär Multiday)
+### 8.2 Rebalancing
 
-- **Trigger:** aktiver Bin verlässt die inneren 80 % der Range (Puffer-Parameter) oder ist ≥ x Bins vom Zentrum entfernt.
-- **Hysterese:** Mindestabstand zwischen Rebalances (Default 2 h), max. Rebalances pro Position/Tag (Default 4) — verhindert Zappeln in Seitwärts-Chops.
-- **EV-Check vor jedem Rebalance:** geschätzte zusätzliche Fee-Einnahme (aus aktueller Fee-Rate × Restlaufzeit) muss die Rebalance-Kosten (Swap-Fee + Preis-Impact + Priority Fees) um Faktor ≥ 2 übersteigen, sonst warten oder Exit prüfen.
-- **Ablauf:** Fees claimen → `simulateRebalancePosition()` → wenn ok: `rebalancePosition()` (nativer SDK-Pfad); Fallback klassisch: remove → swap auf Zielverhältnis → re-add. Danach neue Range um aktiven Bin.
-- **Richtungs-Asymmetrie:** Rebalance nach unten (Preis fällt) ist zugleich ein Stop-Loss-Check — bei Abwärts-Rebalance wird zuerst die Exit-Logik (Abschnitt 9) ausgewertet; nie „in den fallenden Preis" nachzentrieren, wenn SL-Nähe besteht.
-- **Degen-Positionen rebalancen nicht** — sie werden geschlossen und ggf. neu eröffnet (einfacher, weniger Fehlerpfade, klare PnL-Attribution).
+- **Trigger:** Der aktive Bin verlässt die inneren `100 − 2 × bufferPct` Prozent
+  der Range.
+- **Hysterese:** Mindestabstand zwischen Rebalances und Tageslimit verhindern
+  Zappeln in Seitwärtsphasen.
+- **EV-Check:** Der geschätzte Zusatzertrag über die Restlaufzeit muss die Kosten
+  (Swap, Preis-Impact, Priority Fees, Composition Fee) um `minEvFactor`
+  übersteigen — sonst warten oder Exit prüfen.
+- **Ablauf:** Fees claimen → `simulateRebalancePosition()` → `rebalancePosition()`.
+  Das ist **ein** Vorgang (claim, remove, resize, add); die Position wird nicht
+  geschlossen und neu eröffnet, es fällt also keine erneute Rent an.
+- **Richtungs-Asymmetrie:** Ein Rebalance nach unten ist zugleich ein
+  Stop-Loss-Check. Die Exit-Logik hat Vorrang — nie in einen fallenden Preis
+  nachzentrieren.
+- **Degen rebalanciert nicht.** Positionen werden geschlossen und gegebenenfalls
+  neu eröffnet: weniger Fehlerpfade, klarere PnL-Zuordnung.
 
-### 8.3 Fee-Claiming & Konvertierung (Token-Fees → SOL)
+### 8.3 Fee-Claiming & Konvertierung
 
-**Mechanik-Grundlage:** DLMM erhebt die Swap-Gebühr auf den **Input-Token** jedes Trades.
-In einem X/SOL-Pool fallen Fees daher immer gemischt an: Käufe (SOL→Token) zahlen Fees in
-SOL, Verkäufe (Token→SOL) in Token. Eine einseitige SOL-Bid-Position (Degen-Preset) wird
-gefüllt, während Verkäufer in sie hineinhandeln — sie verdient also überwiegend
-**Token-Fees**. Fee-Konvertierung ist damit integraler Teil der Gewinnsicherung, kein
-Nebenaspekt.
-
-> **Korrektur (Juli 2026, nach Prüfung der Meteora-Doku):** Der folgende Absatz
-> war sachlich falsch und ist überholt. **DLMM hat einen Collect-Fee-Mode.**
-> `pool_config.collect_fee_mode` ist `0` = `InputOnly` (Gebühr im Input-Token,
-> folgt der Handelsrichtung) oder `1` = `OnlyY` (Gebühr **immer** in Token Y,
-> auch wenn Y der Output ist). Der Modus steht in jeder `/pools`-Antwort und ist
-> im SDK als `CollectFeeMode` exportiert.
->
-> Folge: In einem X/SOL-Pool, in dem **SOL Token Y ist**, fallen bei `OnlyY`
-> sämtliche Gebühren in SOL an — das Token-Exposure geclaimter Gebühren
-> entfällt, und damit der größte Einzelrisikoposten des Degen-Presets. Der Modus
-> ist deshalb ein Discovery-Filter und ein Merkmal erster Güte, nicht eine
-> Fußnote.
->
-> Wichtig ist die Seitenprüfung: `OnlyY` allein sagt nichts. Steht SOL auf der
-> X-Seite, kehrt derselbe Modus den Vorteil ins Gegenteil, weil dann alle
-> Gebühren im Memecoin anfallen. Maßgeblich ist `collect_fee_mode == 1 && mintY
-> == WSOL` (implementiert als `feeCurrencyOf()` in `packages/core`).
->
-> Die unten beschriebene Claim- und Konvertierungspolitik bleibt richtig und
-> nötig — aber nur für `InputOnly`-Pools und für `OnlyY`-Pools mit SOL auf der
-> X-Seite. Für die verbleibenden Pools ist sie gegenstandslos.
-
-**Warum keine Beschränkung auf „Pools mit nur-SOL-Fees":** ~~Einen solchen Modus gibt es
-bei DLMM nicht — die Fee-Währung folgt der Handelsrichtung, nicht der Pool-Konfiguration.~~
-Faktisch wäre die Beschränkung nur erreichbar über reine Ask-Seiten-Positionen (Token
-oberhalb des Preises platzieren, Käufer zahlen SOL-Fees); das erfordert aber den
-vorherigen Kauf des Tokens = *mehr* Inventarrisiko, nicht weniger. ~~Quote-only-Fees
-existieren als creator-seitige Pool-Option (`collect fee mode: OnlyB`) nur bei
-**DAMM v2**.~~ Empfehlung: DLMM-Universum nicht künstlich
-einschränken, sondern Token-Fees systematisch ernten und konvertieren:
+Ob Gebühren überhaupt in Token anfallen, entscheidet `collect_fee_mode`
+(Abschnitt 2.1). Für `OnlyY`-Pools mit SOL auf der Y-Seite ist alles Folgende
+gegenstandslos — dort fallen Gebühren ohnehin nur in SOL an. Für alle übrigen
+Pools ist die Konvertierung integraler Teil der Gewinnsicherung:
 
 **Claim-Politik**
 
-- Trigger: Preset-Intervall (Degen 30 min, Multiday 4–6 h) **oder** Wert-Schwelle:
-  unclaimed Fees ≥ max(`minClaimValueSOL`, `claimCostFactor` × geschätzte Tx-Kosten).
-- Pflicht-Claims: vor jedem Rebalance, vor jedem Close, im Notausstieg.
-- Batching: ein Scheduler-Lauf claimt alle fälligen Positionen (`claimAllSwapFee`),
-  anschließend werden Konvertierungen **pro Token über alle Positionen aggregiert**
-  → Fixkosten (Priority Fees) amortisieren sich.
-- Farming-/LM-Rewards (falls der Pool Rewards in Dritt-Token zahlt): gleiche Pipeline
-  via `claimAllRewards`; Reward-Token werden wie Fee-Token behandelt.
+- Trigger: Preset-Intervall **oder** Wert-Schwelle — unclaimed Fees ≥
+  max(`minClaimValueSol`, `claimCostFactor` × geschätzte Tx-Kosten).
+- Pflicht-Claims vor jedem Rebalance, jedem Close und im Notausstieg.
+- Batching: Ein Scheduler-Lauf claimt alle fälligen Positionen; Konvertierungen
+  werden **pro Token über alle Positionen aggregiert**, damit sich die Fixkosten
+  amortisieren.
+- Farming-Rewards durchlaufen dieselbe Pipeline.
 
-**Konvertierungs-Politik (via Jupiter)**
+**Konvertierung via Jupiter**
 
-- **Degen: 100 % der Token-Fees sofort nach Claim → SOL.** Slippage-Cap 3 %,
-  Preis-Impact-Cap; wenn nicht ausführbar → als Dust vormerken, mit Backoff erneut
-  versuchen, spätestens beim Exit mitverkaufen.
-- **Multiday:** `convertFeesToSol`-Quote (Default 50 %) → SOL; Rest optional
-  **Compounding** (Wiederanlage via `addLiquidityByStrategy`), aber nur wenn die
-  Position gesund ist (Score über Schwelle, Time-in-Range ok) und der Betrag
-  ≥ `compound.minSOL` — sonst ebenfalls konvertieren.
-- **Dust-Schwelle:** Swaps erst ab `dustThresholdSOL` (Default 0,02 SOL-Gegenwert);
-  kleinere Beträge sammeln sich in einem Dust-Ledger und laufen beim nächsten
-  Claim/Exit mit — verhindert, dass Gas den Ertrag frisst.
-- MEV-Schutz: harte Slippage-Caps, optional Jito-Bundle.
+- **Degen:** 100 % der Token-Gebühren sofort nach dem Claim in SOL. Ist der Swap
+  nicht ausführbar, wird der Betrag als Dust vorgemerkt und spätestens beim Exit
+  mitverkauft.
+- **Längerfristige Presets:** `convertToSolPct` in SOL, der Rest optional als
+  Compounding — aber nur, wenn die Position gesund ist und der Betrag über
+  `compound.minSol` liegt.
+- **Dust-Schwelle:** Swaps erst ab `dustThresholdSol`; kleinere Beträge sammeln
+  sich und laufen beim nächsten Claim oder Exit mit. Sonst frisst Gas den Ertrag.
 
-**Risiko-Sicht:** Unclaimte bzw. unkonvertierte Token-Fees sind offenes Token-Exposure.
-Im Rug-Fall sind bereits konvertierte SOL-Fees gesichert, Token-Fees folgen dem Token
-gegen null — daraus leitet sich die kurze Degen-Claim-Kadenz ab. Buchhaltung: Fees
-werden zum Claim-Zeitpunkt in SOL bewertet, Konvertierungskosten (Impact/Slippage)
-separat erfasst; das Dashboard zeigt Brutto-Fee-Ertrag vs. Netto nach Konvertierung.
+**Risiko-Sicht:** Unclaimte oder unkonvertierte Token-Gebühren sind offenes
+Exposure. Im Rug-Fall sind konvertierte SOL-Gebühren gesichert, Token-Gebühren
+folgen dem Token gegen null — daraus leitet sich die kurze Degen-Claim-Kadenz ab.
+Gebühren werden zum Claim-Zeitpunkt in SOL bewertet, Konvertierungskosten separat
+erfasst.
 
 ---
 
 ## 9. Exits, Notfall-Logik, Kill-Switch
 
-**Geordneter Exit** (SL/TP/Zeit/Score-Verfall): Fees claimen → `removeLiquidity` (100 %) → `closePosition` → Token-Rest via Jupiter in SOL (Slippage-Cap; bei Nichtausführbarkeit: Teilverkäufe/TWAP über n Minuten) → PnL festschreiben → Pool-Cooldown.
+**Geordneter Exit** (Stop-Loss, Take-Profit, Zeitlimit, Score-Verfall): Fees
+claimen → `removeLiquidity` (100 %) → `closePosition` → Token-Rest via Jupiter in
+SOL (bei Nichtausführbarkeit Teilverkäufe über mehrere Minuten) → PnL
+festschreiben → Pool-Cooldown.
 
-**Notausstieg (Rug-Trigger), höchste Priorität, überspringt EV-Checks:**
+**Notausstieg bei Rug-Signalen** — höchste Priorität, überspringt EV-Checks:
 
 | Signal | Schwelle (Default) |
 |---|---|
 | Preissturz | > 30 % in 5 min |
 | TVL-Abzug | > 40 % in 10 min |
-| Verkaufbarkeit weg | Jupiter-Quote Token→SOL schlägt fehl oder Impact > 25 % |
-| Autoritäten-Änderung | neue Freeze-/Mint-Authority-Aktivität, Token-Account-Freeze beobachtet |
-| Dev-/Top-Holder-Dump | bekannter Insider verkauft > x % |
+| Verkaufbarkeit weg | Jupiter-Quote schlägt fehl oder Impact > 25 % |
+| Autoritäten-Änderung | neue Freeze-/Mint-Authority-Aktivität |
+| Dev- oder Top-Holder-Dump | bekannter Insider verkauft über Schwelle |
 
-Ablauf Notausstieg: sofort `removeLiquidity` mit hoher Priority Fee → alles in SOL
-(hoher Slippage-Toleranz-Notmodus) → Token + Deployer auf **permanente Blacklist** →
-Alert. Misslingt der Token-Verkauf (Honeypot nachträglich), wird der Verlust realisiert
-protokolliert — kein wiederholtes Anrennen.
+Ablauf: sofort `removeLiquidity` mit hoher Priority Fee → alles in SOL im
+Notmodus → Token und Deployer auf **permanente Blacklist** → Alert. Misslingt der
+Verkauf, wird der Verlust realisiert protokolliert — kein wiederholtes Anrennen.
 
-**Kill-Switch (UI + Telegram-Kommando):** Stufe 1 „Pause" = keine neuen
-Entries/Rebalances, Monitoring läuft. Stufe 2 „Flatten" = alle Positionen geordnet
+**Kill-Switch** (UI und Telegram): Stufe 1 „Pause" = keine neuen Entries oder
+Rebalances, Monitoring läuft weiter. Stufe 2 „Flatten" = alle Positionen geordnet
 schließen, alles in SOL.
+
+> Die `emergency`-Schwellen sind konfigurierbar, werden aber noch von keiner Logik
+> ausgewertet — auch nicht in der Simulation. Deren Verlust-Tail ist dadurch zu
+> freundlich (KONZEPT-ML.md 10.1).
 
 ---
 
 ## 10. Zustandsmaschine & Datenmodell
 
-### 10.1 Position-Lifecycle
+### 10.1 Position-Lebenszyklus
 
 ```mermaid
 stateDiagram-v2
@@ -475,52 +561,62 @@ stateDiagram-v2
 ```
 
 Jeder Übergang wird mit Zeitstempel, Auslöser und Kontext in einem **Event-Log**
-persistiert (Audit-Trail = Datenbasis des Dashboards).
+persistiert — der Audit-Trail ist die Datenbasis des Dashboards.
 
 ### 10.2 Kerntabellen (PostgreSQL)
 
-- `pool_candidates` — entdeckte Pools, Quelle, Roh-Metriken, Filter-Ergebnis (inkl. welcher Filter abgelehnt hat), Score, Shadow-Tracking-Verlauf.
-- `positions` — Zustand, Preset, Pool, Range (min/max Bin), Einsatz, aktueller Wert, Realized/Unrealized PnL.
-- `position_events` — Zustandsübergänge + Auslöser.
-- `transactions` — Signatur, Typ (open/claim/rebalance/close/swap), Status, alle Kosten.
-- `fee_claims` — Claim-Beträge je Token, SOL-Bewertung zum Claim-Zeitpunkt.
-- `pool_snapshots` — Zeitreihe TVL/Volumen/Fee-Rate/Preis für aktive + geschattete Pools.
-- `config_versions` — jede Parameteränderung versioniert (wer/wann/was) → Performance ist Konfigurationsständen zuordenbar.
-- `blacklist` — Mints, Deployer, Pools; mit Grund.
+**Handel und Betrieb**
 
-Hinzu kommen drei Tabellen für die Strategie-Optimierung (KONZEPT-ML.md 3.2),
-die bewusst unabhängig von der Positions-Persistenz geführt werden — der
-Datensatz soll gerade auch die Pools enthalten, in die nie investiert wurde:
+| Tabelle | Inhalt |
+|---|---|
+| `pool_candidates` | entdeckte Pools mit Quelle, Roh-Metriken, Filter-Ergebnis (inklusive des ablehnenden Filters), Score, Shadow-Frist |
+| `positions` | Zustand, Preset, Pool, Bin-Range, Einsatz, Wert, realisierter und unrealisierter PnL |
+| `position_events` | Zustandsübergänge mit Auslöser |
+| `transactions` | Signatur, Typ, Status, alle Kosten |
+| `fee_claims` | Claim-Beträge je Token, SOL-Bewertung zum Claim-Zeitpunkt |
+| `config_versions` | jede Parameteränderung versioniert (wer, wann, was) |
+| `blacklist` | Mints, Deployer, Pools mit Grund |
 
-- `tracked_pools` — welche Pools verfolgt werden, seit wann und bis wann.
-- `candidate_features` — Merkmalsvektor je Kandidat zum **Entscheidungszeitpunkt**, versioniert über `feature_version`.
-- `candidate_outcomes` — Ergebnis-Labels je Horizont (1 h/6 h/24 h/72 h/7 d), ausschließlich aus der Zeit **nach** der Entscheidung, mit Abdeckungsangaben (`observations`, `covered_hours`).
-- `pool_history_candles` — nachgeladene Kerzen (Open/High/Low/Close, Volumen, Gebühren, Protokollanteil je Fenster). Bewusst getrennt von `pool_snapshots`: Eine Kerze ist eine Menge je abgeschlossenem Fenster, ein Messpunkt eine gleitende 24-Stunden-Summe.
+**Datenaufzeichnung** — bewusst unabhängig von der Positions-Persistenz geführt,
+denn der Datensatz soll gerade auch die Pools enthalten, in die nie investiert
+wurde (KONZEPT-ML.md 3):
+
+| Tabelle | Inhalt |
+|---|---|
+| `tracked_pools` | welche Pools verfolgt werden, seit wann und bis wann |
+| `candidate_features` | Merkmalsvektor je Kandidat zum **Entscheidungszeitpunkt**, versioniert über `feature_version` |
+| `candidate_outcomes` | Ergebnis-Labels je Horizont (1 h/6 h/24 h/72 h/7 d), ausschließlich aus der Zeit **nach** der Entscheidung, mit Abdeckungsangaben |
+| `pool_snapshots` | Messpunkte: TVL, SOL-Kurs, Gebührenstruktur, gleitende Zeitfenster |
+| `pool_history_candles` | nachgeladene Kerzen: OHLC, Volumen, Gebühren, Protokollanteil **je Fenster** |
+
+Die letzten beiden sind getrennt, weil sie Verschiedenes bedeuten: Eine Kerze ist
+eine Menge je abgeschlossenem Fenster, ein Messpunkt eine gleitende
+24-Stunden-Summe. Unter gemeinsamen Spaltennamen wäre die Verwechslung nur eine
+Frage der Zeit.
 
 ---
 
 ## 11. UI & Analyse-Dashboard
 
-Self-hosted Next.js-App, Zugriff nur via Login/Token (kein öffentliches Interface).
+Self-hosted Next.js-App. **Zugriff nur via Login oder Token** — derzeit nicht
+umgesetzt, weshalb die UI nur lokal laufen darf.
 
-### 11.1 Seiten
+**Vorhanden:** Preset-Vergleich (PnL, Fees, Kosten, Trefferquote, Time-in-Range,
+HODL-Vergleich), Positionsübersicht mit Bin-Range und Ausstiegsgrund, Scanner mit
+Score und Ablehnungsbegründung, Parameter-Editor mit Validierung und
+Versionierung.
 
-1. **Übersicht:** Bot-Status, Kapital & Exposure je Preset, offene Positionen live (Wert, PnL, Time-in-Range, nächste Aktion), Kill-Switch-Buttons (Pause/Flatten).
-2. **Scanner:** aktuelle Kandidaten mit Score-Breakdown und Filter-Ergebnissen („warum abgelehnt") — macht das Screening transparent und debugbar.
-3. **Parameter:** alle Preset- und Risiko-Parameter (Abschnitt 14) editierbar; zod-Validierung, Vorschau der Auswirkung (z. B. „TVL-Filter würde aktuell n Pools zulassen"), Versionierung, Anwenden ohne Neustart (Config-Service mit Hot-Reload). Sicherheitskritische Limits (Caps, Circuit Breaker) erfordern Bestätigung.
-4. **Analyse-Dashboard** (Effizienz des Bots):
-   - **PnL:** kumuliert & pro Tag, netto nach allen Kosten; Aufriss nach Preset, Pool, Quelle (Fabriq vs. Replikation).
-   - **Ertragsqualität:** realisierte Fee-APR vs. IL je Position; PnL vs. „HODL-Benchmark" (was wäre der Einsatz wert, hätte man nur gehalten).
-   - **Kosten:** Priority Fees, Swap-Fees, Preis-Impact, Rebalance-Kosten — absolut und als % vom Ertrag.
-   - **Trefferquoten:** Win-Rate, Verteilung der Positions-PnLs, Max Drawdown, Profit Factor.
-   - **Filter-Güte:** Rug-Rate durchgelassener vs. geblockter Pools (Shadow-Tracking), False-Positive-/False-Negative-Trend.
-   - **Betrieb:** Tx-Erfolgsquote, Bestätigungszeiten, RPC-Failover, Fehlerrate.
-5. **Positions-Detail:** vollständige Historie (Events, Txs, Claims, Chart der Range vs. Preis).
+**Geplant:**
 
-### 11.2 Live-Updates
-
-WebSocket-Push vom Bot (Positionswerte, neue Kandidaten, Alerts); Charts mit Recharts;
-Tabellen mit Server-Pagination aus PostgreSQL.
+1. **Übersicht** mit Bot-Status, Exposure je Preset, Kill-Switch-Schaltflächen.
+2. **Analyse-Dashboard:** PnL kumuliert und pro Tag netto nach allen Kosten;
+   Ertragsqualität (realisierte Fee-APR gegen IL, PnL gegen HODL-Benchmark);
+   Kostenaufriss; Trefferquoten, PnL-Verteilung, Max Drawdown, Profit Factor;
+   **Filter-Güte** aus dem Shadow-Tracking; Betriebskennzahlen (Tx-Erfolgsquote,
+   Bestätigungszeiten, RPC-Failover).
+3. **Positions-Detail** mit vollständiger Historie und Chart der Range gegen Preis.
+4. **Strategie-Labor** (KONZEPT-ML.md 9).
+5. **Live-Updates** per WebSocket statt server-gerenderter Momentaufnahmen.
 
 ---
 
@@ -528,232 +624,231 @@ Tabellen mit Server-Pagination aus PostgreSQL.
 
 | Risiko | Gegenmaßnahmen |
 |---|---|
-| **Rug Pull / Honeypot** | Hard Filters (Abschnitt 5), Verkaufbarkeits-Simulation, Rug-Trigger-Notausstieg, permanente Blacklist, kleine Degen-Positionsgrößen als Grundannahme „Rug passiert trotzdem" |
-| **Impermanent Loss / Preisverfall** | Einseitige SOL-Entries (Degen), Stop-Loss in SOL-Terms, Max-Haltezeit, Fee-Gewinne laufend in SOL sichern, EV-Check vor Rebalance statt blindem Nachzentrieren |
-| **Wash-Trading-Fallen** (Fake-Volumen lockt LPs) | Volumen-Plausibilitäts-Heuristiken, Trades/Wallet-Verteilung, Fee-Ertrag real messen und Position bei Ausbleiben schließen |
-| **Klumpenrisiko** | Caps pro Position/Token/Preset, max. gleichzeitige Positionen, Entry-Rate-Limit |
-| **Kaskadenverluste** | Tagesverlust-Circuit-Breaker (2 Stufen), Kill-Switch, Cooldowns nach Verlusten |
-| **Ausführungsrisiko** (Slippage, Sandwiching, Tx-Fails) | Pflicht-Simulation, Slippage-Caps, Jito-Option, Priority-Fee-Steuerung mit Cap, Retries mit Idempotenz |
-| **Infrastrukturausfall** (RPC, Bot-Crash, Fabriq-API weg) | RPC-Failover, Reconciliation beim Start, Watchdog/Heartbeat + Alert, Fabriq-Fallback auf eigene Replikation; Positionen sind on-chain auch bei Bot-Ausfall sicher (kein Verlust durch Downtime, nur entgangene Reaktion) |
-| **Schlüssel-/Betriebssicherheit** | Dedizierte Hot-Wallet nur mit Arbeitskapital; Gewinne regelmäßig automatisch an Cold-Wallet ausschütten (Sweep-Job); Key verschlüsselt (age/KMS), nie im Repo; Server gehärtet; UI nur mit Auth |
-| **Parameter-Fehlbedienung** | Validierung + Plausibilitätsgrenzen in der UI, Config-Versionierung, sicherheitskritische Änderungen mit Bestätigung |
-| **Modell-Selbstbetrug** | Paper-Trading-Modus mit identischem Codepfad, Shadow-Tracking, Go/No-Go-Kriterien vor jeder Ausbaustufe (Abschnitt 13) |
+| **Rug Pull / Honeypot** | Hard Filters (Abschnitt 5), Verkaufbarkeits-Simulation, Rug-Trigger-Notausstieg, permanente Blacklist; kleine Degen-Positionsgrößen unter der Grundannahme „Rug passiert trotzdem" |
+| **Impermanent Loss** | Einseitige SOL-Entries bei Degen, Stop-Loss in SOL-Terms, Max-Haltezeit, laufende Sicherung der Gebühren in SOL, EV-Check statt blindem Nachzentrieren |
+| **Wash-Trading-Fallen** | Volumen-Plausibilität, Trade-Größen-Heuristik, Fee-Ertrag real messen und Position bei Ausbleiben schließen |
+| **Klumpenrisiko** | Caps pro Position, Token und Preset; max. gleichzeitige Positionen; Entry-Rate-Limit |
+| **Kaskadenverluste** | Tagesverlust-Circuit-Breaker in zwei Stufen, Kill-Switch, Cooldowns nach Verlusten |
+| **Ausführungsrisiko** | Pflicht-Simulation, Slippage-Caps, Jito-Option, Priority-Fee-Cap, Retries mit Idempotenz |
+| **Infrastrukturausfall** | RPC-Failover, Reconciliation beim Start, Watchdog und Alert. Positionen sind on-chain auch bei Bot-Ausfall sicher — Downtime kostet keine Mittel, nur entgangene Reaktion |
+| **Schlüsselsicherheit** | Dedizierte Hot-Wallet mit Arbeitskapital; Gewinne per Sweep-Job an eine Cold-Wallet; Key verschlüsselt, nie im Repo; UI nur mit Auth |
+| **Parameter-Fehlbedienung** | Validierung mit Plausibilitätsgrenzen, Config-Versionierung, Bestätigung für sicherheitskritische Änderungen |
+| **Modell-Selbstbetrug** | Paper-Trading auf identischem Codepfad, Shadow-Tracking, Go/No-Go-Kriterien vor jeder Ausbaustufe |
 
-Ausdrückliche Restrisiken: Smart-Contract-Risiko (Meteora selbst), Solana-Netzwerk­degradation,
-sowie Rugs, die alle Filter passieren. Diese sind nicht eliminierbar — nur durch
-Positionsgrößen und Diversifikation begrenzbar. Es wird nur Kapital eingesetzt, dessen
-Totalverlust tragbar ist.
+Ausdrückliche Restrisiken: Smart-Contract-Risiko bei Meteora selbst,
+Solana-Netzwerkdegradation und Rugs, die alle Filter passieren. Diese sind nicht
+eliminierbar, nur durch Positionsgrößen und Diversifikation begrenzbar. Es wird
+nur Kapital eingesetzt, dessen Totalverlust tragbar ist.
 
 ---
 
-## 13. Test- und Rollout-Plan
+## 13. Simulationsmodell, Tests und Rollout
 
-### Paper-Trading-Modell (umgesetzt)
+### 13.1 Das Paper-Modell
 
 Die Simulation bildet die DLMM-Mechanik bin-genau ab: Bin-Preise nach
-`(1 + binStep/10000)^i`, Liquiditätsverteilung je Strategie (Spot/Curve/BidAsk),
-und beim Überqueren eines Bins wechselt dieser die Seite (fallender Preis: SOL
-kauft Token; steigender Preis: Token wird zu SOL). Wichtige Eigenschaft, die
-daraus folgt und getestet ist: **Bin-Übergänge sind wertneutral** — der LP-Gewinn
-stammt ausschließlich aus Gebühren, nicht aus dem Durchlaufen der Range.
+`(1 + binStep/10000)^i`, Liquiditätsverteilung je Strategie, und beim Überqueren
+eines Bins wechselt dieser die Seite (fallender Preis: SOL kauft Token;
+steigender Preis: Token wird zu SOL). Eine getestete Eigenschaft folgt daraus:
+**Bin-Übergänge sind wertneutral.** Der LP-Gewinn stammt ausschließlich aus
+Gebühren, nicht aus dem Durchlaufen der Range.
 
-Bewusste Vereinfachungen (dokumentiert, weil sie die Ergebnisse beeinflussen):
+Modelliert werden:
 
-- **Fee-Anteil teilweise geschätzt:** Nach der DLMM-Doku verdient nur der
-  **aktive Bin**, und der Anteil daran ist `eigene Liquidität dort / gesamte
-  Liquidität dort`. Die eigene Seite wird exakt gerechnet (`L = P·x + y` des
-  aktiven Bins); geschätzt wird nur die fremde: Sie gilt als gleichmäßig über
-  `poolLiquidityBins` Bins verteilt (Default 70 = DLMM-Standardbreite). Dadurch
-  zahlt sich Konzentration nahe am Preis aus — über den bloßen TVL-Anteil
-  gerechnet wären Spot, Curve und BidAsk ununterscheidbar gewesen, und genau
-  dieser Parameter soll optimiert werden. Ein Abschlag (`feeShareHaircutPct`,
-  Default 30 %) korrigiert zusätzlich konservativ nach unten.
-- **Protokollanteil wird abgezogen:** 10 % der Gebühr bei Standard-Pools, 20 %
-  bei Launch-Pools gehen ans Protokoll, nicht an den LP.
-- **Maßgeblich ist die Gesamtgebühr** (Basis + Volatilitätsaufschlag), nicht die
-  Basisgebühr. Das Volumen wird aus dem kürzesten verfügbaren Zeitfenster als
-  24-Stunden-Rate hochgerechnet, damit Volatilitätsphasen nicht weggeglättet
-  werden.
-- **Composition Fee:** Einzahlungen in den aktiven Bin kosten extra — beim
-  Eröffnen einer 50/50-Position und bei jedem Rebalance.
-- **Kosten nur On-Chain:** Priority Fees je Transaktion und Slippage je Swap.
-  Positions-Rent ist erstattungsfähig und damit gebundenes Kapital, kein Aufwand.
-  **Infrastrukturkosten (VPS, RPC-Tarife) bleiben außen vor** — monatlicher
-  Fixaufwand, keiner Position zurechenbar; sie würden den Preset-Vergleich
-  verzerren statt ihn zu schärfen. Für die Gesamtwirtschaftlichkeit sind sie
-  weiterhin in Abschnitt 15 zu berücksichtigen.
-- **Slippage innerhalb eines Bins** wird vernachlässigt (bei üblichen Bin-Steps
-  unter 1 % je Bin).
+- **Gebührenanteil im aktiven Bin.** Die eigene Seite wird exakt gerechnet
+  (`L = P·x + y`); die fremde Liquidität ist von außen nicht beobachtbar und gilt
+  als gleichmäßig über `poolLiquidityBins` Bins verteilt. Dadurch zahlt sich
+  Konzentration nahe am Preis aus — über den bloßen TVL-Anteil gerechnet wären
+  Spot, Curve und BidAsk ununterscheidbar, und genau dieser Parameter soll
+  optimiert werden. Ein Abschlag (`feeShareHaircutPct`) korrigiert zusätzlich nach
+  unten.
+- **Protokollanteil**, abgezogen vor der LP-Verteilung.
+- **Gesamtgebühr** statt Basisgebühr, mit dem Volumen aus dem kürzesten
+  verfügbaren Zeitfenster als 24-Stunden-Rate — sonst würden Volatilitätsphasen
+  weggeglättet.
+- **Composition Fee** beim Einzahlen in den aktiven Bin, also beim Eröffnen einer
+  50/50-Position und bei jedem Rebalance.
+- **Rebalancing als ein Vorgang** mit Cooldown, Tageslimit und EV-Check.
+- **HODL-Benchmark je Position:** Was wäre der Einsatz wert, hätte man ihn in der
+  Eröffnungszusammensetzung einfach gehalten? Das ist die eigentliche Frage an
+  das LPing — Gebühreneinnahmen allein sagen nichts, solange der Vergleich zum
+  Halten nicht positiv ist.
 
-**Einseitige Positionen warten außerhalb der Range.** Eine `quote_only`-Position
-liegt per Konstruktion unterhalb des aktiven Bins — Meteora beschreibt das als
-DCA-Muster ("Deposit quote token single-sided … below the current price";
-Bid-Ask "may sit away from the active price until the market moves into the edge
-bins"). Die Simulation schließt sie deshalb erst, wenn der Markt die Range
-einmal erreicht hatte und sie wieder verlassen hat. Wird sie nie befüllt, greift
-das Zeitlimit — der richtige Exit für eine Kauforder, die der Markt nicht
-erreicht hat.
+**Bewusste Vereinfachungen:**
 
-**Rebalancing** ist als ein Ablauf modelliert (claim → resize → add), wie es die
-DLMM-Instruktion `rebalance_liquidity` vorsieht: Die Position wird nicht
-geschlossen und neu eröffnet, es fällt also keine erneute Rent an. Ausgelöst
-wird es, wenn der aktive Bin den Puffer verlässt; Cooldown und Tageslimit
-verhindern Zappeln, und ein EV-Check verlangt, dass der erwartete Zusatzertrag
-die Kosten um `minEvFactor` übersteigt. Steht ohnehin ein Exit an, hat dieser
-Vorrang — nie in einen fallenden Preis nachzentrieren.
+| Vereinfachung | Wirkung |
+|---|---|
+| Nur der aktive Bin verdient; tatsächlich verdienen alle vom Swap durchlaufenen Bins | unterschätzt Gebühren, breite Positionen stärker als enge |
+| Fremde Liquidität als gleichverteilt angenommen | skaliert den Gebührenanteil linear; reine Annahme |
+| Zeit-in-Range und Gebühren an Intervallgrenzen abgelesen | überschätzt beides, wachsend mit der Volatilität |
+| Exit-Slippage pauschal statt größenabhängig | unterschätzt Verluste im Tail |
+| Slippage innerhalb eines Bins vernachlässigt | gering bei üblichen Bin-Steps |
+| Kosten nur On-Chain (Priority Fees, Slippage) | Rent ist erstattungsfähig, also gebundenes Kapital; Infrastrukturkosten sind keiner Position zurechenbar und würden den Preset-Vergleich verzerren (siehe Abschnitt 15) |
 
-Jede Position führt zusätzlich einen **HODL-Benchmark** mit: Was wäre der Einsatz
-wert, hätte man ihn in der Eröffnungszusammensetzung einfach gehalten? Das ist die
-eigentliche Frage an das LPing — Fee-Einnahmen allein sagen nichts, solange der
-Vergleich zum Halten nicht positiv ist.
+Diese Abweichungen sind nicht nur Ungenauigkeiten, sondern haben eine **Richtung**
+— und ein Optimierer läuft dorthin. KONZEPT-ML.md 10.1 führt sie mit Vorzeichen
+und Konsequenz auf.
 
-**Teststrategie**
+### 13.2 Teststrategie
 
-- Unit-Tests für Scoring, Filter, Strategie- und Risk-Regeln (pure Funktionen, Fixtures aus echten API-Antworten).
-- Integrationstests der Adapter gegen aufgezeichnete Responses; Tx-Bau gegen `simulateTransaction`.
-- Fehlerinjektion: RPC-Ausfall, Tx-Timeout, halbfertige Intents → Reconciliation muss deterministisch aufräumen.
+- Unit-Tests für Scoring, Filter, Simulation und Replay — pure Funktionen mit
+  Fixtures aus echten API-Antworten.
+- Adapter gegen aufgezeichnete Responses; Fixtures folgen der OpenAPI-Spezifikation,
+  damit eine Feldnamen-Änderung den Test bricht und nicht still den Datensatz.
+- Datenbank-Roundtrip gegen echtes PostgreSQL (`db:check`).
+- Für die Execution-Stufe zusätzlich: Tx-Bau gegen `simulateTransaction` und
+  Fehlerinjektion (RPC-Ausfall, Tx-Timeout, halbfertige Intents) — die
+  Reconciliation muss deterministisch aufräumen.
 
-**Rollout in Phasen mit Go/No-Go-Kriterien**
+### 13.3 Rollout in Phasen
 
-| Phase | Inhalt | Go-Kriterium für nächste Phase |
+| Phase | Inhalt | Go-Kriterium für die nächste Phase |
 |---|---|---|
-| 1. Beobachten (1–2 Wo.) | Discovery + Screening + Dashboard live, **Paper-Trading** (simulierte Positionen auf echten Marktdaten inkl. simulierter On-Chain-Kosten), alle Presets parallel | Filter-Rug-Rate im Rahmen, Paper-PnL positiv über ≥ 2 Wochen, ≥ 20–30 geschlossene Positionen je Preset, keine Pipeline-Bugs |
-| 2. Klein & manuell (1–2 Wo.) | Echte Positionen mit Mikro-Caps (z. B. max. 0,5 SOL/Position), Entries erfordern 1-Klick-Freigabe in der UI | Tx-Erfolgsquote > 95 %, Ist-Kosten ≈ simulierte Kosten, Notausstieg 1× erfolgreich getestet |
-| 3. Vollautomatik klein | Auto-Entries beide Presets, Rebalancing aktiv, Circuit Breaker scharf | 4 Wochen netto-positiv nach Kosten, Drawdown < Limit |
-| 4. Skalierung & Tuning | Caps schrittweise erhöhen, Parameter datengetrieben nachziehen (Dashboard/Shadow-Tracking), optional: Backtesting-Modul auf gesammelten `pool_snapshots` | fortlaufend |
+| **1. Beobachten** | Discovery, Screening, Paper-Trading auf echten Marktdaten, alle Presets parallel; Datenaufzeichnung und Replay | Filter-Rug-Rate im Rahmen, Paper-PnL positiv über ≥ 2 Wochen, ≥ 20–30 geschlossene Positionen je Preset, keine Pipeline-Fehler |
+| **2. Klein & manuell** | Echte Positionen mit Mikro-Caps, Entries erfordern eine Freigabe in der UI | Tx-Erfolgsquote > 95 %, Ist-Kosten ≈ simulierte Kosten, Notausstieg einmal erfolgreich getestet |
+| **3. Vollautomatik klein** | Auto-Entries, Rebalancing aktiv, Circuit Breaker scharf | vier Wochen netto-positiv nach Kosten, Drawdown unter Limit |
+| **4. Skalierung & Tuning** | Caps schrittweise erhöhen, Parameter datengetrieben nachziehen | fortlaufend |
+
+Phase 1 läuft. Der Übergang zu Phase 2 setzt zusätzlich voraus, dass die in
+Abschnitt 16 genannten Lücken geschlossen sind.
 
 ---
 
-## 14. Parameter-Referenz (UI-editierbar, Startwerte)
+## 14. Parameter-Referenz
 
-> **Lesehinweis:** Die Startwerte unten stammen aus dem ursprünglichen
-> Zwei-Preset-Entwurf (Degen / Multiday). Ausgeliefert werden inzwischen drei
-> Profile — **Konservativ**, **Balanced**, **Degen** (siehe Abschnitt 6) —, und
-> maßgeblich sind die Dateien in `config/`, nicht diese Liste. Sie bleibt als
-> Referenz der *Bedeutung* jedes Parameters und der Bandbreite, in der er
-> sinnvoll ist. Nicht jeder Parameter ist bereits wirksam: Alles rund um
-> Fee-Claiming, Konvertierung, Compounding, Slippage-Caps und Notfall-Schwellen
-> wird erst mit der Execution Engine ausgewertet; die Paper-Simulation nutzt
-> davon nur `feeClaimInterval`, `convertFeesToSol`, `minClaimValueSOL`,
-> `claimCostFactor`, `stopLossPct`, `takeProfitPct`, `maxHoldHours` und den
-> `rebalance`-Block.
+Maßgeblich sind die Dateien in `config/` — diese Liste erklärt die *Bedeutung*.
+Nicht jeder Parameter ist bereits wirksam; die Spalte „Stand" sagt, wer ihn liest.
 
-**Global:** `maxTotalExposureSOL`, `minSolReserve` (0,5), `maxOpenPositions` (10),
-`dailyLossLimitPct` (5), `hardLossLimitPct` (10), `killSwitch` (pause/flatten),
-`priorityFeeCapLamports`, `rpcPrimary/rpcFallback`, `paperTrading` (default **on**),
-`profitSweepThresholdSOL` → Cold-Wallet. Dazu der `paper`-Block mit den
-Annahmen der Simulation: `capitalPerPresetSol`, `costs.priorityFeeSol`,
-`costs.swapSlippagePct`, `feeShareHaircutPct`, `poolLiquidityBins`.
+**Global**
 
-**Pro Preset (Startwerte Degen / Multiday):** Kapitalanteil (30 / 70 %), `positionSizePct`
-(1 / 3), `maxPositions` (5 / 5), `minScore` (65 / 60), `minTvlUsd` (50 k / 150 k),
-`tokenAgeWindow` (1–48 h / ≥ 72 h), `volTvlBounds`, `strategyType` (BidAsk einseitig /
-Curve 50-50), `binRange` (20–40 / ~69), `feeClaimInterval` (30 min / 4 h),
-`convertFeesToSol` (100 % / 50 %), `minClaimValueSOL` (0,01), `claimCostFactor` (10),
-`dustThresholdSOL` (0,02), `compound.enabled` (– / false), `compound.minSOL` (– / 0,1),
-`stopLossPct` (15 / 25), `takeProfitPct`,
-`maxHoldHours` (24 / 336), `rebalance.enabled` (false / true), `rebalance.bufferPct`,
-`rebalance.cooldownMin` (– / 120), `rebalance.maxPerDay` (– / 4), `rebalance.minEvFactor`
-(– / 2), `slippageCapPct` (3 / 1), Notfall-Trigger-Schwellen (Abschnitt 9).
+| Parameter | Default | Bedeutung | Stand |
+|---|---|---|---|
+| `paperTrading` | `true` | Sicherheitsschalter; Live erst nach Phase 1 | ✅ |
+| `killSwitch` | `off` | `pause` (keine Entries) / `flatten` (alles schließen) | Risk Manager |
+| `maxTotalExposureSol` | 20 | Obergrenze des Gesamteinsatzes | nur im Screening |
+| `maxOpenPositions` | 10 | globales Positionslimit über alle Presets | Risk Manager |
+| `minSolReserve` | 0,5 | Reserve für Gebühren und Exits | Execution |
+| `dailyLossLimitPct` / `hardLossLimitPct` | 5 / 10 | Circuit Breaker, zwei Stufen | Risk Manager |
+| `priorityFeeCapLamports` | 2 000 000 | Deckel der Priority Fee | Execution |
+| `profitSweepThresholdSol` | 5 | ab wann an die Cold-Wallet ausgeschüttet wird | Execution |
+
+**`global.paper`** — die Annahmen der Simulation. Sie sehen wie Konstanten aus,
+sind aber Schätzungen und gehören deshalb in die Sensitivitätsanalyse
+(KONZEPT-ML.md 6.1).
+
+| Parameter | Default | Bedeutung |
+|---|---|---|
+| `capitalPerPresetSol` | 10 | virtuelles Kapital je Preset; für alle gleich, damit der Vergleich fair ist |
+| `costs.priorityFeeSol` | 0,0005 | angenommene Priority Fee je Transaktion |
+| `costs.swapSlippagePct` | 0,5 | angenommener Verlust je Swap |
+| `feeShareHaircutPct` | 30 | Sicherheitsabschlag auf den geschätzten Gebührenanteil |
+| `poolLiquidityBins` | 70 | angenommene Bin-Breite der übrigen LPs |
+
+**Je Preset**
+
+| Parameter | Bedeutung | Stand |
+|---|---|---|
+| `capitalSharePct`, `positionSizePct`, `maxPositions` | Kapitalzuteilung und Limits | teilweise |
+| `minScore`, `minTvlUsd`, `tokenAgeHours`, `volTvlBounds` | Aufnahmekriterien | ✅ |
+| `screening.*` | Holder-, Insider-, Risk-Score- und Preis-Grenzwerte | ✅ |
+| `discovery.minBinStep`, `discovery.minBaseFeePct` | Vor-Filter der Discovery | ✅ |
+| `strategy.type`, `strategy.sided`, `binRange` | Einstiegsform und Range-Breite | ✅ |
+| `stopLossPct`, `takeProfitPct`, `maxHoldHours` | Exit-Regeln | ✅ |
+| `rebalance.*` | Puffer, Cooldown, Tageslimit, EV-Faktor | ✅ |
+| `feeHarvest.claimIntervalMin`, `convertToSolPct`, `minClaimValueSol`, `claimCostFactor` | Claim-Kadenz und Konvertierung | ✅ (simuliert) |
+| `feeHarvest.dustThresholdSol`, `compound.*` | Dust-Ledger und Wiederanlage | Execution |
+| `slippageCapPct` | harte Slippage-Grenze für Swaps | Execution |
+| `emergency.*` | Notausstiegs-Schwellen | Risk Manager |
 
 ---
 
 ## 15. Kosten & Infrastruktur
 
-Alle Preisangaben sind Richtwerte zum Konzeptzeitpunkt — vor Projektstart aktuelle
-Tarife prüfen. Grundprinzip: **Phase 1 (Paper-Trading) läuft fast vollständig auf
-Free-Tiers**; bezahlte Tiers erst, wenn echtes Kapital arbeitet.
+Richtwerte zum Konzeptzeitpunkt. Grundprinzip: **Phase 1 läuft fast vollständig
+auf Free-Tiers**; bezahlte Tarife erst, wenn echtes Kapital arbeitet.
 
-### 15.1 Infrastruktur & monatliche Fixkosten
+### 15.1 Monatliche Fixkosten
 
-| Komponente | Zweck | Option | Richtwert/Monat |
-|---|---|---|---|
-| VPS (Docker: Bot + PostgreSQL + UI) | 24/7-Betrieb | Hetzner CPX21–CPX31 (4–8 GB RAM) o. ä. | 9–15 € |
-| Solana-RPC primär (inkl. WebSocket + Priority-Fee-Schätzung) | alle Chain-Reads/Writes | Helius: Free-Tier (Phase 1) → Developer-Tier (live) | 0 → ~45–50 $ |
-| RPC-Fallback | Failover | QuickNode kleiner Plan oder Free-Tier eines Zweitanbieters | 0–15 $ |
-| Meteora DLMM API | Pool-Metriken | öffentlich | 0 |
-| DexScreener API | Markt-Querschnitt, Preis-Checks | öffentlich (Rate-Limits beachten) | 0 |
-| RugCheck API | Token-Risiko-Reports | Free-Tier; Paid nur bei Limit-Problemen | 0 (– ~50 $) |
-| Jupiter Swap API | Quotes & Swaps | Free-Tier; Pro nur bei hohem Durchsatz | 0 (– ~50 $) |
-| Birdeye (optional) | zweite Datenquelle zur Absicherung | Free-Tier; Standard ab ~99 $ | 0 (optional) |
-| Fabriq | Discovery | interner Endpoint, kostenlos; Ausfall-Fallback eingeplant | 0 |
-| Telegram-Alerts | Benachrichtigung | Bot-API | 0 |
-| Monitoring | Uptime/Fehler | Uptime Kuma self-hosted, Sentry/Grafana Free-Tier | 0 |
-| Backups | DB-Dumps + Snapshots | VPS-Snapshots oder S3-kompatibel | 1–5 € |
-| Zugriffsschutz UI | kein öffentliches Interface | Tailscale/WireGuard (empfohlen) statt Domain+TLS | 0 |
-| Hardware-Wallet (Cold-Storage) | Gewinn-Sweep-Ziel | Ledger/Trezor, **einmalig** | 60–150 € einmalig |
+| Komponente | Option | Richtwert/Monat |
+|---|---|---|
+| VPS (Bot + PostgreSQL + UI) | Hetzner CPX21–CPX31 | 9–15 € |
+| Solana-RPC primär | Helius Free (Phase 1) → Developer (live) | 0 → ~45–50 $ |
+| RPC-Fallback | Zweitanbieter, kleiner Plan | 0–15 $ |
+| Meteora-, DexScreener-, RugCheck-, Jupiter-APIs | öffentlich / Free-Tier | 0 |
+| Telegram-Alerts, Monitoring | Bot-API, Uptime Kuma self-hosted | 0 |
+| Backups | VPS-Snapshots oder S3-kompatibel | 1–5 € |
+| Zugriffsschutz UI | Tailscale/WireGuard statt Domain + TLS | 0 |
+| Hardware-Wallet | Ledger/Trezor, **einmalig** | 60–150 € |
 
-**Summen:** Phase 1 (Paper): **~10–20 €/Monat**. Live-Betrieb empfohlen (Phase 2+):
-**~60–130 €/Monat** (VPS + Helius Developer + Fallback + Backups; Birdeye/Paid-Tiers
-nur bei Bedarf).
+**Summen:** Phase 1 ~10–20 €/Monat; Live-Betrieb ~60–130 €/Monat.
 
 ### 15.2 Variable On-Chain-Kosten
 
 | Kostenart | Größenordnung | Eigenschaft |
 |---|---|---|
-| Position-Rent (Positionskonto) | ~0,057 SOL pro Position | **erstattet beim Schließen** → gebundenes Kapital, kein Aufwand (solange Positionen sauber geschlossen werden) |
-| Bin-Array-Initialisierung | ~0,07–0,08 SOL je neuem Bin-Array | **nicht erstattet**; fällt nur an, wenn der Preisbereich im Pool noch nie Liquidität hatte — in Trending-Pools meist schon vorhanden. Execution prüft den Bedarf vor Entry und rechnet ihn in den EV-Check ein |
+| Position-Rent | ~0,057 SOL je Position | **erstattet beim Schließen** → gebundenes Kapital, kein Aufwand |
+| Bin-Array-Initialisierung | ~0,07–0,08 SOL je neuem Array | **nicht erstattet**; fällt nur an, wenn der Preisbereich noch nie Liquidität hatte — in aktiven Pools selten |
 | Basis-Tx-Fee | 0,000005 SOL/Signatur | vernachlässigbar |
-| Priority Fees | ~0,0001–0,005 SOL pro Tx (congestion-abhängig, Cap per Parameter) | Positions-Lebenszyklus ≈ 8–15 Txs (Open, Claims, Rebalances, Close, Swaps) → ~0,005–0,05 SOL |
-| Jito-Tip (optional) | ~0,0001–0,001 SOL pro Bundle | nur für sandwich-gefährdete Swaps |
-| Swap-Kosten (Entry/Exit/Fee-Konvertierung) | Preis-Impact + Slippage ~0,3–2 % des Swap-Betrags bei Degen-Token | größter variabler Posten; bei kleinen Fee-Konvertierungen absolut gering, bei Exits relevant |
+| Priority Fees | ~0,0001–0,005 SOL je Tx | Lebenszyklus ≈ 8–15 Txs → ~0,005–0,05 SOL |
+| Jito-Tip (optional) | ~0,0001–0,001 SOL je Bundle | nur für sandwich-gefährdete Swaps |
+| Swap-Kosten | Preis-Impact + Slippage ~0,3–2 % | größter variabler Posten; bei Exits relevant |
 
-**Faustregel fürs EV-Modell:** Betriebskosten ~0,01–0,05 SOL pro Degen-Position zzgl.
-Swap-Impact. Das Dashboard rechnet PnL grundsätzlich **netto** nach diesen Kosten; eine
-Position gilt erst als profitabel, wenn sie ihre eigenen Kosten verdient hat.
+**Faustregel:** ~0,01–0,05 SOL Betriebskosten je Degen-Position zuzüglich
+Swap-Impact. Der PnL wird grundsätzlich **netto** gerechnet — eine Position gilt
+erst als profitabel, wenn sie ihre eigenen Kosten verdient hat.
 
 ### 15.3 Betriebskapital
 
-- **Hot-Wallet:** LP-Einsatzkapital (Startgröße frei, z. B. 20–50 SOL) + Puffer:
-  `minSolReserve` (0,5 SOL) für Gas/Swaps **plus** Rent-Bindung ~0,06 SOL je offener
-  Position (bei 10 Positionen ≈ 0,6 SOL gebunden, kommt beim Schließen zurück).
-- **Cold-Wallet (Hardware):** Ziel des automatischen Gewinn-Sweeps; hält nie Keys auf
+- **Hot-Wallet:** LP-Einsatzkapital plus `minSolReserve` für Gas und Swaps, plus
+  ~0,06 SOL Rent-Bindung je offener Position (kommt beim Schließen zurück).
+- **Cold-Wallet:** Ziel des automatischen Gewinn-Sweeps; hält nie Schlüssel auf
   dem Server.
-- **Dimensionierung:** Kapital so wählen, dass die monatlichen Fixkosten < 10 % des
-  realistisch erwarteten Monatsertrags bleiben — sonst Paper-Phase verlängern und auf
-  Free-Tiers bleiben.
+- **Dimensionierung:** Kapital so wählen, dass die monatlichen Fixkosten unter
+  10 % des realistisch erwarteten Monatsertrags bleiben — sonst Paper-Phase
+  verlängern und auf Free-Tiers bleiben.
 
 ---
 
-## 16. Offene Entscheidungen & nächste Schritte
+## 16. Umsetzungsstand & nächste Schritte
 
-**Zu klären (blockiert Phase 1 nicht):**
+**Umgesetzt**
 
-1. ~~Fabriq: interne API identifizieren, Stabilität/ToS bewerten → Entscheidung Adapter vs. nur Replikation.~~
-   **Entschieden (Juli 2026): eigene Replikation ist primär** — Spike-Ergebnis siehe Abschnitt 4.1.
-2. RugCheck-Rate-Limits/API-Key-Bedarf prüfen; ggf. Birdeye-Paid-Tier als zweite Quelle.
-3. Jito-Bundles ab Phase 2 oder 3.
-4. Devnet-Probelauf der Execution-Pfade vs. direkt Mainnet-Mikrobeträge (Empfehlung: beides, Devnet nur für Tx-Mechanik).
+1. Monorepo, DB-Schema, versionierter Config-Service mit Schema-Migration.
+2. Adapter: Meteora (Pools, Sammelabruf, Historie), DexScreener, RugCheck,
+   Jupiter (Quote und Token API).
+3. Discovery über mehrere Sortierungen, Screening mit Hard Filters und Score,
+   Kandidaten-Persistenz mit Shadow-Frist.
+4. Paper-Engine und Multi-Preset-Vergleich, Web-UI.
+5. Datenaufzeichnung und Replay (KONZEPT-ML.md M1, M2).
 
-**Umsetzungsreihenfolge:**
+**Als Nächstes**
 
-1. ✅ Monorepo-Gerüst + DB-Schema + Config-Service (zod, Versionierung).
-2. ✅ Adapter: Meteora-API, DexScreener, RugCheck, Jupiter-Quote; Fabriq-Spike.
-3. ✅ Screening/Scoring + Scanner-UI + Shadow-Tracking (liefert sofort Nutzwert).
-4. ✅ Paper-Trading-Engine (Positions-Simulation auf Live-Daten) + Dashboard-Basis.
-5. **Datenaufzeichnung für die Optimierung** (KONZEPT-ML.md M1) — ✅ umgesetzt
-   und laufend. Steht hier, weil sie in der ursprünglichen Reihenfolge fehlte:
-   Sie ist die einzige Komponente, deren Wert von verstrichener Zeit abhängt,
-   und wurde deshalb vor die Execution Engine gezogen.
-6. Replay-Engine + Sensitivitätsanalyse (KONZEPT-ML.md M2, M3).
-7. Execution Engine + Reconciliation + Telegram-Alerts. Setzt den scharfen
-   Risk Manager aus Abschnitt 6.3 und einen RPC-Adapter voraus (On-Chain-Reads
-   für Abschnitt 5.1: Authorities, Token-2022-Extensions, LP-Dominanz).
-8. Live-Phasen 2–4 gemäß Rollout-Plan.
+1. Sensitivitätsanalyse und Parametersuche (KONZEPT-ML.md M3–M5).
+2. Execution Engine mit Reconciliation und Alerts (Abschnitt 7). Setzt den
+   scharfen Risk Manager (6.3) und einen RPC-Adapter voraus — Letzterer liefert
+   zugleich die fehlenden On-Chain-Prüfungen aus 5.1 und die
+   Bin-Liquiditätsverteilung, die die größte Ungenauigkeit der Simulation
+   ersetzt.
+3. Live-Phasen 2–4 gemäß Rollout-Plan.
 
-**Was bis Schritt 7 bewusst offen ist** — im Paper-Modus folgenlos, vor echtem
-Kapital zwingend:
+**Offene Punkte, die vor echtem Kapital geschlossen sein müssen**
 
-| Offen | Betrifft |
+| Offen | Abschnitt |
 |---|---|
-| Risk Manager nicht durchgesetzt (Kill-Switch, globale Caps, Circuit Breaker) | 6.3, 9 |
-| Keine On-Chain-Reads: Authorities nur über RugCheck, Token-2022-Prüfung fehlt ganz | 5.1 |
-| Notausstiegs-Trigger (`emergency.*`) nicht ausgewertet; Exit-Slippage pauschal statt größenabhängig | 9, 13 |
+| Risk Manager nicht durchgesetzt: Kill-Switch, globale Caps, Circuit Breaker | 6.3, 9 |
+| Keine On-Chain-Reads: Authorities nur über RugCheck, Token-2022-Prüfung und LP-Dominanz fehlen | 5.1, 5.3 |
+| Notausstiegs-Trigger nicht ausgewertet; Exit-Slippage pauschal statt größenabhängig | 9, 13.1 |
+| Shadow-Tracking wird erfasst, aber nicht ausgewertet | 5.5, 11 |
 | Web-UI ohne Authentifizierung — bis dahin nur lokal betreiben | 11 |
-| Shadow-Tracking wird erfasst, aber noch nicht ausgewertet (Filter-Güte) | 5.5, 11.1 |
+
+**Noch zu klären** (blockiert Phase 1 nicht): RugCheck-Rate-Limits und
+API-Key-Bedarf; Jito-Bundles ab Phase 2 oder 3; Devnet-Probelauf der
+Execution-Pfade gegen Mainnet-Mikrobeträge — empfohlen ist beides, Devnet nur für
+die Tx-Mechanik.
 
 ---
 
-*Hinweis: Dieses Konzept dokumentiert ein Hochrisiko-Handelssystem für eigene Mittel.
-Alle Startwerte sind bewusst konservativ und werden ausschließlich datengetrieben
-(Paper-Trading, Shadow-Tracking, Dashboard) gelockert.*
+*Dieses Konzept dokumentiert ein Hochrisiko-Handelssystem für eigene Mittel. Alle
+Startwerte sind bewusst konservativ und werden ausschließlich datengetrieben
+gelockert — über Paper-Trading, Shadow-Tracking und Replay, nicht über
+Bauchgefühl.*
