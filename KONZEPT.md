@@ -292,7 +292,16 @@ Rebalance- und Exit-Regeln. Beide Presets laufen parallel mit getrennten Kapital
 
 ### 6.3 Portfolio-Constraints (Risk Manager, global)
 
-- Max. gleichzeitige Positionen (Default: 5 Degen, 5 Multiday).
+> **Umsetzungsstand:** Diese Regeln sind **noch nicht scharf.** Die Parameter
+> existieren, sind zod-validiert und in der UI editierbar — durchgesetzt wird
+> bislang nur das Positionslimit je Preset. Im Paper-Modus ist das folgenlos;
+> vor Phase 2 (echtes Kapital) muss der Risk Manager stehen und getestet sein,
+> sonst geht genau der Pfad ungeprüft live, der Verluste begrenzen soll.
+> Zu beachten: Die Summe der Preset-Limits darf `maxOpenPositions` übersteigen —
+> das Schema prüft jedes Preset einzeln gegen die globale Grenze, nicht die
+> Summe. Erst die globale Durchsetzung macht daraus ein echtes Limit.
+
+- Max. gleichzeitige Positionen je Preset; zusätzlich ein globales Limit über alle Presets (`maxOpenPositions`, Default 10).
 - Max. Gesamt-Exposure in SOL; Mindest-SOL-Reserve für Gebühren/Exits (nie < 0,5 SOL).
 - Max. 1 Position pro Token-Mint; Korrelationslimit: max. n neue Degen-Entries pro Stunde.
 - **Circuit Breaker:** Tagesverlustlimit (z. B. −5 % des Bot-Kapitals) → keine neuen Entries für 24 h; zweiter Schwellwert (−10 %) → alles schließen + Kill-Switch + Alert.
@@ -463,6 +472,14 @@ persistiert (Audit-Trail = Datenbasis des Dashboards).
 - `config_versions` — jede Parameteränderung versioniert (wer/wann/was) → Performance ist Konfigurationsständen zuordenbar.
 - `blacklist` — Mints, Deployer, Pools; mit Grund.
 
+Hinzu kommen drei Tabellen für die Strategie-Optimierung (KONZEPT-ML.md 3.2),
+die bewusst unabhängig von der Positions-Persistenz geführt werden — der
+Datensatz soll gerade auch die Pools enthalten, in die nie investiert wurde:
+
+- `tracked_pools` — welche Pools verfolgt werden, seit wann und bis wann.
+- `candidate_features` — Merkmalsvektor je Kandidat zum **Entscheidungszeitpunkt**, versioniert über `feature_version`.
+- `candidate_outcomes` — Ergebnis-Labels je Horizont (1 h/6 h/24 h/72 h/7 d), ausschließlich aus der Zeit **nach** der Entscheidung, mit Abdeckungsangaben (`observations`, `covered_hours`).
+
 ---
 
 ## 11. UI & Analyse-Dashboard
@@ -592,12 +609,26 @@ Vergleich zum Halten nicht positiv ist.
 
 ## 14. Parameter-Referenz (UI-editierbar, Startwerte)
 
+> **Lesehinweis:** Die Startwerte unten stammen aus dem ursprünglichen
+> Zwei-Preset-Entwurf (Degen / Multiday). Ausgeliefert werden inzwischen drei
+> Profile — **Konservativ**, **Balanced**, **Degen** (siehe Abschnitt 6) —, und
+> maßgeblich sind die Dateien in `config/`, nicht diese Liste. Sie bleibt als
+> Referenz der *Bedeutung* jedes Parameters und der Bandbreite, in der er
+> sinnvoll ist. Nicht jeder Parameter ist bereits wirksam: Alles rund um
+> Fee-Claiming, Konvertierung, Compounding, Slippage-Caps und Notfall-Schwellen
+> wird erst mit der Execution Engine ausgewertet; die Paper-Simulation nutzt
+> davon nur `feeClaimInterval`, `convertFeesToSol`, `minClaimValueSOL`,
+> `claimCostFactor`, `stopLossPct`, `takeProfitPct`, `maxHoldHours` und den
+> `rebalance`-Block.
+
 **Global:** `maxTotalExposureSOL`, `minSolReserve` (0,5), `maxOpenPositions` (10),
 `dailyLossLimitPct` (5), `hardLossLimitPct` (10), `killSwitch` (pause/flatten),
 `priorityFeeCapLamports`, `rpcPrimary/rpcFallback`, `paperTrading` (default **on**),
-`profitSweepThresholdSOL` → Cold-Wallet.
+`profitSweepThresholdSOL` → Cold-Wallet. Dazu der `paper`-Block mit den
+Annahmen der Simulation: `capitalPerPresetSol`, `costs.priorityFeeSol`,
+`costs.swapSlippagePct`, `feeShareHaircutPct`, `poolLiquidityBins`.
 
-**Pro Preset (Degen / Multiday):** Kapitalanteil (30 / 70 %), `positionSizePct`
+**Pro Preset (Startwerte Degen / Multiday):** Kapitalanteil (30 / 70 %), `positionSizePct`
 (1 / 3), `maxPositions` (5 / 5), `minScore` (65 / 60), `minTvlUsd` (50 k / 150 k),
 `tokenAgeWindow` (1–48 h / ≥ 72 h), `volTvlBounds`, `strategyType` (BidAsk einseitig /
 Curve 50-50), `binRange` (20–40 / ~69), `feeClaimInterval` (30 min / 4 h),
@@ -677,14 +708,32 @@ Position gilt erst als profitabel, wenn sie ihre eigenen Kosten verdient hat.
 3. Jito-Bundles ab Phase 2 oder 3.
 4. Devnet-Probelauf der Execution-Pfade vs. direkt Mainnet-Mikrobeträge (Empfehlung: beides, Devnet nur für Tx-Mechanik).
 
-**Umsetzungsreihenfolge (Vorschlag):**
+**Umsetzungsreihenfolge:**
 
-1. Monorepo-Gerüst + DB-Schema + Config-Service (zod, Versionierung).
-2. Adapter: Meteora-API, DexScreener, RugCheck, Jupiter-Quote; Fabriq-Spike.
-3. Screening/Scoring + Scanner-UI + Shadow-Tracking (liefert sofort Nutzwert).
-4. Paper-Trading-Engine (Positions-Simulation auf Live-Daten) + Dashboard-Basis.
-5. Execution Engine + Reconciliation + Telegram-Alerts.
-6. Live-Phasen 2–4 gemäß Rollout-Plan.
+1. ✅ Monorepo-Gerüst + DB-Schema + Config-Service (zod, Versionierung).
+2. ✅ Adapter: Meteora-API, DexScreener, RugCheck, Jupiter-Quote; Fabriq-Spike.
+3. ✅ Screening/Scoring + Scanner-UI + Shadow-Tracking (liefert sofort Nutzwert).
+4. ✅ Paper-Trading-Engine (Positions-Simulation auf Live-Daten) + Dashboard-Basis.
+5. **Datenaufzeichnung für die Optimierung** (KONZEPT-ML.md M1) — ✅ umgesetzt
+   und laufend. Steht hier, weil sie in der ursprünglichen Reihenfolge fehlte:
+   Sie ist die einzige Komponente, deren Wert von verstrichener Zeit abhängt,
+   und wurde deshalb vor die Execution Engine gezogen.
+6. Replay-Engine + Sensitivitätsanalyse (KONZEPT-ML.md M2, M3).
+7. Execution Engine + Reconciliation + Telegram-Alerts. Setzt den scharfen
+   Risk Manager aus Abschnitt 6.3 und einen RPC-Adapter voraus (On-Chain-Reads
+   für Abschnitt 5.1: Authorities, Token-2022-Extensions, LP-Dominanz).
+8. Live-Phasen 2–4 gemäß Rollout-Plan.
+
+**Was bis Schritt 7 bewusst offen ist** — im Paper-Modus folgenlos, vor echtem
+Kapital zwingend:
+
+| Offen | Betrifft |
+|---|---|
+| Risk Manager nicht durchgesetzt (Kill-Switch, globale Caps, Circuit Breaker) | 6.3, 9 |
+| Keine On-Chain-Reads: Authorities nur über RugCheck, Token-2022-Prüfung fehlt ganz | 5.1 |
+| Notausstiegs-Trigger (`emergency.*`) nicht ausgewertet; Exit-Slippage pauschal statt größenabhängig | 9, 13 |
+| Web-UI ohne Authentifizierung — bis dahin nur lokal betreiben | 11 |
+| Shadow-Tracking wird erfasst, aber noch nicht ausgewertet (Filter-Güte) | 5.5, 11.1 |
 
 ---
 

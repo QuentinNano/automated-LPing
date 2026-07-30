@@ -49,6 +49,9 @@ function assert(condition: boolean, label: string): void {
 /** Erkennungszeichen der Testdaten — danach wird am Ende aufgeräumt. */
 const TEST_PREFIX = "RoundtripTestPool";
 const TEST_POOL = `${TEST_PREFIX}${Date.now()}`;
+/** Zweiter Testpool: angemeldet, aber ohne einen einzigen Messpunkt. */
+const EMPTY_POOL = `${TEST_PREFIX}Empty${Date.now()}`;
+const TEST_MINT = "TestMint1111111111111111111111111111111111";
 
 function testPool(): PoolMetrics {
   return {
@@ -196,7 +199,15 @@ async function main(): Promise<void> {
     // Gebührenstruktur und Zeitfenster müssen den Weg durch Postgres überleben:
     // sie sind die Grundlage des Replays (KONZEPT-ML.md 5).
     const points = await track.loadTrack(TEST_POOL, decisionAt);
-    assert(points.length === 5, `Zeitreihe über loadTrack gelesen (${points.length})`);
+    // Gezählt werden die Messpunkte der Aufzeichnung, nicht alle Zeilen: Der
+    // Scan schreibt in dieselbe Tabelle, aber ohne Gebührenstruktur, SOL-Kurs
+    // und Zeitfenster. Beide Schreiber zu haben ist ein bekannter Mangel — die
+    // Zusicherung darf davon nur nicht abhängen.
+    const recorded = points.filter((p) => p.dynamicFeePct !== null);
+    assert(
+      recorded.length === 5,
+      `Zeitreihe über loadTrack gelesen (${recorded.length} Messpunkte von ${points.length} Zeilen)`,
+    );
     const firstPoint = points[0];
     assert(
       firstPoint !== undefined && firstPoint.dynamicFeePct !== null,
@@ -266,6 +277,8 @@ async function main(): Promise<void> {
       "Lückenhaft belegte Horizonte gelten als unbrauchbar",
     );
 
+    await checkOutcomeBacklog(prisma, track, decisionAt);
+
     const stats = await track.stats();
     assert(stats.features >= 1 && stats.outcomes >= 3, "Statistik zählt Merkmale und Labels");
     // Die Rohabfrage COUNT(DISTINCT (a,b)) ist die einzige Stelle mit
@@ -284,6 +297,96 @@ async function main(): Promise<void> {
     await cleanup(prisma);
     await prisma.$disconnect();
   }
+}
+
+/**
+ * Nachberechnung der Ergebnis-Labels: Der Stapel muss vorankommen.
+ *
+ * Der Fehler, den dieser Abschnitt ausschließt: Wählt die Nachberechnung die
+ * ältesten Kandidaten aus, ohne zu prüfen, ob sie überhaupt noch offene Labels
+ * haben, belegen die fertigen den Stapel dauerhaft. Ab dem ersten vollen Stapel
+ * bekommt kein neuer Kandidat mehr ein Label — lautlos, denn die Gesamtzahl der
+ * Labels bleibt dabei hoch und sieht gesund aus. Deshalb läuft dieser Test
+ * bewusst mit Stapelgröße 1: Er bildet in klein nach, was im Betrieb ab ein paar
+ * hundert Kandidaten passiert.
+ */
+async function checkOutcomeBacklog(
+  prisma: ReturnType<typeof createPrisma>,
+  track: TrackRepo,
+  decisionAt: Date,
+): Promise<void> {
+  console.log("\nNachberechnung der Ergebnis-Labels:");
+
+  const recordFeature = (poolAddress: string, offsetMin: number): Promise<string> =>
+    track.recordFeatures({
+      poolAddress,
+      tokenMint: TEST_MINT,
+      preset: "degen",
+      featureVersion: FEATURE_VERSION,
+      features: buildFeatureVector({
+        pool: { ...testPool(), poolAddress },
+        market: null,
+        risk: null,
+        sellability: null,
+        organics: null,
+        priceDivergencePct: null,
+      }),
+      score: 70,
+      verdict: "accepted",
+      rejectedBy: [],
+      capturedAt: new Date(decisionAt.getTime() + offsetMin * 60_000),
+    });
+
+  // Zwei weitere Kandidaten auf dem bereits verfolgten Pool. Der Kandidat aus
+  // dem Hauptlauf ist für seine fälligen Horizonte fertig — genau der, der den
+  // Stapel früher dauerhaft besetzt hätte.
+  const older = await recordFeature(TEST_POOL, 6);
+  const newer = await recordFeature(TEST_POOL, 12);
+
+  const overdueBefore = await track.overdueOutcomes();
+  assert(overdueBefore >= 4, `Offene Labels gelten als überfällig (${overdueBefore})`);
+
+  const first = await track.computeDueOutcomes(new Date(), 1);
+  const second = await track.computeDueOutcomes(new Date(), 1);
+  assert(
+    first > 0 && second > 0,
+    `Beide Durchgänge schreiben Labels (${first}, dann ${second})`,
+  );
+
+  const olderCount = await prisma.candidateOutcome.count({ where: { featureId: older } });
+  const newerCount = await prisma.candidateOutcome.count({ where: { featureId: newer } });
+  assert(olderCount >= 3, `Erster Kandidat abgearbeitet (${olderCount} Labels)`);
+  assert(
+    newerCount >= 3,
+    `Zweiter Kandidat ebenfalls — der Stapel bleibt nicht stehen (${newerCount} Labels)`,
+  );
+
+  const overdueAfter = await track.overdueOutcomes();
+  assert(
+    overdueAfter < overdueBefore,
+    `Rückstand sinkt mit der Nachberechnung (${overdueBefore} → ${overdueAfter})`,
+  );
+
+  // Ein Kandidat, dessen Pool nie gemessen wurde, darf den Stapel ebenfalls
+  // nicht dauerhaft blockieren. Er bekommt leere Labels und ist damit erledigt.
+  await track.trackPool(EMPTY_POOL, TEST_MINT, decisionAt);
+  const orphan = await recordFeature(EMPTY_POOL, 18);
+  const written = await track.computeDueOutcomes(new Date(), 5);
+  assert(written > 0, `Kandidat ohne Messpunkte wird abgeschlossen (${written} Labels)`);
+
+  const orphanOutcomes = await prisma.candidateOutcome.findMany({
+    where: { featureId: orphan },
+  });
+  assert(
+    orphanOutcomes.length >= 3 && orphanOutcomes.every((o) => o.observations === 0),
+    `Leere Labels weisen ihre Leere aus (${orphanOutcomes.length})`,
+  );
+  // Und sie bleiben harmlos: Der Export siebt sie über die Qualitätsangaben aus.
+  const dataset = await track.exportDataset(24, { minCoverageRatio: 0.1 });
+  assert(
+    dataset.every((row) => row.outcome.observations >= 2),
+    "Leere Labels landen nicht im Trainingsdatensatz",
+  );
 }
 
 /**

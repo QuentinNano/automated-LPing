@@ -7,22 +7,23 @@ Parametersteuerung und Analyse-Dashboard.
 
 ➡️ **[KONZEPT.md](./KONZEPT.md)** — vollständiges Umsetzungs- und Risikokonzept.
 ➡️ **[KONZEPT-ML.md](./KONZEPT-ML.md)** — datengetriebene Optimierung von Parametern
-und Indikatoren (Planung, noch nicht umgesetzt).
+und Indikatoren. Die Datenaufzeichnung (M1) **läuft**; Replay und Optimierer stehen aus.
 
 ## Projektstruktur (Monorepo, pnpm)
 
 ```
 apps/
-  bot/            # CLI: validate, health, scan, paper (später: Execution-Loop)
+  bot/            # CLI: validate, health, scan, paper, track
+                  # (später: Execution-Loop)
   web/            # Next.js-UI: Preset-Vergleich, Positionen, Scanner, Parameter
 packages/
   core/           # Pure Domänenlogik: Config-Schemas + versionierter ConfigService,
                   # Screening/Scoring, Paper-Trading-Engine (Bin-Modell, Fees,
-                  # PnL, HODL-Benchmark), Positions-Lebenszyklus
+                  # PnL, HODL-Benchmark), Positions-Lebenszyklus, ML-Merkmale/Labels
   adapters/       # Meteora-API, DexScreener, RugCheck, Jupiter (+ Fabriq-Spike),
                   # HTTP-Infra: Retry/Backoff, Rate-Limiting, zod-Validierung
-  db/             # Prisma-Schema (8 Tabellen aus KONZEPT.md 10.2), Migrationen,
-                  # PrismaConfigStore
+  db/             # Prisma-Schema (11 Tabellen: 8 aus KONZEPT.md 10.2 plus die drei
+                  # Aufzeichnungstabellen), Migrationen, PrismaConfigStore
 config/           # global.json + ein JSON je Preset (konservativ, balanced, degen)
 ```
 
@@ -158,7 +159,7 @@ pnpm --filter @lping/bot track -- --top 60           # mehr verschiedene Pools v
 pnpm --filter @lping/bot track -- --scan-every 8     # seltener nach neuen Pools suchen
 pnpm --filter @lping/bot track -- --no-scan          # nur verfolgen, nichts Neues suchen
 
-# Datensicherung (die Aufzeichnung ist nicht wiederbeschaffbar!):
+# Datensicherung (Merkmale und TVL-Verlauf sind nicht wiederbeschaffbar):
 pnpm sichern                                    # Sicherung anlegen
 bash scripts/backup.sh liste                    # vorhandene anzeigen
 bash scripts/backup.sh zurueck backups/DATEI    # einspielen
@@ -169,6 +170,21 @@ pnpm --filter @lping/web dev
 # Fabriq-Endpoint prüfen (optional, URL aus den Browser-Entwicklertools, siehe SPIKE.md):
 pnpm --filter @lping/bot fabriq:check "https://…"
 ```
+
+### Was `pnpm pruefen` beurteilt
+
+Der Bericht fällt je Aspekt ein Urteil, statt Zahlen zu zeigen, die man selbst
+deuten müsste: Läuft die Aufzeichnung? Werden Pools verfolgt und kommen neue
+Kandidaten dazu? Wie groß war die längste Unterbrechung? Liefert jede
+Datenquelle noch?
+
+Der letzte Punkt sind die **Ergebnis-Labels**, und dort zählt nicht ihre Anzahl,
+sondern der **Rückstand**: fällige, aber fehlende Labels. Der Unterschied ist
+entscheidend — eine Nachberechnung, die nur die ältesten Kandidaten immer wieder
+anfasst, weist weiterhin Tausende Labels aus und sieht damit gesund aus, während
+für jeden neuen Kandidaten keines mehr entsteht. Ein Rückstand nach einer
+Unterbrechung ist normal und baut sich über die nächsten Durchgänge ab; bleibt
+er stehen oder wächst er, wird nicht mehr nachgeführt.
 
 ## Oberfläche
 
@@ -181,7 +197,10 @@ pnpm --filter @lping/bot fabriq:check "https://…"
 
 ## Stand & nächste Schritte
 
-Umgesetzt sind Schritte 1–4 der Umsetzungsreihenfolge (KONZEPT.md, Abschnitt 16):
+Es findet **kein** echter Handel statt: Es gibt keine Signier- oder Sende-Logik,
+und `paperTrading` steht auf `true`.
+
+**Umgesetzt** (KONZEPT.md Abschnitt 16, Schritte 1–4):
 
 1. ✅ Monorepo-Gerüst, DB-Schema, versionierter Config-Service
 2. ✅ Daten-Adapter (Meteora, DexScreener, RugCheck, Jupiter) + Fabriq-Spike.
@@ -191,10 +210,33 @@ Umgesetzt sind Schritte 1–4 der Umsetzungsreihenfolge (KONZEPT.md, Abschnitt 1
    → Score 0–100 → Kandidaten-Persistenz mit Shadow-Tracking.
 4. ✅ Paper-Trading-Engine (bin-genaues DLMM-Modell, Fee-Akkrual, On-Chain-Kosten,
    HODL-Benchmark, Exit-Regeln) mit Multi-Preset-Vergleich, plus Web-UI.
+5. ✅ Datenaufzeichnung für die Strategie-Optimierung (KONZEPT-ML.md M1–M1d):
+   `track`-Kommando, Merkmale je Kandidat, Verlaufsaufzeichnung, Ergebnis-Labels,
+   Prüfbericht.
 
-Damit läuft **Phase 1** des Rollout-Plans: beobachten und belegen, dass die
-Strategie auf dem Papier trägt. Es findet **kein** echter Handel statt — es gibt
-noch keine Signier- oder Sende-Logik, und `paperTrading` steht auf `true`.
+**Aktueller Arbeitsschwerpunkt** ist die Aufzeichnung, nicht die Execution
+Engine: Sie ist die einzige Komponente, deren Wert von verstrichener Zeit
+abhängt, und sie läuft parallel zum Paper-Vergleich (`pnpm aufzeichnen`).
 
-Als Nächstes (Schritt 5): Execution Engine (Transaktionsbau, Simulation vor dem
-Senden, Reconciliation nach Neustart, RPC-Failover) und Telegram-Alerts.
+**Als Nächstes**, in dieser Reihenfolge:
+
+1. **Replay-Engine** (KONZEPT-ML.md M2) — aufgezeichnete und über die
+   Meteora-Historie nachgeladene Verläufe als `MarketTick`s durch dieselbe
+   Paper-Engine schicken. Voraussetzung für alles Weitere der Optimierung.
+2. **Sensitivitätsanalyse** (M3) — welche Parameter überhaupt etwas bewirken.
+3. **Execution Engine** (KONZEPT.md Schritt 5) — Transaktionsbau, Simulation vor
+   dem Senden, Reconciliation nach Neustart, RPC-Failover, Telegram-Alerts.
+   Frühestens, wenn Phase 1 ihre Go-Kriterien erfüllt (KONZEPT.md 13).
+
+**Bekannte Lücken**, die vor dem Live-Betrieb geschlossen sein müssen — sie sind
+im Paper-Modus folgenlos, würden Phase 2 aber ungeprüft erreichen:
+
+- Der **Risk Manager** (KONZEPT.md 6.3) ist noch nicht scharf: `killSwitch`,
+  `maxOpenPositions`, `maxTotalExposureSol`, die Verlustlimits und die
+  `emergency`-Schwellen sind konfigurier- und anzeigbar, werden aber von keiner
+  Logik durchgesetzt.
+- **Keine On-Chain-Reads:** Mint-/Freeze-Authority kommen ausschließlich von
+  RugCheck; die Token-2022-Prüfung aus KONZEPT.md 5.1 und die LP-Dominanz
+  fehlen ganz. Beides braucht den RPC-Adapter aus Schritt 5.
+- Die **Web-UI hat keine Authentifizierung** und gehört bis dahin nur auf den
+  lokalen Rechner, nicht auf einen erreichbaren Server (KONZEPT.md 11).

@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import {
+  OUTCOME_HORIZONS_HOURS,
   TRACKING_DURATION_HOURS,
   computeOutcomes,
   solPriceUsdOf,
@@ -10,6 +11,40 @@ import {
   type TrackHealthInput,
   type TrackPoint,
 } from "@lping/core";
+
+/** Längster Auswertungshorizont — begrenzt, wie weit ein Verlauf gelesen wird. */
+const MAX_HORIZON_HOURS = Math.max(...OUTCOME_HORIZONS_HOURS);
+
+/**
+ * Karenzzeit, bevor ein fehlendes Label als überfällig gilt.
+ *
+ * Ein fälliges Label entsteht im nächsten Durchgang, also binnen Minuten. Die
+ * Karenz deckt Unterbrechungen ab, nach denen ein Rückstand erst über mehrere
+ * Durchgänge abgearbeitet wird — sie soll den Normalbetrieb nicht anschlagen
+ * lassen, aber einen echten Stillstand nicht verstecken.
+ */
+const OUTCOME_GRACE_HOURS = 6;
+
+/**
+ * Bedingung „für diesen Horizont ist ein Label fällig, aber nicht vorhanden".
+ *
+ * Das ist der Kern der Nachberechnung: Ohne die `outcomes: none`-Bedingung
+ * liefert die Abfrage immer wieder dieselben ältesten Kandidaten — auch die
+ * längst vollständig ausgewerteten. Sobald mehr Kandidaten existieren, als ein
+ * Durchgang abarbeitet, bekäme kein neuer Kandidat je ein Label, und zwar
+ * lautlos: Die Gesamtzahl der Labels bleibt hoch, sie wächst nur nicht mehr.
+ */
+function pendingHorizonConditions(
+  now: Date,
+  graceHours = 0,
+): Prisma.CandidateFeatureWhereInput[] {
+  return OUTCOME_HORIZONS_HOURS.map((horizonHours) => ({
+    capturedAt: {
+      lte: new Date(now.getTime() - (horizonHours + graceHours) * 3_600_000),
+    },
+    outcomes: { none: { horizonHours } },
+  }));
+}
 
 export interface RecordFeatureInput {
   poolAddress: string;
@@ -210,10 +245,21 @@ export class TrackRepo {
    * Ein Label wird erst geschrieben, wenn sein Horizont **vollständig
    * verstrichen** ist — ein nach zwei Stunden berechnetes 24-Stunden-Label
    * wäre systematisch verzerrt.
+   *
+   * Ausgewählt werden ausschließlich Kandidaten mit mindestens einem fälligen,
+   * aber fehlenden Label (siehe `pendingHorizonConditions`). Fertige Kandidaten
+   * dürfen den Stapel nicht belegen, sonst bleibt die Nachberechnung an den
+   * ältesten Zeilen hängen und neue Kandidaten bekommen nie ein Label.
+   *
+   * Ein Horizont ohne Messpunkte bekommt ein **leeres** Label statt gar keines.
+   * Das ist Absicht: Auch „in diesem Zeitraum wurde nichts aufgezeichnet" ist
+   * ein Ergebnis, und nur so verlässt der Kandidat den Stapel. Für das Training
+   * ist die Zeile unschädlich — `exportDataset` und `datasetQuality` verlangen
+   * beide `observations >= 2` und fangen sie ab.
    */
   async computeDueOutcomes(now: Date = new Date(), limit = 200): Promise<number> {
     const features = await this.prisma.candidateFeature.findMany({
-      where: { capturedAt: { lte: new Date(now.getTime() - 3_600_000) } },
+      where: { OR: pendingHorizonConditions(now) },
       orderBy: { capturedAt: "asc" },
       take: limit,
       select: {
@@ -224,35 +270,57 @@ export class TrackRepo {
       },
     });
 
-    let written = 0;
+    const rows: Prisma.CandidateOutcomeCreateManyInput[] = [];
     for (const feature of features) {
       const done = new Set(feature.outcomes.map((o) => o.horizonHours));
-      const points = await this.loadTrack(feature.poolAddress, feature.capturedAt);
-      if (points.length === 0) continue;
+      // Über den längsten Horizont hinaus sieht kein Label — den Rest des
+      // Verlaufs zu laden kostet nur Speicher und wächst mit der Laufzeit.
+      const until = new Date(feature.capturedAt.getTime() + MAX_HORIZON_HOURS * 3_600_000);
+      const points = await this.loadTrack(feature.poolAddress, feature.capturedAt, until);
 
       for (const label of computeOutcomes(feature.capturedAt, points)) {
         if (done.has(label.horizonHours)) continue;
         const horizonEnd = feature.capturedAt.getTime() + label.horizonHours * 3_600_000;
         if (horizonEnd > now.getTime()) continue;
-        if (label.observations === 0) continue;
 
-        await this.prisma.candidateOutcome.create({
-          data: {
-            featureId: feature.id,
-            horizonHours: label.horizonHours,
-            priceChangePct: label.priceChangePct,
-            tvlChangePct: label.tvlChangePct,
-            feeYieldPct: label.feeYieldPct,
-            maxDrawdownPct: label.maxDrawdownPct,
-            rugged: label.rugged,
-            observations: label.observations,
-            coveredHours: label.coveredHours,
-          },
+        rows.push({
+          featureId: feature.id,
+          horizonHours: label.horizonHours,
+          priceChangePct: label.priceChangePct,
+          tvlChangePct: label.tvlChangePct,
+          feeYieldPct: label.feeYieldPct,
+          maxDrawdownPct: label.maxDrawdownPct,
+          rugged: label.rugged,
+          observations: label.observations,
+          coveredHours: label.coveredHours,
         });
-        written++;
       }
     }
-    return written;
+
+    if (rows.length === 0) return 0;
+    // Ein Insert statt einem je Label. `skipDuplicates` deckt den Fall ab, dass
+    // zwei Aufzeichner gleichzeitig laufen — die Eindeutigkeit erzwingt ohnehin
+    // der Index auf (feature_id, horizon_hours).
+    const result = await this.prisma.candidateOutcome.createMany({
+      data: rows,
+      skipDuplicates: true,
+    });
+    return result.count;
+  }
+
+  /**
+   * Fällige, aber fehlende Labels jenseits der Karenzzeit.
+   *
+   * Die Kennzahl, an der ein Stillstand der Nachberechnung sichtbar wird: Die
+   * bloße Anzahl berechneter Labels bleibt dabei hoch und sieht gesund aus.
+   */
+  async overdueOutcomes(now: Date = new Date()): Promise<number> {
+    const counts = await Promise.all(
+      pendingHorizonConditions(now, OUTCOME_GRACE_HOURS).map((where) =>
+        this.prisma.candidateFeature.count({ where }),
+      ),
+    );
+    return counts.reduce((sum, count) => sum + count, 0);
   }
 
   /**
@@ -356,19 +424,28 @@ export class TrackRepo {
     const sixHoursAgo = new Date(now.getTime() - 6 * 3_600_000);
     const dayAgo = new Date(now.getTime() - 24 * 3_600_000);
 
-    const [trackedActive, newest, pointsLastHour, featuresLast6h, featuresTotal, outcomesTotal, oldest] =
-      await Promise.all([
-        this.prisma.trackedPool.count({ where: { active: true } }),
-        this.prisma.poolSnapshot.findFirst({ orderBy: { ts: "desc" }, select: { ts: true } }),
-        this.prisma.poolSnapshot.count({ where: { ts: { gte: hourAgo } } }),
-        this.prisma.candidateFeature.count({ where: { capturedAt: { gte: sixHoursAgo } } }),
-        this.prisma.candidateFeature.count(),
-        this.prisma.candidateOutcome.count(),
-        this.prisma.candidateFeature.findFirst({
-          orderBy: { capturedAt: "asc" },
-          select: { capturedAt: true },
-        }),
-      ]);
+    const [
+      trackedActive,
+      newest,
+      pointsLastHour,
+      featuresLast6h,
+      featuresTotal,
+      outcomesTotal,
+      overdueOutcomes,
+      oldest,
+    ] = await Promise.all([
+      this.prisma.trackedPool.count({ where: { active: true } }),
+      this.prisma.poolSnapshot.findFirst({ orderBy: { ts: "desc" }, select: { ts: true } }),
+      this.prisma.poolSnapshot.count({ where: { ts: { gte: hourAgo } } }),
+      this.prisma.candidateFeature.count({ where: { capturedAt: { gte: sixHoursAgo } } }),
+      this.prisma.candidateFeature.count(),
+      this.prisma.candidateOutcome.count(),
+      this.overdueOutcomes(now),
+      this.prisma.candidateFeature.findFirst({
+        orderBy: { capturedAt: "asc" },
+        select: { capturedAt: true },
+      }),
+    ]);
 
     const distinctPools = await this.prisma.poolSnapshot.findMany({
       where: { ts: { gte: hourAgo } },
@@ -415,6 +492,7 @@ export class TrackRepo {
       featuresLast6h,
       featuresTotal,
       outcomesTotal,
+      overdueOutcomes,
       oldestFeatureAt: oldest?.capturedAt ?? null,
       fieldCoverage,
       largestGapMinutes: await this.largestGapMinutes(dayAgo, now),

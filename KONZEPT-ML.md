@@ -147,9 +147,41 @@ Entdecken an.
 
 ### 3.3 Konsequenz für den Zeitplan
 
-Die Aufzeichnung ist **die einzige Komponente, die echte Kalenderzeit braucht**.
-Alles andere rechnet in Minuten. Deshalb sollte sie starten, bevor irgendein
-Optimierer gebaut wird — jeder Tag ohne Aufzeichnung ist unwiederbringlich.
+> **Korrektur (Juli 2026, nach Prüfung der Meteora-API-Referenz):** Der
+> ursprüngliche Satz „die Aufzeichnung ist die einzige Komponente, die echte
+> Kalenderzeit braucht, jeder Tag ohne sie ist unwiederbringlich" war in dieser
+> Schärfe falsch. Die DLMM Data API hat zwei Historien-Endpunkte:
+>
+> | Endpunkt | Liefert | Raster |
+> |---|---|---|
+> | `GET /pools/{address}/ohlcv` | Open/High/Low/Close und Volumen je Kerze, `start_time`/`end_time` frei wählbar | 5 m, 30 m, 1 h, 2 h, 4 h, 12 h, 24 h |
+> | `GET /pools/{address}/volume/history` | Volumen, Gebühren und **Protokollgebühren** je Zeitfenster | dieselben |
+>
+> Damit ist der **Preis-, Volumen- und Gebührenverlauf rückwirkend abrufbar** —
+> feiner sogar als das eigene 15-Minuten-Raster, und mit `high`/`low` je Kerze
+> statt nur einem Stichprobenwert.
+
+Was das ändert und was nicht:
+
+| Teil | Nachladbar? |
+|---|---|
+| Preis-, Volumen-, Gebührenverlauf (die Ticks des Replays) | **ja**, über die beiden Endpunkte oben |
+| TVL-Verlauf | nein — die Pool-API liefert nur den aktuellen Stand |
+| Merkmale zum Entscheidungszeitpunkt (RugCheck, Jupiter, DexScreener, Organic Score) | nein — das sind Momentaufnahmen fremder Dienste |
+
+Die Aufzeichnung bleibt also nötig, aber sie ist **nicht mehr der kritische
+Pfad des Replays**. Zwei Konsequenzen:
+
+1. **M2 und M3 können sofort beginnen**, statt auf Wochen Kalenderzeit zu
+   warten. Der Replay lässt sich auf nachgeladenen Verläufen bereits heute
+   gegen die vorhandenen Presets rechnen.
+2. **Lücken in der Verlaufsaufzeichnung sind reparierbar.** Ein Nachlade-Lauf
+   füllt sie; nur die Merkmalszeilen und der TVL-Verlauf entstehen weiterhin
+   ausschließlich live.
+
+Unverändert richtig bleibt der Kern: Die Merkmalsaufzeichnung sollte laufen,
+bevor der Optimierer gebaut wird, denn **sie** ist nicht nachholbar — und ohne
+sie gibt es kein Auswahlmodell (Teil A), nur die Führungs-Optimierung (Teil B).
 
 ---
 
@@ -419,17 +451,20 @@ kurzfristig als ertragsmindernd erkennen würde.
 | **M1b — Merkmalsbreite** ✅ | Alle sechs Zeitfenster der Pool-API (`30m`–`24h`) samt Trend- und Stetigkeitsmerkmalen, Gebührenstruktur (dynamische Gebühr, Protokollanteil, `collect_fee_mode`), Farm-Rewards, Pool-Alter, Token-Angaben aus der Pool-API; Discovery über mehrere Sortierungen (`FEATURE_VERSION` 2) | umgesetzt | **läuft** |
 | **M1c — Zeitreihe für den Replay** ✅ | `pool_snapshots` trägt Gebührenstruktur, SOL-Kurs und alle Zeitfenster je Messpunkt; `effectiveFeePct()` als Genauigkeits-Rangfolge; `loadTrack()` als gemeinsamer Lesepfad von Replay und Label-Berechnung | umgesetzt | **läuft** |
 | **M1d — Simulator repariert** ✅ | Aktiv-Bin-Gebührenmodell statt TVL-Anteil, Protokollanteil, Gesamtgebühr statt Basisgebühr, Composition Fee, Rebalancing als ein Ablauf, Wartezustand einseitiger Positionen | umgesetzt | — |
-| **M2 — Replay** | Tick-Reader, Einstiege an beliebigen Zeitpunkten, Determinismus, Gleichheitstest Replay ↔ Live | mittel | parallel zu M1 |
-| **M3 — Sensitivität** | Einzelparameter-Analyse, Auswahl der 5–10 relevanten, Bericht | gering | nach ~1 Woche Daten |
+| **M1e — Label-Nachberechnung** ✅ | Auswahl nur noch über offene Horizonte statt „älteste zuerst"; Rückstand als Kennzahl im Prüfbericht | umgesetzt | — |
+| **M2 — Replay** | Tick-Reader, Einstiege an beliebigen Zeitpunkten, Determinismus, Gleichheitstest Replay ↔ Live; **zusätzlich Nachladen der Verläufe** über `/ohlcv` und `/volume/history` (Abschnitt 3.3) | mittel | sofort startbar |
+| **M3 — Sensitivität** | Einzelparameter-Analyse, Auswahl der 5–10 relevanten, Bericht | gering | nach M2 |
 | **M4 — Suche** | Zufallssuche + Verfeinerung, Zielfunktion, Plateau-Bewertung | mittel | nach M3 |
 | **M5 — Validierung** | Vorwärts-Testen, Sperrzonen, Mehrfachtestkorrektur, Zufallsvergleich | mittel | mit M4 |
 | **M6 — Auswahl & UI** | Pareto-Front, Diversitätsfilter, Strategie-Labor-Seite, Preset-Export | mittel | nach M5 |
 | **M7 — Lernmodell (optional)** | LightGBM mit monotonen Nebenbedingungen, Merkmalsbedeutung | hoch | nur bei Restsignal |
 
-**Empfohlene Reihenfolge der ersten Schritte:** M1 sofort umsetzen und die
-Aufzeichnung starten — sie ist die einzige Komponente, deren Wert von der
-verstrichenen Zeit abhängt. M2 lässt sich parallel bauen, während die Daten
-auflaufen. Erst danach lohnt der Optimierer.
+**Empfohlene Reihenfolge der ersten Schritte:** M1 läuft — die Merkmals-
+aufzeichnung ist der Teil, dessen Wert von verstrichener Zeit abhängt, und sie
+sollte durchgehend weiterlaufen. M2 ist der nächste Schritt und **nicht mehr an
+Wartezeit gebunden**: Die Verläufe, gegen die der Replay rechnet, lassen sich
+über die Historien-Endpunkte nachladen (Abschnitt 3.3). Erst danach lohnt der
+Optimierer.
 
 ### Betriebsanforderung: lückenlose Laufzeit
 
@@ -456,10 +491,13 @@ zugeklappter Deckel kosten daher nur die Zeit der Unterbrechung, nie bereits
 gesammelte Daten. Nach dem Neustart sind alle verfolgten Pools sofort wieder
 fällig, und die Aufzeichnung setzt fort.
 
-Die gesammelten Daten sind allerdings **nicht wiederbeschaffbar**: Es gibt keine
-Historie, die man im Nachhinein abrufen könnte — was nicht aufgezeichnet wurde,
-ist dauerhaft weg. Nach einigen Wochen steckt darin der gesamte Wert des
-Vorhabens. `pnpm sichern` legt deshalb eine komprimierte Sicherung an, prüft sie
+Ein Teil der gesammelten Daten ist **nicht wiederbeschaffbar**: die
+Merkmalszeilen zum Entscheidungszeitpunkt und der TVL-Verlauf. Für sie gibt es
+keine Historie zum Abrufen — was nicht aufgezeichnet wurde, ist dauerhaft weg.
+Preis-, Volumen- und Gebührenverlauf lassen sich dagegen über die
+Meteora-Historien-Endpunkte nachladen (Abschnitt 3.3). Nach einigen Wochen
+steckt im nicht-nachladbaren Teil der eigentliche Wert des Vorhabens.
+`pnpm sichern` legt deshalb eine komprimierte Sicherung an, prüft sie
 auf Vollständigkeit (eine leere Sicherung ist gefährlicher als keine, weil sie
 Sicherheit vortäuscht) und hält die letzten 14 vor. Vor dem Zurückspielen wird
 automatisch der Ist-Zustand gesichert.
@@ -471,6 +509,31 @@ des Horizonts. Ein 24-Stunden-Label, das nur drei Stunden abdeckt, wird
 aussortiert statt stillschweigend mittrainiert. `datasetQuality()` weist je
 Horizont aus, wie viele Labels verwertbar sind — die ehrliche Rechnung dessen,
 was Unterbrechungen tatsächlich gekostet haben.
+
+### Nachberechnung der Labels: der Rückstand ist die Kennzahl
+
+Labels entstehen nicht beim Erfassen eines Kandidaten, sondern nachträglich —
+sobald ein Horizont **vollständig** verstrichen ist. Ein nach zwei Stunden
+berechnetes 24-Stunden-Label wäre systematisch verzerrt. Jeder Durchgang der
+Aufzeichnung holt deshalb einen Stapel von Kandidaten mit fälligen, aber noch
+fehlenden Labels nach.
+
+Die entscheidende Eigenschaft dieser Auswahl: Sie muss **fertige Kandidaten
+überspringen**. Werden stattdessen einfach die ältesten genommen, belegen die
+längst ausgewerteten den Stapel dauerhaft, und ab dem ersten vollen Stapel
+bekommt kein neuer Kandidat je ein Label. Dieser Fehler ist besonders tückisch,
+weil er sich nicht wie einer anfühlt: Es *sind* Tausende Labels da, sie gehören
+nur alle zu den ersten Kandidaten.
+
+Deshalb überwacht der Prüfbericht (`pnpm pruefen`) nicht die Anzahl der Labels,
+sondern den **Rückstand** — fällige, aber fehlende Labels jenseits einer
+Karenzzeit von sechs Stunden. Nach einer Unterbrechung ist ein Rückstand normal
+und baut sich über die nächsten Durchgänge ab; bleibt er stehen oder wächst er,
+wird nicht mehr nachgeführt. Ein Kandidat, dessen Pool im Horizont gar nicht
+gemessen wurde, erhält ein **leeres** Label (`observations = 0`) statt gar
+keines — auch „hier wurde nichts aufgezeichnet" ist ein Ergebnis, und nur so
+verlässt er den Stapel. Für das Training ist es unschädlich: Export und
+Qualitätsrechnung verlangen beide mindestens zwei Beobachtungen.
 
 ---
 

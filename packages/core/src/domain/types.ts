@@ -16,8 +16,14 @@ export interface TokenRef {
  *
  * Warum alle Fenster geführt werden: KONZEPT-ML.md 3.2/4.2 stützt sich auf
  * Trends und Stetigkeit ("Fee/TVL-Trend statt nur -Niveau"), nicht auf das
- * 24-Stunden-Niveau allein. Die Werte kommen im selben Response — sie später
- * nachzuholen ist unmöglich, weil es keine Historie zum Abrufen gibt.
+ * 24-Stunden-Niveau allein. Die Werte kommen im selben Response, kosten also
+ * nichts extra.
+ *
+ * Volumen- und Gebührenverlauf ließen sich notfalls über die Historien-
+ * Endpunkte der Pool-API nachladen (`/pools/{address}/ohlcv`,
+ * `/pools/{address}/volume/history`, KONZEPT-ML.md 3.3). Für den TVL gilt das
+ * nicht — er ist nur als aktueller Stand zu haben und deshalb der Grund, warum
+ * die Verlaufsaufzeichnung trotzdem laufen muss.
  */
 export const METRIC_WINDOWS = ["m30", "h1", "h2", "h4", "h12", "h24"] as const;
 export type MetricWindow = (typeof METRIC_WINDOWS)[number];
