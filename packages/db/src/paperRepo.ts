@@ -175,6 +175,7 @@ export class PaperRepo {
           realizedPnlSol: 0,
           unrealizedPnlSol: 0,
           totalPnlSol: 0,
+          depositedSol: 0,
           feesEarnedSol: 0,
           costsSol: 0,
           wins: 0,
@@ -191,6 +192,7 @@ export class PaperRepo {
       const value = row.currentValueSol === null ? null : Number(row.currentValueSol);
       const deposit = Number(row.depositSol);
 
+      entry.depositedSol += deposit;
       entry.feesEarnedSol += Number(row.feesEarnedSol);
       entry.costsSol += Number(row.costsSol);
       if (row.hodlValueSol !== null && value !== null) {

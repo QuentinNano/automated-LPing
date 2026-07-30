@@ -118,6 +118,7 @@ export async function presetPerformance(config: BotConfig): Promise<PresetPerfor
         realizedPnlSol: 0,
         unrealizedPnlSol: 0,
         totalPnlSol: 0,
+        depositedSol: 0,
         feesEarnedSol: 0,
         costsSol: 0,
         wins: 0,

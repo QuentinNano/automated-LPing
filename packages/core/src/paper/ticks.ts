@@ -50,6 +50,32 @@ export function volumeRate24hUsd(pool: PoolMetrics): number {
   return pool.volume24hUsd ?? 0;
 }
 
+/**
+ * Dasselbe als 24-Stunden-Rate, aber aus dem **trägsten** belegten Fenster.
+ *
+ * Gegenstück zu `volumeRate24hUsd`, und der Unterschied ist kein Detail: Für
+ * den Gebühren-Akkrual über 15 Minuten ist die schnellste verfügbare Auflösung
+ * richtig. Für eine Projektion über Stunden ist sie falsch — eine halbstündige
+ * Volumenspitze als Dauerannahme zu lesen, überschätzt jeden erwarteten Ertrag
+ * um Größenordnungen (ANALYSE.md 4.1). Wer in die Zukunft rechnet, nimmt den
+ * trägen Wert.
+ */
+export function volumeRate24hUsdSlow(pool: PoolMetrics): number {
+  const windows: [keyof PoolMetrics["volumeUsd"], number][] = [
+    ["h24", 1],
+    ["h12", 2],
+    ["h4", 6],
+    ["h2", 12],
+    ["h1", 24],
+    ["m30", 48],
+  ];
+  for (const [window, factor] of windows) {
+    const value = pool.volumeUsd[window];
+    if (value !== undefined && Number.isFinite(value)) return value * factor;
+  }
+  return pool.volume24hUsd ?? 0;
+}
+
 /** Pool-Metriken in die Beobachtungsform, die auch die Aufzeichnung schreibt. */
 export function trackPointFromPool(pool: PoolMetrics): TrackPoint {
   return {
@@ -89,6 +115,7 @@ export function marketTickFromPool(
     priceInSol: price,
     poolTvlUsd: pool.tvlUsd ?? 0,
     poolVolume24hUsd: volumeRate24hUsd(pool),
+    poolVolume24hUsdSlow: volumeRate24hUsdSlow(pool),
     poolFeePct: poolFeePct(pool),
     solPriceUsd: context.solPriceUsd,
     ...(pool.protocolFeePct !== undefined ? { protocolFeePct: pool.protocolFeePct } : {}),

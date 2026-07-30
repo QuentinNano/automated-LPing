@@ -7,6 +7,8 @@ import {
   tickPaperPosition,
   valuePosition,
 } from "../paper/engine";
+import { poolFeeRatePctPerDay } from "../paper/poolHealth";
+import { positionSizeSol } from "../paper/sizing";
 import type { PaperCloseReason, PaperPositionState, PaperValuation } from "../paper/types";
 
 /**
@@ -80,8 +82,7 @@ export function replayPosition(
   if (entry === null) return null;
 
   const { preset, global } = options;
-  const depositSol =
-    options.depositSol ?? (global.paper.capitalPerPresetSol * preset.positionSizePct) / 100;
+  const depositSol = options.depositSol ?? positionSizeSol(preset);
 
   let state = openPaperPosition({
     preset,
@@ -90,6 +91,11 @@ export function replayPosition(
     price: entry.tick.priceInSol,
     depositSol,
     feePct: entry.tick.poolFeePct,
+    feeRatePctPerDay: poolFeeRatePctPerDay(
+      entry.tick.poolVolume24hUsd,
+      entry.tick.poolFeePct,
+      entry.tick.poolTvlUsd,
+    ),
     at: entry.tick.at,
   });
 

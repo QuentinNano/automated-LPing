@@ -22,8 +22,17 @@ export interface MarketAggregates {
   solPriceUsd: number | null;
   /** Median des Token-Preises in SOL über SOL-quotierte Paare. */
   medianPriceNative: number | null;
+  priceChangeH1Pct: number | null;
   priceChangeH6Pct: number | null;
   priceChangeH24Pct: number | null;
+  /**
+   * Geschätzte realisierte Tagesvolatilität in Prozent, aus den
+   * Preisänderungen abgeleitet (`ml/volatility.ts`).
+   *
+   * Die Größe, die über den Nenner der LP-Rechnung entscheidet: Gebühren wachsen
+   * linear mit dem Umschlag, der Verlust gegenüber Halten quadratisch mit ihr.
+   */
+  volatilityPctDaily: number | null;
   pairCount: number;
 }
 

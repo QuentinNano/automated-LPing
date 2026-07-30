@@ -170,6 +170,14 @@ export interface ScanRow {
   pool: PoolMetrics;
   tokenMint: string;
   screening: ScreeningResult;
+  /**
+   * Geschätzte Tagesvolatilität des Tokens in %, sofern ableitbar.
+   *
+   * Wird beim Eröffnen gebraucht: Die Range-Breite folgt der Bewegung des
+   * Marktes statt einer festen Bin-Zahl. Der Wert entsteht ohnehin im
+   * Screening — ihn hier mitzugeben spart einen zweiten Abruf.
+   */
+  volatilityPctDaily: number | null;
 }
 
 export interface ScanSummary {
@@ -311,7 +319,13 @@ export async function runScan(
         risk: enrichment?.risk ?? null,
         sellability: enrichment?.sellability ?? null,
       });
-      rows.push({ preset: id, pool, tokenMint: tokenMint ?? "-", screening });
+      rows.push({
+        preset: id,
+        pool,
+        tokenMint: tokenMint ?? "-",
+        screening,
+        volatilityPctDaily: enrichment?.market?.volatilityPctDaily ?? null,
+      });
 
       // Aufzeichnung für die spätere Optimierung: Merkmale JEDES gescreenten
       // Kandidaten, unabhängig vom Urteil (KONZEPT-ML.md Abschnitt 3.1).

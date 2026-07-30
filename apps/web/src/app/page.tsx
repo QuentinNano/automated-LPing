@@ -36,10 +36,27 @@ export default async function ComparisonPage() {
             <div className="meta">
               {row.openPositions} offen · {row.closedPositions} geschlossen
             </div>
+            {/* Rendite statt absolutem PnL: Presets setzen verschieden viel
+                Kapital je Position ein, und wer nach SOL rankt, belohnt die
+                größere Position statt der besseren Strategie. */}
             <div className="big">
-              <Sol value={row.totalPnlSol} /> <span className="muted" style={{ fontSize: 13 }}>SOL</span>
+              <Num
+                value={row.depositedSol > 0 ? (row.totalPnlSol / row.depositedSol) * 100 : null}
+                digits={2}
+                suffix=" %"
+              />
             </div>
             <div style={{ marginTop: 12 }}>
+              <div className="kv">
+                <span>PnL absolut</span>
+                <span>
+                  <Sol value={row.totalPnlSol} /> SOL
+                </span>
+              </div>
+              <div className="kv">
+                <span>Einsatz</span>
+                <span>{row.depositedSol.toFixed(2)} SOL</span>
+              </div>
               <div className="kv">
                 <span>davon Fees</span>
                 <span className="pos">+{row.feesEarnedSol.toFixed(4)}</span>

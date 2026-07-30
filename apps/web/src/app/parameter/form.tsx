@@ -81,7 +81,7 @@ export function ParameterForm({ config, version }: { config: BotConfig; version:
           <div className="grid-inputs">
             <Bool path={`presets.${id}.enabled`} label="Aktiv" value={preset.enabled} />
             <Num path={`presets.${id}.capitalSharePct`} label="Kapitalanteil live (%)" value={preset.capitalSharePct} />
-            <Num path={`presets.${id}.positionSizePct`} label="Positionsgröße (% des Kapitals)" value={preset.positionSizePct} />
+            <Num path={`presets.${id}.positionSizeSol`} label="Positionsgröße (SOL)" value={preset.positionSizeSol} step="0.5" />
             <Num path={`presets.${id}.maxPositions`} label="Max. Positionen" value={preset.maxPositions} step="1" />
             <Num path={`presets.${id}.minScore`} label="Mindest-Score" value={preset.minScore} />
             <Num path={`presets.${id}.minTvlUsd`} label="Mindest-TVL (USD)" value={preset.minTvlUsd} step="1000" />
@@ -108,11 +108,15 @@ export function ParameterForm({ config, version }: { config: BotConfig; version:
                 ["quote_only", "nur SOL unterhalb (Kauforders)"],
               ]}
             />
-            <Num path={`presets.${id}.stopLossPct`} label="Stop-Loss (%)" value={preset.stopLossPct} />
-            {preset.takeProfitPct !== undefined && (
-              <Num path={`presets.${id}.takeProfitPct`} label="Take-Profit (%)" value={preset.takeProfitPct} />
-            )}
+            <Num path={`presets.${id}.stopLossPct`} label="Stop-Loss (%) — Rückfalllinie" value={preset.stopLossPct} />
             <Num path={`presets.${id}.maxHoldHours`} label="Max. Haltezeit (h)" value={preset.maxHoldHours} />
+            <Num path={`presets.${id}.binRange.coverageSigmas`} label="Range-Breite (σ der Tagesbewegung)" value={preset.binRange.coverageSigmas ?? 1.5} step="0.25" />
+            <Num path={`presets.${id}.volatilityBoundsPctDaily.min`} label="Volatilität min (%/Tag)" value={preset.volatilityBoundsPctDaily.min} />
+            <Num path={`presets.${id}.volatilityBoundsPctDaily.max`} label="Volatilität max (%/Tag)" value={preset.volatilityBoundsPctDaily.max} />
+            <Num path={`presets.${id}.exit.priceCrashPct`} label="Ausstieg: Preissturz (%)" value={preset.exit.priceCrashPct} />
+            <Num path={`presets.${id}.exit.tvlDrainPct`} label="Ausstieg: TVL-Abzug (%)" value={preset.exit.tvlDrainPct} />
+            <Num path={`presets.${id}.exit.feeCollapsePct`} label="Ausstieg: Ertragseinbruch (%)" value={preset.exit.feeCollapsePct} />
+            <Num path={`presets.${id}.exit.feeStallHours`} label="Ausstieg: Stunden ohne Ertrag" value={preset.exit.feeStallHours} step="0.5" />
             <Num path={`presets.${id}.slippageCapPct`} label="Slippage-Limit (%)" value={preset.slippageCapPct} />
             <Bool path={`presets.${id}.rebalance.enabled`} label="Rebalancing" value={preset.rebalance.enabled} />
             <Num path={`presets.${id}.rebalance.minEvFactor`} label="Rebalance nur ab Ertragsfaktor" value={preset.rebalance.minEvFactor} />

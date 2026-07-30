@@ -1,5 +1,10 @@
 # Analyse: Beurteilung, Verbesserungen, Profitabilität
 
+> **Stand der Umsetzung.** Die Abschnitte 2 bis 5 beschreiben den Zustand **vor**
+> den Änderungen und bleiben als Begründung stehen — sie erklären, warum die
+> Umbauten aussehen, wie sie aussehen. Was daraus umgesetzt wurde und was es
+> gebracht hat, steht in Abschnitt 8. Was offen blieb, in 8.3.
+
 > Externe Durchsicht des Stands vom 30.07.2026 (Commit `17a4a6f`). Alle Zahlen
 > stammen aus Monte-Carlo-Läufen **durch die echte Paper-Engine des Repos**
 > (`openPaperPosition` / `tickPaperPosition` / `closePaperPosition`), nicht aus
@@ -449,3 +454,81 @@ Funktionen des Repos aufrufen (`openPaperPosition`, `tickPaperPosition`,
 Preset-Dateien über `loadDefaultsFromDir("config")` laden. Deterministischer RNG
 (Mulberry32, feste Seeds), daher exakt wiederholbar. Testlauf des Repos zum
 Analysezeitpunkt: **324 Tests, 28 Dateien, alle grün**.
+
+---
+
+## 8. Umsetzung
+
+### 8.1 Was geändert wurde
+
+| Befund | Lösung |
+|---|---|
+| Take-Profit unerreichbar (2) | **Entfernt.** An seine Stelle treten zustandsabhängige Ausstiegsregeln (`packages/core/src/paper/poolHealth.ts`): Preissturz, Liquiditätsabzug, Ertragseinbruch des Pools, versiegter Ertrag der Position. Der Stop-Loss bleibt als **Rückfalllinie**, weiter gesetzt als zuvor |
+| Ranges zu eng für die Volatilität (3) | Bin-Zahl wird aus σ **hergeleitet** statt gesetzt: `coverageSigmas · σ · √Horizont`, Horizont = Zeit bis zur nächsten Korrekturmöglichkeit. `binRange.min`/`max` sind jetzt Leitplanken |
+| EV-Tor wirkungslos (4.1) | Begrenztes Projektionsfenster (`rebalance.projectionHours`, neu), Gewichtung mit der beobachteten Zeit in Range, trägstes Volumenfenster (`volumeRate24hUsdSlow`) statt des kürzesten |
+| Positionsgröße dreifach definiert (4.2) | `positionSizeSol` **absolut in SOL**, eine Quelle (`paper/sizing.ts`) für Screening, Paper und Replay. 5 / 3 / 1 SOL — über der Grenze, ab der Rent-Bindung und Bin-Array-Initialisierung die Position tragen |
+| Vergleich nach absolutem PnL (4.3) | Tabelle und Web-UI zeigen **Rendite auf den Einsatz**; `PresetPerformance.depositedSol` liefert den Nenner |
+| Keine Volatilität in der Auswahl (3.2) | `ml/volatility.ts`: realisierte Volatilität aus der Zeitreihe, Schätzung aus den Preisänderungen. Neuer Filter `volatility_band`, neue Score-Komponente **Ertrag je Varianz** — sie ersetzt den toten Quellen-Bonus |
+| `poolLiquidityBins` unbestimmt (3.1) | Default konservativ auf 30 (war 70), nach dem eigenen Prinzip „Modellannahmen nicht optimieren". Ersetzt wird die Schätzung erst durch den RPC-Adapter |
+| Sensitivität nicht messbar (6) | `pnpm stresstest` — Modellannahmen, Strategie-Stellschrauben, Marktbedingungen und eine Regime-Landkarte auf synthetischen Pfaden, deterministisch |
+
+### 8.2 Was es gebracht hat
+
+Identische Engine, identische Pfade, 3.000 Läufe je Zelle — nur die Auslegung
+unterscheidet sich:
+
+| | | med. PnL | Ø PnL | **P10** | vs. HODL | in Range | Win |
+|---|---|---|---|---|---|---|---|
+| **Konservativ** | vorher | −16,9 % | −16,9 % | −19,7 % | −16,7 % | 42 % | 2 % |
+| σ 40 %/Tag | **nachher** | **−1,6 %** | **−5,1 %** | −21,6 % | **−5,2 %** | **94 %** | **45 %** |
+| **Balanced** | vorher | −23,3 % | −24,1 % | −28,5 % | −23,6 % | 65 % | 0 % |
+| σ 80 %/Tag | **nachher** | −21,1 % | **−16,8 %** | −30,0 % | **−16,0 %** | **92 %** | **15 %** |
+| **Degen** | vorher | ±0,0 % | −10,2 % | −27,5 % | −10,2 % | 50 % | 51 % |
+| σ 150 %/Tag | **nachher** | −0,1 % | **−2,6 %** | **−9,1 %** | **−2,6 %** | 55 % | 17 % |
+
+Drei Beobachtungen, die mehr sagen als die Vorzeichen:
+
+1. **Der Verlust-Tail schrumpft am stärksten.** Bei Degen fällt das
+   10-Prozent-Quantil von −27,5 % auf −9,1 %. Das ist die eigentliche Wirkung der
+   zustandsabhängigen Regeln: Sie fangen den Fall ab, in dem eine einseitige
+   Position in einen fallenden Markt hinein befüllt wird.
+2. **Degens Trefferquote fällt von 51 % auf 17 %, der Mittelwert steigt
+   trotzdem.** Kein Widerspruch, sondern der Zweck: mehr kleine Verluste, weit
+   weniger große. Die Trefferquote ist bei negativ-schiefen Strategien die
+   irreführendste aller Kennzahlen.
+3. **Der Gebührenertrag sinkt** (Konservativ 0,06 % → 0,02 %). Weitere Ranges
+   halten den Preis, verteilen die Liquidität aber über mehr Bins — und nur der
+   aktive verdient. Das ist kein Nebeneffekt, sondern das LP-Dilemma selbst,
+   jetzt als **ein** Regler sichtbar statt über mehrere Parameter verstreut.
+
+### 8.3 Was das an der Profitabilitäts-Antwort ändert
+
+**Weniger, als die Tabelle nahelegt.** Die Erwartung bleibt in allen drei
+geprüften Szenarien negativ. Die Änderungen beheben Konstruktionsfehler; sie
+erzeugen keinen Vorteil, und das war auch nicht zu erwarten — ein Ausstieg
+entscheidet, *wie* eine Position endet, nicht *ob* der Einstieg gut war.
+
+Was sich geändert hat, ist die **Qualität der Verluste**: Sie sind kleiner, ihr
+Tail ist deutlich kürzer, und sie tragen jetzt einen Grund, der etwas erklärt
+(`price_crash`, `tvl_drain`, `fee_stall`) statt nur „Stop-Loss".
+
+Die Regime-Landkarte von Konservativ zeigt zugleich, wo es weitergeht: **0 von 16
+Regimen positiv**, und mehr Umschlag macht es *schlechter* statt besser — weil
+die Position dann länger lebt und mehr Impermanent Loss ansammelt, ohne dass die
+Gebühren mithalten. Die Bedingung bleibt damit unverändert die aus Abschnitt 5:
+Gebührenertrag muss den Varianzverlust übersteigen. Der Score misst das jetzt;
+ob es Pools gibt, die es erfüllen, beantwortet erst der aufgezeichnete Datensatz.
+
+**Offen und weiterhin vor echtem Kapital zwingend:**
+
+1. `coverageSigmas`, `feeStallHours` und `minEvFactor` sind auf **synthetischen**
+   Pfaden justiert. Sie gehören auf den aufgezeichneten Verläufen kalibriert —
+   der Stresstest sagt, wonach zu suchen ist, nicht was gilt.
+2. Portfolioweiter Risk Manager (4.4): Kill-Switch, globale Caps, Circuit
+   Breaker. Die *positionsbezogenen* Notfall-Schwellen sind mit `exit.*` scharf,
+   die portfolioweiten nicht.
+3. RPC-Adapter — ersetzt `poolLiquidityBins` durch eine Messung und liefert die
+   fehlenden On-Chain-Prüfungen.
+4. Größenabhängige Exit-Slippage; bei 1–5 SOL je Position wichtiger als zuvor.
+5. Rent-Bindung und Bin-Array-Initialisierung im Kostenmodell (`paper/sizing.ts`
+   beziffert beides bereits, die Engine bucht es noch nicht).

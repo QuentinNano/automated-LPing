@@ -31,6 +31,15 @@ import {
   type BackfillDeps,
 } from "./backfill";
 import { formatReplayResult, runReplay } from "./replay";
+import {
+  marketSweeps,
+  modelAssumptionSweeps,
+  strategySweeps,
+  regimeGrid,
+  scenarioForPreset,
+  stressBatch,
+  type StressSummary,
+} from "./stress";
 import { formatScanTable, runScan, type ScanDeps } from "./scan";
 import {
   formatComparison,
@@ -69,11 +78,13 @@ async function main(): Promise<number> {
       return cmdBackfill(process.argv.slice(3));
     case "replay":
       return cmdReplay(process.argv.slice(3));
+    case "stress":
+      return cmdStress(process.argv.slice(3));
     default:
       console.error(
         `Unbekanntes Kommando: ${command}\n` +
           `Verfügbar: validate | health | scan | paper | track | backfill | replay |\n` +
-            `            api:check | fabriq:check <URL>`,
+            `            stress | api:check | fabriq:check <URL>`,
       );
       return 2;
   }
@@ -680,6 +691,151 @@ function intFlag(args: string[], name: string): number | undefined {
     throw new Error(`${name} erwartet eine positive Ganzzahl, bekommen: ${raw ?? "(nichts)"}`);
   }
   return value;
+}
+
+/**
+ * Stresstest der Presets gegen synthetische Marktpfade (KONZEPT-ML.md M3).
+ *
+ * Beginnt bewusst mit den **Modellannahmen** und nicht mit den
+ * Strategieparametern: Solange `poolLiquidityBins` die Ertragsseite um Faktor 14
+ * verschieben kann, misst jede Parametersuche darüber vor allem das eigene
+ * Rauschen.
+ */
+function cmdStress(argv: string[]): number {
+  let config: BotConfig;
+  try {
+    config = loadDefaultsFromDir(configDir);
+  } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      console.error(error.message);
+      return 1;
+    }
+    throw error;
+  }
+
+  const runs = intFlag(argv, "--runs") ?? 1500;
+  const only = stringFlag(argv, "--preset");
+  const entries = Object.entries(config.presets).filter(
+    ([id, preset]) => preset.enabled && (only === undefined || id === only),
+  );
+  if (entries.length === 0) {
+    console.error(only !== undefined ? `Preset "${only}" gibt es nicht.` : "Kein aktives Preset.");
+    return 1;
+  }
+
+  console.log(
+    "Stresstest auf synthetischen Pfaden. Die Pfade sind eine Annahme, keine Messung —\n" +
+      "belastbar sind Vorzeichen und Größenordnungen, nicht die absoluten Zahlen.\n" +
+      `Läufe je Zelle: ${runs}\n`,
+  );
+
+  for (const [id, preset] of entries) {
+    const scenario = scenarioForPreset(config, id);
+    console.log("=".repeat(84));
+    console.log(
+      `${preset.label} — TVL $${(scenario.tvlUsd / 1000).toFixed(0)}k · ` +
+        `Vol/TVL ${scenario.volTvl.toFixed(1)}× · Fee ${scenario.feePct.toFixed(2)} % · ` +
+        `σ ${scenario.sigmaPctDaily.toFixed(0)} %/Tag · binStep ${scenario.binStep} · ` +
+        `Einsatz ${preset.positionSizeSol} SOL`,
+    );
+    console.log("=".repeat(84));
+
+    const baseline = stressBatch(preset, config.global, scenario, runs);
+    console.log("\nAusgangslage");
+    console.log(summaryHeader());
+    console.log(summaryRow("Basis", baseline));
+    console.log(
+      "  Ausstiegsgründe: " +
+        Object.entries(baseline.closeReasons)
+          .sort((a, b) => b[1] - a[1])
+          .map(([reason, count]) => `${reason}=${count}`)
+          .join(", "),
+    );
+
+    console.log("\nModellannahmen — hängt das Ergebnis am Markt oder am Simulator?");
+    for (const sweep of modelAssumptionSweeps(preset, config.global, scenario, runs)) {
+      console.log(`\n  ${sweep.label}`);
+      console.log("  " + summaryHeader());
+      for (const value of sweep.values) {
+        console.log("  " + summaryRow(String(value), sweep.run(value)));
+      }
+    }
+
+    console.log("\nStrategie-Stellschrauben");
+    for (const sweep of strategySweeps(preset, config.global, scenario, runs)) {
+      console.log(`\n  ${sweep.label}`);
+      console.log("  " + summaryHeader());
+      for (const value of sweep.values) {
+        console.log("  " + summaryRow(String(value), sweep.run(value)));
+      }
+    }
+
+    console.log("\nMarktbedingungen");
+    for (const sweep of marketSweeps(preset, config.global, scenario, runs)) {
+      console.log(`\n  ${sweep.label}`);
+      console.log("  " + summaryHeader());
+      for (const value of sweep.values) {
+        console.log("  " + summaryRow(String(value), sweep.run(value)));
+      }
+    }
+
+    console.log("\nRegime-Landkarte — Ø PnL % je σ (Zeile) und Vol/TVL (Spalte), Drift 0");
+    const grid = regimeGrid(preset, config.global, scenario, Math.max(200, Math.floor(runs / 4)));
+    const volTvls = [...new Set(grid.map((cell) => cell.volTvl))];
+    console.log("    σ\\Vol/TVL " + volTvls.map((v) => `${v}×`.padStart(10)).join(""));
+    for (const sigma of [...new Set(grid.map((cell) => cell.sigma))]) {
+      const cells = volTvls.map((volTvl) => {
+        const found = grid.find((cell) => cell.sigma === sigma && cell.volTvl === volTvl);
+        return signedPct(found?.summary.meanPnlPct ?? 0).padStart(10);
+      });
+      console.log(`    ${String(sigma).padStart(3)} %/Tag` + cells.join(""));
+    }
+
+    const positive = grid.filter((cell) => cell.summary.meanPnlPct > 0).length;
+    console.log(
+      `\n  ${positive} von ${grid.length} Regimen mit positiver Erwartung. ` +
+        (positive === 0
+          ? "Keines — die Bauform trägt unter keiner geprüften Bedingung."
+          : "Prüfen, ob die Auswahlfilter dorthin zeigen."),
+    );
+    console.log("");
+  }
+
+  return 0;
+}
+
+function summaryHeader(): string {
+  return (
+    "Wert".padEnd(12) +
+    "medPnL%".padStart(9) +
+    "ØPnL%".padStart(9) +
+    "P10%".padStart(9) +
+    "Fees%".padStart(8) +
+    "Kost%".padStart(8) +
+    "vsHODL%".padStart(9) +
+    "inRng%".padStart(8) +
+    "Std".padStart(7) +
+    "Win%".padStart(6)
+  );
+}
+
+function summaryRow(label: string, s: StressSummary): string {
+  return (
+    label.padEnd(12) +
+    signedPct(s.medianPnlPct).padStart(9) +
+    signedPct(s.meanPnlPct).padStart(9) +
+    signedPct(s.p10PnlPct).padStart(9) +
+    s.feesPct.toFixed(2).padStart(8) +
+    s.costsPct.toFixed(2).padStart(8) +
+    signedPct(s.vsHodlPct).padStart(9) +
+    s.timeInRangePct.toFixed(0).padStart(8) +
+    s.meanHours.toFixed(1).padStart(7) +
+    s.winRatePct.toFixed(0).padStart(6)
+  );
+}
+
+function signedPct(value: number): string {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 }
 
 function printHealth(health: AdapterHealth): void {

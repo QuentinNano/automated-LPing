@@ -50,6 +50,7 @@ pnpm --filter @lping/web dev      # Oberfläche → http://localhost:3000
 | `pnpm aufzeichnen` | **Der Dauerläufer.** Sucht Pools, verfolgt ihren Verlauf, lädt Historie nach. Startet nach Abstürzen neu, protokolliert nach `logs/track.log` |
 | `pnpm pruefen` | Beurteilt die Aufzeichnung — ein Urteil je Aspekt statt Zahlen zum Selbstdeuten |
 | `pnpm abspielen` | Replay: aufgezeichnete Verläufe durch die Simulation, Preset-Vergleich |
+| `pnpm stresstest` | Sensitivitätsanalyse auf synthetischen Pfaden: Woran hängt das Ergebnis — am Markt oder am Simulator? |
 | `pnpm nachladen` | Historie rückwirkend holen (läuft automatisch mit; von Hand nach längerer Unterbrechung) |
 | `pnpm sichern` | Datensicherung anlegen |
 
@@ -88,6 +89,9 @@ pnpm --filter @lping/bot track -- --no-backfill       # ohne Nachladen
 # Replay
 pnpm abspielen -- --days 14 --every 30                # Zeitraum, Einstiegsabstand
 pnpm abspielen -- --pool <Adresse>                    # ein einzelner Pool
+
+# Stresstest (braucht kein Netzwerk und keine Datenbank)
+pnpm stresstest -- --preset balanced --runs 3000
 
 # Nachladen
 pnpm nachladen -- --status                            # Bestand der Historie
@@ -158,11 +162,16 @@ demselben virtuellen Kapital**. Unterschiede in den Ergebnissen stammen damit
 ausschließlich aus den Parametern — ein kontrolliertes Experiment statt eines
 Vergleichs von Äpfeln mit Birnen.
 
-| Preset | Token-Alter | Min. TVL | Strategie | Bins | Stop-Loss | Haltedauer | Rebalancing |
+| Preset | Token-Alter | Min. TVL | Strategie | Einsatz | Stop-Loss | Haltedauer | Rebalancing |
 |---|---|---|---|---|---|---|---|
-| **Konservativ** | ≥ 7 Tage | 250 k$ | Curve, 50/50 | 60–69 | 15 % | ≤ 14 Tage | ja |
-| **Balanced** | ≥ 2 Tage | 120 k$ | Curve, 50/50 | 40–60 | 20 % | ≤ 4 Tage | ja |
-| **Degen** | 1–48 h | 50 k$ | BidAsk, nur SOL | 20–40 | 15 % | ≤ 24 h | nein |
+| **Konservativ** | ≥ 7 Tage | 250 k$ | Curve, 50/50 | 5 SOL | 20 % | ≤ 14 Tage | ja |
+| **Balanced** | ≥ 2 Tage | 120 k$ | Curve, 50/50 | 3 SOL | 25 % | ≤ 4 Tage | ja |
+| **Degen** | 1–48 h | 50 k$ | BidAsk, nur SOL | 1 SOL | 30 % | ≤ 24 h | nein |
+
+Die **Range-Breite steht nicht in der Tabelle**, weil sie nicht mehr gesetzt,
+sondern aus der Volatilität des Tokens hergeleitet wird (KONZEPT.md 6.2b). Der
+Stop-Loss ist die Rückfalllinie, nicht der primäre Ausgang — dafür sorgen die
+zustandsabhängigen Regeln in `exit` (KONZEPT.md 6.2a).
 
 Ein weiteres Profil entsteht durch eine zusätzliche Datei in `config/` (etwa
 `degen_eng.json`) — sie erscheint automatisch in UI, Paper-Vergleich und Replay.
@@ -173,7 +182,7 @@ Ein weiteres Profil entsteht durch eine zusätzliche Datei in `config/` (etwa
 
 | Seite | Inhalt |
 |---|---|
-| **Vergleich** | PnL je Preset, davon Fees, On-Chain-Kosten, Trefferquote, Zeit in Range, Vergleich gegen reines Halten |
+| **Vergleich** | **Rendite** je Preset (nicht absoluter PnL — sonst gewinnt die größere Position statt der besseren Strategie), Fees, On-Chain-Kosten, Trefferquote, Zeit in Range, Vergleich gegen reines Halten |
 | **Positionen** | Bin-Range mit Preis-Marker, Einsatz, Wert, Fees, Kosten, PnL, Zeit in Range; geschlossene mit Ausstiegsgrund |
 | **Scanner** | Entdeckte Pools mit Score und ausformulierter Begründung, warum ein Kandidat abgelehnt wurde |
 | **Parameter** | Alle Werte editierbar; jede Änderung wird validiert und versioniert, ungültige Eingaben ändern nichts |
@@ -310,7 +319,7 @@ sie würden sonst ungeprüft live gehen:
 
 | Lücke | Betrifft |
 |---|---|
-| **Risk Manager nicht scharf:** Kill-Switch, globale Positions- und Exposure-Grenzen, Verlustlimits und Notfall-Schwellen sind konfigurierbar, werden aber von keiner Logik durchgesetzt | KONZEPT.md 6.3, 9 |
+| **Risk Manager nicht scharf:** Kill-Switch, globale Positions- und Exposure-Grenzen und Verlustlimits sind konfigurierbar, werden aber von keiner Logik durchgesetzt. (Die positionsbezogenen Notfall-Schwellen sind seit `exit.*` scharf — die portfolioweiten nicht) | KONZEPT.md 6.3, 9 |
 | **Keine On-Chain-Reads:** Authorities kommen nur von RugCheck; die Token-2022-Prüfung und die LP-Dominanz fehlen ganz | KONZEPT.md 5.1 |
 | **Exit-Slippage pauschal** statt größen- und liquiditätsabhängig — der Verlust-Tail der Simulation ist dadurch zu freundlich | KONZEPT.md 13 |
 | **Shadow-Tracking wird erfasst, aber nicht ausgewertet** (Filter-Güte) | KONZEPT.md 5.5 |

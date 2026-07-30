@@ -23,7 +23,7 @@ describe("ConfigService", () => {
   it("seedet Defaults als Version 1", async () => {
     const service = await ConfigService.init(new MemoryConfigStore(), loadDefaults());
     expect(service.version).toBe(1);
-    expect(service.config.global.maxTotalExposureSol).toBe(20);
+    expect(service.config.global.maxTotalExposureSol).toBe(60);
   });
 
   it("lädt eine vorhandene Version statt neu zu seeden", async () => {
@@ -50,7 +50,7 @@ describe("ConfigService", () => {
     expect(service.config.presets["degen"]!.stopLossPct).toBe(12);
     // Patch darf Nachbarwerte und andere Presets nicht anfassen:
     expect(service.config.presets["degen"]!.minScore).toBe(65);
-    expect(service.config.presets["konservativ"]!.stopLossPct).toBe(15);
+    expect(service.config.presets["konservativ"]!.stopLossPct).toBe(20);
     expect(seen).toEqual([2]);
 
     unsubscribe();
@@ -94,7 +94,7 @@ describe("ConfigService", () => {
     expect(service.config.global.maxTotalExposureSol).toBe(42);
     expect(service.config.presets["degen"]!.stopLossPct).toBe(11);
     // … neue Pflichtfelder kommen aus den Defaults …
-    expect(service.config.global.paper.capitalPerPresetSol).toBe(10);
+    expect(service.config.global.paper.capitalPerPresetSol).toBe(25);
     expect(service.config.presets["degen"]!.label).toBe("Degen");
     // … und Presets, die es nicht mehr gibt, verschwinden.
     expect(service.config.presets["multiday"]).toBeUndefined();
@@ -122,7 +122,7 @@ describe("ConfigService", () => {
     // Startfähig statt korrekt-aber-tot …
     expect(service.version).toBe(2);
     expect(service.config.presets["degen"]!.capitalSharePct).toBe(25);
-    expect(service.config.global.maxTotalExposureSol).toBe(20);
+    expect(service.config.global.maxTotalExposureSol).toBe(60);
     // … und der Verlust der getunten Werte ist in der Historie dokumentiert.
     const history = await service.history();
     expect(history[0]?.reason).toContain("Defaults wiederhergestellt");

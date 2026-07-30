@@ -20,7 +20,7 @@ describe("Score-Engine", () => {
       ["market_quality", 25],
       ["safety_margin", 20],
       ["momentum", 10],
-      ["source_bonus", 10],
+      ["yield_per_variance", 10],
     ]);
     for (const component of score.components) {
       expect(component.points).toBeGreaterThanOrEqual(0);
@@ -35,10 +35,33 @@ describe("Score-Engine", () => {
     expect(byId.get("momentum")?.points).toBe(0);
   });
 
-  it("extern bestätigte Kandidaten bekommen den vollen Quellen-Bonus", () => {
+  it("belohnt Gebührenertrag je Varianz, nicht die Herkunft des Kandidaten", () => {
+    // Die Quelle sagt nichts über die Güte eines Pools — der frühere
+    // Quellen-Bonus vergab an alle denselben Wert und unterschied nie.
     const replicated = computeScore(buildInput("degen", config));
     const fabriq = computeScore(buildInput("degen", config, { source: "fabriq" }));
-    expect(fabriq.total - replicated.total).toBeCloseTo(5, 1);
+    expect(fabriq.total).toBeCloseTo(replicated.total, 1);
+  });
+
+  it("wertet denselben Gebührenertrag bei höherer Volatilität ab", () => {
+    const ruhig = computeScore(
+      buildInput("degen", config, { market: buildMarket({ volatilityPctDaily: 25 }) }),
+    );
+    const wild = computeScore(
+      buildInput("degen", config, { market: buildMarket({ volatilityPctDaily: 120 }) }),
+    );
+    const points = (s: ReturnType<typeof computeScore>) =>
+      s.components.find((c) => c.id === "yield_per_variance")?.points ?? 0;
+
+    expect(points(ruhig)).toBeGreaterThan(points(wild));
+  });
+
+  it("ohne Volatilitätsschätzung vergibt die Komponente 0 statt zu raten", () => {
+    const score = computeScore(
+      buildInput("degen", config, { market: buildMarket({ volatilityPctDaily: null }) }),
+    );
+    const component = score.components.find((c) => c.id === "yield_per_variance");
+    expect(component?.points).toBe(0);
   });
 
   it("parabolisches Momentum wird abgewertet statt belohnt", () => {

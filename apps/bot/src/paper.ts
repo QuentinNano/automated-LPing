@@ -1,12 +1,17 @@
 import {
   closePaperPosition,
+  deployedCapitalSol,
   marketTickFromPool,
   openPaperPosition,
   poolFeePct,
+  poolFeeRatePctPerDay,
   poolPriceInSol,
+  positionSizeSol,
   tickPaperPosition,
   valuePosition,
+  volumeRate24hUsd,
   type BotConfig,
+  type PaperCloseReason,
   type PaperPositionState,
   type PoolMetrics,
   type PresetKind,
@@ -44,7 +49,7 @@ export interface PaperStore {
     positionId: string;
     state: PaperPositionState;
     valuation: ReturnType<typeof valuePosition>;
-    reason: "stop_loss" | "take_profit" | "max_hold_time" | "out_of_range" | "manual";
+    reason: PaperCloseReason;
     realizedPnlSol: number;
     closedAt: Date;
   }): Promise<void>;
@@ -105,9 +110,9 @@ export async function openFromScan(
       continue;
     }
 
-    // Positionsgröße als Anteil des virtuellen Preset-Kapitals — für alle
-    // Presets identisch dimensioniert, damit der Vergleich fair bleibt.
-    const depositSol = (config.global.paper.capitalPerPresetSol * preset.positionSizePct) / 100;
+    // Eine Quelle für die Positionsgröße, für Screening, Paper und Replay
+    // dieselbe (ANALYSE.md 4.2).
+    const depositSol = positionSizeSol(preset);
     const state = openPaperPosition({
       preset,
       global: config.global,
@@ -115,6 +120,14 @@ export async function openFromScan(
       price,
       depositSol,
       feePct: poolFeePct(row.pool),
+      feeRatePctPerDay: poolFeeRatePctPerDay(
+        volumeRate24hUsd(row.pool),
+        poolFeePct(row.pool),
+        row.pool.tvlUsd ?? 0,
+      ),
+      // Steuert die Range-Breite: Sie folgt der Bewegung des Marktes, nicht
+      // einer festen Bin-Zahl (ANALYSE.md 6, Punkt 6).
+      volatilityPctDaily: row.volatilityPctDaily,
       at: now,
     });
 
@@ -228,7 +241,15 @@ export function presetLabels(config: BotConfig): Record<string, string> {
   return Object.fromEntries(Object.entries(config.presets).map(([id, p]) => [id, p.label]));
 }
 
-/** Vergleichstabelle der Presets — das eigentliche Ergebnis von Phase 1. */
+/**
+ * Vergleichstabelle der Presets — das eigentliche Ergebnis von Phase 1.
+ *
+ * Sortiert nach **Rendite auf den Einsatz**, nicht nach absolutem PnL. Der
+ * Unterschied ist kein Schönheitsfehler: Presets setzen verschieden viel Kapital
+ * je Position ein, und wer nach absoluten SOL rankt, belohnt die größere
+ * Position statt der besseren Strategie (ANALYSE.md 4.3). Der absolute PnL steht
+ * weiter daneben — er beantwortet nur eine andere Frage.
+ */
 export function formatComparison(rows: PresetPerformance[]): string {
   if (rows.length === 0) return "Noch keine Paper-Positionen.";
 
@@ -236,8 +257,10 @@ export function formatComparison(rows: PresetPerformance[]): string {
     pad("Preset", 14),
     pad("offen", 6),
     pad("zu", 4),
+    pad("Rendite%", 9),
     pad("PnL SOL", 10),
-    pad("davon Fees", 11),
+    pad("Einsatz", 9),
+    pad("Fees", 9),
     pad("Kosten", 9),
     pad("Win%", 6),
     pad("inRange%", 9),
@@ -245,14 +268,21 @@ export function formatComparison(rows: PresetPerformance[]): string {
   ].join(" ");
   const lines = [header, "-".repeat(header.length + 4)];
 
-  for (const row of [...rows].sort((a, b) => b.totalPnlSol - a.totalPnlSol)) {
+  const returnPct = (row: PresetPerformance): number | null =>
+    row.depositedSol > 0 ? (row.totalPnlSol / row.depositedSol) * 100 : null;
+
+  const sorted = [...rows].sort((a, b) => (returnPct(b) ?? -Infinity) - (returnPct(a) ?? -Infinity));
+  for (const row of sorted) {
+    const ret = returnPct(row);
     lines.push(
       [
         pad(row.label, 14),
         pad(String(row.openPositions), 6),
         pad(String(row.closedPositions), 4),
+        pad(ret === null ? "–" : signed(ret, 2), 9),
         pad(signed(row.totalPnlSol, 4), 10),
-        pad(row.feesEarnedSol.toFixed(4), 11),
+        pad(row.depositedSol.toFixed(2), 9),
+        pad(row.feesEarnedSol.toFixed(4), 9),
         pad(row.costsSol.toFixed(4), 9),
         pad(row.winRatePct === null ? "–" : row.winRatePct.toFixed(0), 6),
         pad(row.avgTimeInRangePct === null ? "–" : row.avgTimeInRangePct.toFixed(0), 9),

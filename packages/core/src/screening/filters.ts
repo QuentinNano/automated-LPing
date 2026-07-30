@@ -1,3 +1,4 @@
+import { positionSizeSol } from "../paper/sizing";
 import { priceDivergencePct } from "./aggregate";
 import type { FilterCheck, ScreeningInput } from "./types";
 
@@ -175,13 +176,34 @@ export function runHardFilters(input: ScreeningInput): FilterCheck[] {
         },
   );
 
+  // Volatilitätsband: die Obergrenze ist der Punkt. Ein Pool mit hoher
+  // Fee/TVL-Rate ist kein guter Pool, wenn seine Volatilität den Ertrag
+  // schneller vernichtet, als die Gebühren ihn aufbauen — der Verlust gegenüber
+  // Halten wächst quadratisch mit σ, der Ertrag nur linear mit dem Umschlag.
+  // Ohne Schätzung wird nicht abgelehnt: Die Größe ist neu, und ein
+  // fail-closed-Verhalten würde hier vor allem Kandidaten mit dünner
+  // DexScreener-Historie treffen — also gerade die frischen Pools.
+  const volatility = market?.volatilityPctDaily ?? null;
+  const volBounds = preset.volatilityBoundsPctDaily;
+  checks.push(
+    volatility === null
+      ? skipped("volatility_band", "keine Preisänderungen für eine Schätzung")
+      : {
+          id: "volatility_band",
+          status:
+            volatility >= volBounds.min && volatility <= volBounds.max ? "passed" : "failed",
+          value: round2(volatility),
+          limit: `${volBounds.min}–${volBounds.max}% /Tag`,
+          detail: "zu ruhig = kein Umschlag, zu wild = Impermanent Loss frisst die Gebühren",
+        },
+  );
+
   // Eigener Fußabdruck: geplante Positionsgröße relativ zum Pool-TVL.
   const solPrice = market?.solPriceUsd ?? null;
   if (solPrice === null || pool.tvlUsd === undefined || pool.tvlUsd <= 0) {
     checks.push(skipped("pool_share_of_tvl", "SOL-Preis oder TVL unbekannt"));
   } else {
-    const positionSol = (input.global.maxTotalExposureSol * preset.positionSizePct) / 100;
-    const sharePct = ((positionSol * solPrice) / pool.tvlUsd) * 100;
+    const sharePct = ((positionSizeSol(preset) * solPrice) / pool.tvlUsd) * 100;
     checks.push({
       id: "pool_share_of_tvl",
       status: sharePct <= s.maxPoolShareOfTvlPct ? "passed" : "failed",

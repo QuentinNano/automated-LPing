@@ -13,6 +13,7 @@
     "track": "tsx src/main.ts track",
     "backfill": "tsx src/main.ts backfill",
     "replay": "tsx src/main.ts replay",
+    "stress": "tsx src/main.ts stress",
     "fabriq:check": "tsx src/main.ts fabriq:check"
   },
   "dependencies": {

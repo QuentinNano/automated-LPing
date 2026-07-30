@@ -1,5 +1,6 @@
 import { WSOL_MINT } from "../domain/constants";
 import type { MarketPairSnapshot, PoolMetrics } from "../domain/types";
+import { estimateVolatilityPctDaily } from "../ml/volatility";
 import type { MarketAggregates } from "./types";
 
 /**
@@ -86,6 +87,10 @@ export function aggregateMarket(
     .sort((a, b) => (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0))
     .at(0);
 
+  const priceChangeH1Pct = primary?.priceChange?.h1 ?? null;
+  const priceChangeH6Pct = primary?.priceChange?.h6 ?? null;
+  const priceChangeH24Pct = primary?.priceChange?.h24 ?? null;
+
   return {
     tokenAgeHours,
     totalLiquidityUsd: liquidity,
@@ -93,8 +98,14 @@ export function aggregateMarket(
     txns24h: hasTxns ? { buys, sells } : null,
     solPriceUsd,
     medianPriceNative: median(nativePrices),
-    priceChangeH6Pct: primary?.priceChange?.h6 ?? null,
-    priceChangeH24Pct: primary?.priceChange?.h24 ?? null,
+    priceChangeH1Pct,
+    priceChangeH6Pct,
+    priceChangeH24Pct,
+    volatilityPctDaily: estimateVolatilityPctDaily({
+      h1: priceChangeH1Pct,
+      h6: priceChangeH6Pct,
+      h24: priceChangeH24Pct,
+    }),
     pairCount: relevant.length,
   };
 }

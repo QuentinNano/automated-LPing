@@ -3,10 +3,12 @@ import {
   activeBinValueSol,
   applyPriceMove,
   binIdFromPrice,
+  deriveBinCount,
   isInRange,
   recenterBins,
   totalsOf,
 } from "./bins";
+import { evaluatePoolExit, poolFeeRatePctPerDay, recordObservation } from "./poolHealth";
 import type {
   MarketTick,
   PaperCloseReason,
@@ -36,6 +38,37 @@ import type {
  *   Basisgebühr.
  */
 
+/**
+ * Bin-Zahl einer Position dieses Presets.
+ *
+ * Der Horizont ist **die Zeit bis zur nächsten Korrekturmöglichkeit**, nicht die
+ * Haltedauer. Eine Position, die rebalanciert, muss ihre Range nur bis zum
+ * Ablauf des Cooldowns tragen — danach kann sie nachzentrieren. Eine ohne
+ * Rebalancing muss die gesamte Haltedauer überstehen.
+ *
+ * Der Unterschied ist groß: Die Breite wächst mit √Horizont, und über 96 Stunden
+ * statt 2 wäre sie siebenmal so weit. Eine solche Range hält den Preis zwar
+ * zuverlässig, verteilt die Liquidität aber über so viele Bins, dass im aktiven
+ * kaum noch etwas liegt — und nur der verdient. Genau diese Spannung ist das
+ * LP-Dilemma; sie lässt sich nicht auflösen, nur bewusst einstellen.
+ */
+function binCountFor(
+  preset: PresetConfig,
+  binStep: number,
+  volatilityPctDaily: number | null | undefined,
+): number {
+  const horizonHours = preset.rebalance.enabled
+    ? Math.max(preset.rebalance.cooldownMin / 60, 1)
+    : preset.maxHoldHours;
+
+  return deriveBinCount({
+    binRange: preset.binRange,
+    binStep,
+    horizonHours: Math.min(horizonHours, 24),
+    volatilityPctDaily,
+  });
+}
+
 /** Protokollanteil, wenn der Pool keinen meldet — Standard-Pool nach Doku. */
 const DEFAULT_PROTOCOL_FEE_PCT = 10;
 
@@ -49,12 +82,22 @@ export interface OpenPaperPositionParams {
   depositSol: number;
   /** Gesamtgebühr des Pools in % — Basis der Composition Fee beim Einstieg. */
   feePct: number;
+  /**
+   * Gebührenertragsrate des Pools beim Eröffnen (% des TVL je Tag). Bezugsgröße
+   * des `fee_collapse`-Exits; ohne sie ist dieser Exit inaktiv.
+   */
+  feeRatePctPerDay?: number;
+  /**
+   * Realisierte Tagesvolatilität des Tokens in %. Steuert die Range-Breite,
+   * wenn das Preset `binRange.coverageSigmas` setzt.
+   */
+  volatilityPctDaily?: number | null;
   at: Date;
 }
 
 export function openPaperPosition(params: OpenPaperPositionParams): PaperPositionState {
   const { preset, global, binStep, price, depositSol, at } = params;
-  const binCount = Math.round((preset.binRange.min + preset.binRange.max) / 2);
+  const binCount = binCountFor(preset, binStep, params.volatilityPctDaily);
 
   const opened = recenterBins({
     price,
@@ -98,6 +141,8 @@ export function openPaperPosition(params: OpenPaperPositionParams): PaperPositio
     // Eine einseitige Position startet per Konstruktion außerhalb der Range.
     rangeReached: isInRange(opened.bins, price),
     rebalanceTimesMs: [],
+    entryFeeRatePctPerDay: params.feeRatePctPerDay ?? 0,
+    poolHistory: [],
   };
 }
 
@@ -162,6 +207,25 @@ export function tickPaperPosition(
     next.feesUnclaimedSol = 0;
     next.lastClaimMs = nowMs;
   }
+
+  // --- Pool-Beobachtung festhalten ---------------------------------------
+  // Muss vor der Exit-Prüfung passieren: Die zustandsabhängigen Regeln
+  // beurteilen eine Veränderung, und dafür gehört die Gegenwart zur Historie.
+  next.poolHistory = recordObservation(
+    next.poolHistory,
+    {
+      atMs: nowMs,
+      priceInSol: tick.priceInSol,
+      tvlUsd: tick.poolTvlUsd,
+      feeRatePctPerDay: poolFeeRatePctPerDay(
+        tick.poolVolume24hUsd,
+        tick.poolFeePct,
+        tick.poolTvlUsd,
+      ),
+      feesTotalSol: next.feesClaimedSol + next.feesUnclaimedSol,
+    },
+    preset.exit,
+  );
 
   // --- Rebalancing -------------------------------------------------------
   // Der geordnete Exit hat Vorrang: nie in einen fallenden Preis nachzentrieren,
@@ -261,12 +325,53 @@ function shouldRebalance(
 }
 
 /**
- * EV-Prüfung vor dem Rebalance (KONZEPT.md 8.2): Der erwartete Zusatzertrag
- * über die Restlaufzeit muss die Kosten um `minEvFactor` übersteigen.
+ * Beobachtungsdauer, ab der die gemessene Zeit-in-Range die Projektion allein
+ * trägt. Darunter wird sie gegen eine neutrale Vorannahme geschrumpft.
+ */
+const IN_RANGE_CONFIDENCE_MS = 6 * 3_600_000;
+
+/** Neutrale Vorannahme über die Zeit in Range, solange nichts beobachtet ist. */
+const IN_RANGE_PRIOR = 0.5;
+
+/**
+ * Erwartete Zeit in Range der **nachzentrierten** Position.
  *
- * Der erwartete Ertrag wird aus der aktuellen Pool-Gebührenrate hochgerechnet
- * unter der Annahme, dass die nachzentrierte Position wieder im aktiven Bin
- * liegt — genau das ist ja der Zweck des Rebalancings.
+ * Der bisherige Verlauf ist die beste verfügbare Schätzung — aber roh ist er
+ * unbrauchbar: Ein Rebalance wird ausgelöst, *weil* die Position gerade
+ * außerhalb liegt, und ganz früh im Leben einer Position ist die gemessene
+ * Quote dann exakt 0. Die Projektion wäre null, und es käme nie ein Rebalance
+ * zustande — der entgegengesetzte Fehler zum ursprünglichen.
+ *
+ * Deshalb Schrumpfung gegen eine neutrale Vorannahme, gewichtet mit der
+ * Beobachtungsdauer: Am Anfang zählt die Vorannahme, nach einigen Stunden die
+ * Messung.
+ */
+function expectedInRangeShare(state: PaperPositionState): number {
+  if (state.msTotal <= 0) return IN_RANGE_PRIOR;
+  const observed = clamp(state.msInRange / state.msTotal, 0, 1);
+  const weight = clamp(state.msTotal / IN_RANGE_CONFIDENCE_MS, 0, 1);
+  return weight * observed + (1 - weight) * IN_RANGE_PRIOR;
+}
+
+/**
+ * EV-Prüfung vor dem Rebalance (KONZEPT.md 8.2): Der erwartete Zusatzertrag
+ * muss die Kosten um `minEvFactor` übersteigen.
+ *
+ * **Diese Prüfung war wirkungslos** (ANALYSE.md 4.1). Sie projizierte die
+ * momentane Gebührenrate über die *gesamte* Restlaufzeit — bei Konservativ bis
+ * zu 336 Stunden — und unterstellte dabei, die Position liege diese ganze Zeit
+ * im aktiven Bin, also 100 % Zeit in Range. Gemessen waren 50 bis 66 %. Kommt
+ * das Volumen dann noch aus dem kürzesten Zeitfenster (`m30 × 48`), wird eine
+ * halbstündige Volumenspitze zur Dauerannahme über vier Tage. Der geschätzte
+ * Ertrag übertraf die Kosten um Größenordnungen, `minEvFactor` war immer
+ * erfüllt, und die Rebalance-Häufigkeit folgte allein Cooldown und Tageslimit.
+ *
+ * Drei Korrekturen, jede gegen einen der Fehler:
+ *
+ * 1. **Begrenztes Fenster** statt Restlaufzeit.
+ * 2. **Gewichtung mit der beobachteten Zeit in Range** statt der Annahme, sie
+ *    sei vollständig.
+ * 3. **Trägstes Volumenfenster** für die Projektion statt des kürzesten.
  */
 function rebalanceIsWorthIt(
   state: PaperPositionState,
@@ -281,10 +386,16 @@ function rebalanceIsWorthIt(
   const cost = estimateRebalanceCost(state, tick, preset, global);
   if (cost <= 0) return true;
 
-  // Ertrag der nachzentrierten Position: eine hypothetische Position am
-  // aktuellen Preis, über die Restlaufzeit.
+  // Begrenztes Projektionsfenster statt der gesamten Restlaufzeit.
+  const horizonMs = Math.min(remainingMs, preset.rebalance.projectionHours * 3_600_000);
+  const inRangeShare = expectedInRangeShare(state);
+
   const projected = { ...state, ...recenteredBins(state, tick, preset) };
-  const expected = accrueFees(projected, tick, global, remainingMs);
+  const slowTick: MarketTick = {
+    ...tick,
+    poolVolume24hUsd: tick.poolVolume24hUsdSlow ?? tick.poolVolume24hUsd,
+  };
+  const expected = accrueFees(projected, slowTick, global, horizonMs) * inRangeShare;
 
   return expected >= cost * preset.rebalance.minEvFactor;
 }
@@ -309,7 +420,10 @@ function recenteredBins(
   activeBinDepositSol: number;
 } {
   const totals = totalsOf(state.bins, tick.priceInSol);
-  const binCount = Math.round((preset.binRange.min + preset.binRange.max) / 2);
+  // Dieselbe Breite wie beim Eröffnen: Ein Rebalance zentriert nach, er legt die
+  // Position nicht neu aus.
+  const binCount =
+    state.bins.length > 0 ? state.bins.length : binCountFor(preset, state.binStep, null);
   const target = recenterBins({
     price: tick.priceInSol,
     binStep: state.binStep,
@@ -422,16 +536,36 @@ function hodlBenchmark(state: PaperPositionState, price: number): number {
   return solPart + tokenPart * price;
 }
 
+/**
+ * Reihenfolge der Ausstiegsprüfung — sie ist die Rangfolge:
+ *
+ * 1. **Zustandsabhängige Regeln** (`poolHealth.ts`): Preissturz, Liquiditätsabzug,
+ *    versiegender Ertrag. Sie drehen vor dem PnL und sind deshalb der primäre
+ *    Ausgang.
+ * 2. **Stop-Loss** als Rückfalllinie. Er macht als einziger keine Annahme über
+ *    den Mechanismus und fängt den Fall ab, in dem alle Pool-Größen gesund
+ *    aussehen und die Position dennoch ausblutet.
+ * 3. Zeitlimit und tote Range.
+ *
+ * Einen Take-Profit gibt es nicht mehr; die Begründung steht in `poolHealth.ts`.
+ */
 function evaluateExit(
   state: PaperPositionState,
   valuation: PaperValuation,
   preset: PresetConfig,
   nowMs: number,
 ): PaperCloseReason | null {
+  const poolExit = evaluatePoolExit({
+    history: state.poolHistory,
+    exit: preset.exit,
+    entryFeeRatePctPerDay: state.entryFeeRatePctPerDay,
+    depositSol: state.depositSol,
+    ageMs: nowMs - state.openedAtMs,
+    rangeReached: state.rangeReached,
+  });
+  if (poolExit !== null) return poolExit;
+
   if (valuation.pnlPct <= -preset.stopLossPct) return "stop_loss";
-  if (preset.takeProfitPct !== undefined && valuation.pnlPct >= preset.takeProfitPct) {
-    return "take_profit";
-  }
   if (nowMs - state.openedAtMs >= preset.maxHoldHours * 3_600_000) return "max_hold_time";
 
   // Ohne Rebalancing ist eine Position außerhalb der Range totes Kapital: sie

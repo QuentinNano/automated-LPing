@@ -325,17 +325,27 @@ datengetrieben kalibriert werden sollen (KONZEPT-ML.md 6.3).
 | 25 | Markt-Qualität | Kauf/Verkauf-Balance, plausible Trade-Größe, Handelsaktivität |
 | 20 | Sicherheitsmarge | Abstand zu Risk-Score- und Holder-Grenzwerten |
 | 10 | Momentum | Preistrend; über dem Ideal-Band wird abgewertet, denn parabolische Pumps sind Risiko, nicht Qualität |
-| 10 | Quellen-Bonus | ursprünglich für externe Bestätigung gedacht |
+| 10 | **Ertrag je Varianz** | Gebührenrate geteilt durch den erwarteten Varianzverlust (σ²/8) |
 
 Einstieg nur bei Score ≥ Preset-Mindestscore **und** freiem Positions-Slot; bei
 mehreren Kandidaten gewinnt der höchste Score.
 
-Zwei bekannte Schwächen: Der Quellen-Bonus vergibt mangels zweiter Quelle an alle
-Kandidaten denselben Wert und trägt damit nichts zur Unterscheidung bei. Und die
-Fee-Ertragskraft wird über das 24-Stunden-Fenster gemessen — für einen drei
-Stunden alten Pool ist dieses Fenster naturgemäß dünn belegt, was frische Pools
-gegenüber etablierten systematisch benachteiligt. Beide Punkte sind Kandidaten
-für die Kalibrierung.
+Der frühere **Quellen-Bonus** ist entfallen: Er vergab mangels zweiter Quelle an
+jeden Kandidaten denselben Wert und verschob damit nur die Skala gegenüber
+`minScore`, ohne je zu unterscheiden. An seine Stelle tritt die Größe, die dem
+Score ganz fehlte.
+
+**Warum Ertrag je Varianz.** Gebühren wachsen linear mit dem Umschlag, der
+Verlust gegenüber schlichtem Halten aber **quadratisch** mit der Volatilität. Ein
+Pool mit hoher Fee/TVL-Rate ist deshalb kein guter Pool, wenn seine Volatilität
+den Ertrag schneller vernichtet, als die Gebühren ihn aufbauen. Der Score
+optimierte bis hierher den Zähler und ignorierte den Nenner — bei einer Strategie,
+deren Auswahlfilter ausdrücklich auf die volatilsten Pools des Marktes zeigen.
+
+Eine bekannte Schwäche bleibt: Die Fee-Ertragskraft wird über das
+24-Stunden-Fenster gemessen — für einen drei Stunden alten Pool ist dieses Fenster
+naturgemäß dünn belegt, was frische Pools gegenüber etablierten systematisch
+benachteiligt. Kandidat für die Kalibrierung.
 
 ### 5.5 Filter-Kalibrierung durch Shadow-Tracking
 
@@ -371,17 +381,19 @@ ausschließlich von den Parametern stammen.
 | Min. Bin Step | 10 | 20 | 100 |
 | Min. Basisgebühr | 0,05 % | 0,2 % | 1 % |
 | Einstieg | Curve, 50/50 | Curve, 50/50 | BidAsk, **einseitig SOL** |
-| Bins | 60–69 | 40–60 | 20–40 |
+| Bins | aus σ hergeleitet, 50–250 | 40–250 | 30–200 |
+| Range-Abdeckung | 1,5 σ | 1,5 σ | 1,25 σ |
+| Volatilitätsband | 5–45 %/Tag | 10–70 %/Tag | 20–160 %/Tag |
 | Mindestscore | 65 | 60 | 65 |
 | Fee-Claim | alle 6 h | alle 2 h | alle 30 min |
 | Fees → SOL | 100 % | 75 % | 100 % |
-| Stop-Loss | 15 % | 20 % | 15 % |
-| Take-Profit | 40 % | 50 % | 30 % |
+| Stop-Loss (Rückfalllinie) | 20 % | 25 % | 30 % |
+| Take-Profit | *entfallen* | *entfallen* | *entfallen* |
 | Max. Haltedauer | 14 Tage | 4 Tage | 24 h |
 | Rebalancing | ja (Puffer 15 %, Cooldown 4 h, max. 2/Tag, EV ≥ 3×) | ja (10 %, 2 h, 4/Tag, EV ≥ 2×) | nein |
 | Slippage-Cap | 0,5 % | 1 % | 3 % |
 | Kapitalanteil (live) | 40 % | 35 % | 25 % |
-| Positionsgröße | 3 % | 2 % | 1 % |
+| Positionsgröße | 5 SOL | 3 SOL | 1 SOL |
 
 ### 6.2 Warum Degen einseitig einsteigt
 
@@ -398,6 +410,66 @@ richtige Ausgang für eine Kauforder, zu der der Markt nicht gekommen ist.
 Läuft der Preis über die Range hinaus (Position vollständig in SOL, Gebühren
 realisiert), wird geschlossen und der Pool neu bewertet. Nachjagen ist ein
 bewusster, separater Entscheid, kein Automatismus.
+
+### 6.2a Ausstieg: Zustand statt Kursziel
+
+Eine DLMM-Position hat einen **geometrisch begrenzten Preisgewinn**. Sie hält
+Token oberhalb des Einstiegs; steigt der Preis, werden diese zum jeweiligen
+Bin-Preis verkauft. Mehr als die Range hergibt, ist nicht zu holen — bei den
+früheren Auslegungen +1,26 % (Konservativ), +2,18 % (Balanced) und exakt 0
+(einseitig). Die Take-Profit-Schwellen standen bei 30–50 % und konnten deshalb
+**nie** auslösen. Übrig blieb ein einseitiges Regelwerk: Verluste gekappt,
+Gewinne nie mitgenommen. Der Median-PnL war infolgedessen fast exakt der
+eingestellte Stop-Loss.
+
+Der Take-Profit ist deshalb entfallen. An seine Stelle treten Regeln, die die
+Frage stellen, die zu einer LP-Position gehört: **verdient sie noch, und ist der
+Ausstieg noch möglich?**
+
+| Regel | Art | Woran sie greift |
+|---|---|---|
+| `priceCrashPct` | Risiko | Preissturz im Fenster, gemessen vom Fensterhoch |
+| `tvlDrainPct` | Risiko | Abfließende Liquidität — verschlechtert die eigene Ausstiegsfähigkeit |
+| `feeCollapsePct` | Ertrag | Die Gebührenrate des **Pools** bricht gegenüber dem Einstieg ein |
+| `feeStallHours` | Ertrag | Die **Position** verdient nichts mehr, auch wenn der Pool floriert |
+| `stopLossPct` | Rückfalllinie | Verlustgrenze in PnL |
+
+Die Reihenfolge ist die Rangfolge: Wer nicht mehr aussteigen kann, hat kein
+Ertragsproblem mehr.
+
+**Warum der PnL-Stop bleibt.** Es gibt einen Fall, in dem alle Pool-Größen gesund
+aussehen und die Position dennoch ausblutet: den Dump. Dort steigt das Volumen,
+steigt die Gebührenrate, und der TVL kann sogar steigen, weil Farmer Liquidität
+nachlegen. Ein rein parameterbasierter Ausstieg wäre genau dann blind, wenn es
+darauf ankommt. Der Stop macht als einziger keine Annahme über den Mechanismus —
+er ist deshalb weiter gesetzt als zuvor, aber nicht abgeschafft.
+
+Eine einseitige Position ist von den Ertrags-Regeln ausgenommen, solange der
+Markt ihre Range nie erreicht hat: Dass eine noch nicht befüllte Kauforder nichts
+verdient, ist der Plan und kein Befund.
+
+### 6.2b Range-Breite folgt der Volatilität
+
+Eine feste Bin-Zahl bedeutet bei einem ruhigen Token eine sinnvolle Range und bei
+einem wilden eine, die binnen Stunden verlassen ist. Die früheren Presets
+umspannten 13 bis 28 % bei Token, deren Tagesvolatilität 40 bis 150 % beträgt —
+die Position lag die meiste Zeit außerhalb, verdiente nichts und trug trotzdem
+den vollen Impermanent Loss.
+
+Die Breite wird deshalb hergeleitet statt gesetzt:
+
+    halbe Breite (log) = coverageSigmas · σ · √(Horizont in Tagen)
+    Bins               = 2 · halbe Breite / ln(1 + binStep/10000)
+
+Der Horizont ist die **Zeit bis zur nächsten Korrekturmöglichkeit** — der
+Rebalance-Cooldown, wo rebalanciert wird, sonst die Haltedauer. `binRange.min`
+und `max` bleiben als Leitplanken, weil Kosten und Kapitalbindung eine Grenze
+haben.
+
+Damit ist `coverageSigmas` der Regler des **LP-Dilemmas**: Eng bedeutet hohen
+Gebührenanteil und wenig Zeit in Range, weit das Gegenteil. Beides ist einzeln
+falsch, und wo das Optimum liegt, hängt an der Volatilität. Es gehört gemessen
+(`pnpm stresstest`), nicht gesetzt.
 
 ### 6.3 Portfolio-Constraints (Risk Manager)
 
@@ -509,7 +581,7 @@ erfasst.
 
 ## 9. Exits, Notfall-Logik, Kill-Switch
 
-**Geordneter Exit** (Stop-Loss, Take-Profit, Zeitlimit, Score-Verfall): Fees
+**Geordneter Exit** (zustandsabhängige Regeln, Stop-Loss, Zeitlimit): Fees
 claimen → `removeLiquidity` (100 %) → `closePosition` → Token-Rest via Jupiter in
 SOL (bei Nichtausführbarkeit Teilverkäufe über mehrere Minuten) → PnL
 festschreiben → Pool-Cooldown.
@@ -725,7 +797,7 @@ Nicht jeder Parameter ist bereits wirksam; die Spalte „Stand" sagt, wer ihn li
 |---|---|---|---|
 | `paperTrading` | `true` | Sicherheitsschalter; Live erst nach Phase 1 | ✅ |
 | `killSwitch` | `off` | `pause` (keine Entries) / `flatten` (alles schließen) | Risk Manager |
-| `maxTotalExposureSol` | 20 | Obergrenze des Gesamteinsatzes | nur im Screening |
+| `maxTotalExposureSol` | 60 | Obergrenze des Gesamteinsatzes | Risk Manager |
 | `maxOpenPositions` | 10 | globales Positionslimit über alle Presets | Risk Manager |
 | `minSolReserve` | 0,5 | Reserve für Gebühren und Exits | Execution |
 | `dailyLossLimitPct` / `hardLossLimitPct` | 5 / 10 | Circuit Breaker, zwei Stufen | Risk Manager |
@@ -738,22 +810,25 @@ sind aber Schätzungen und gehören deshalb in die Sensitivitätsanalyse
 
 | Parameter | Default | Bedeutung |
 |---|---|---|
-| `capitalPerPresetSol` | 10 | virtuelles Kapital je Preset; für alle gleich, damit der Vergleich fair ist |
+| `capitalPerPresetSol` | 25 | virtuelles Kapital je Preset; für alle gleich, damit der Vergleich fair ist |
 | `costs.priorityFeeSol` | 0,0005 | angenommene Priority Fee je Transaktion |
 | `costs.swapSlippagePct` | 0,5 | angenommener Verlust je Swap |
 | `feeShareHaircutPct` | 30 | Sicherheitsabschlag auf den geschätzten Gebührenanteil |
-| `poolLiquidityBins` | 70 | angenommene Bin-Breite der übrigen LPs |
+| `poolLiquidityBins` | 30 | angenommene Bin-Breite der übrigen LPs — **skaliert die Ertragsseite linear**, konservativ gesetzt (`pnpm stresstest`) |
 
 **Je Preset**
 
 | Parameter | Bedeutung | Stand |
 |---|---|---|
-| `capitalSharePct`, `positionSizePct`, `maxPositions` | Kapitalzuteilung und Limits | teilweise |
+| `capitalSharePct`, `positionSizeSol`, `maxPositions` | Kapitalzuteilung und Limits | teilweise |
 | `minScore`, `minTvlUsd`, `tokenAgeHours`, `volTvlBounds` | Aufnahmekriterien | ✅ |
 | `screening.*` | Holder-, Insider-, Risk-Score- und Preis-Grenzwerte | ✅ |
 | `discovery.minBinStep`, `discovery.minBaseFeePct` | Vor-Filter der Discovery | ✅ |
 | `strategy.type`, `strategy.sided`, `binRange` | Einstiegsform und Range-Breite | ✅ |
-| `stopLossPct`, `takeProfitPct`, `maxHoldHours` | Exit-Regeln | ✅ |
+| `stopLossPct`, `maxHoldHours` | Verlustgrenze (Rückfalllinie) und Zeitlimit | ✅ |
+| `exit.*` | Zustandsabhängige Ausstiegsregeln: Preissturz, TVL-Abzug, Ertragseinbruch, versiegter Ertrag | ✅ |
+| `volatilityBoundsPctDaily` | Zulässige realisierte Tagesvolatilität | ✅ |
+| `binRange.coverageSigmas` | Range-Breite als Vielfaches der Tagesbewegung | ✅ |
 | `rebalance.*` | Puffer, Cooldown, Tageslimit, EV-Faktor | ✅ |
 | `feeHarvest.claimIntervalMin`, `convertToSolPct`, `minClaimValueSol`, `claimCostFactor` | Claim-Kadenz und Konvertierung | ✅ (simuliert) |
 | `feeHarvest.dustThresholdSol`, `compound.*` | Dust-Ledger und Wiederanlage | Execution |
