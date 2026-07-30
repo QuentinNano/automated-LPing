@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   OUTCOME_HORIZONS_HOURS,
   computeOutcomes,
+  effectiveFeePct,
   trackingIntervalSec,
   type TrackPoint,
 } from "@lping/core";
@@ -135,5 +136,74 @@ describe("trackingIntervalSec mit Zyklus-Intervall", () => {
 
   it("verhindert ein unsinnig kleines Raster", () => {
     expect(trackingIntervalSec(1, 0)).toBe(60);
+  });
+});
+
+describe("effectiveFeePct", () => {
+  const base = (overrides: Partial<TrackPoint> = {}): TrackPoint => ({
+    ts: T0,
+    priceNative: 0.001,
+    tvlUsd: 100_000,
+    fees24hUsd: null,
+    volume24hUsd: null,
+    ...overrides,
+  });
+
+  it("bevorzugt die gemeldete Gesamtgebühr", () => {
+    const point = base({
+      dynamicFeePct: 3.75,
+      baseFeePct: 1,
+      // Auch wenn realisierte Raten vorliegen: die Meldung ist der Ist-Zustand
+      // zum Messzeitpunkt, die Fenster sind Rückblicke.
+      windows: { fees: { h1: 100 }, volume: { h1: 20_000 } },
+      fees24hUsd: 1_000,
+      volume24hUsd: 500_000,
+    });
+    expect(effectiveFeePct(point)).toBe(3.75);
+  });
+
+  it("nimmt das kürzeste belegte Fenster, wenn die Meldung fehlt", () => {
+    // 30m: 60/1000 = 6 %; 1h: 100/20000 = 0,5 % — das kürzere gewinnt, weil es
+    // dem Messintervall am nächsten liegt.
+    const point = base({
+      windows: { fees: { m30: 60, h1: 100 }, volume: { m30: 1_000, h1: 20_000 } },
+    });
+    expect(effectiveFeePct(point)).toBeCloseTo(6);
+  });
+
+  it("überspringt Fenster ohne Volumen statt durch null zu teilen", () => {
+    const point = base({
+      windows: { fees: { m30: 0, h1: 100 }, volume: { m30: 0, h1: 20_000 } },
+    });
+    expect(effectiveFeePct(point)).toBeCloseTo(0.5);
+  });
+
+  it("fällt auf die realisierte 24-Stunden-Rate zurück", () => {
+    const point = base({ fees24hUsd: 12_500, volume24hUsd: 500_000 });
+    // 12.500 / 500.000 = 2,5 %
+    expect(effectiveFeePct(point)).toBeCloseTo(2.5);
+  });
+
+  it("nimmt zuletzt die Basisgebühr — besser als gebührenfrei zu rechnen", () => {
+    expect(effectiveFeePct(base({ baseFeePct: 1 }))).toBe(1);
+  });
+
+  it("meldet null, wenn sich gar keine Rate bestimmen lässt", () => {
+    // Kein Wert vortäuschen: die Simulation darf dann keine Gebühren buchen.
+    expect(effectiveFeePct(base())).toBeNull();
+    expect(effectiveFeePct(base({ dynamicFeePct: 0, baseFeePct: 0 }))).toBeNull();
+  });
+
+  it("bleibt für Messpunkte von vor der Schema-Erweiterung nutzbar", () => {
+    // Alte Zeilen haben weder dynamicFeePct noch windows — die realisierte
+    // 24-Stunden-Rate trägt sie trotzdem.
+    const legacy: TrackPoint = {
+      ts: T0,
+      priceNative: 0.001,
+      tvlUsd: 100_000,
+      fees24hUsd: 2_000,
+      volume24hUsd: 400_000,
+    };
+    expect(effectiveFeePct(legacy)).toBeCloseTo(0.5);
   });
 });

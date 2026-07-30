@@ -133,8 +133,14 @@ export {
   OUTCOME_HORIZONS_HOURS,
   TRACKING_DURATION_HOURS,
   computeOutcomes,
+  effectiveFeePct,
   trackingIntervalSec,
 } from "./ml/outcomes";
-export type { OutcomeLabel, OutcomeHorizon, TrackPoint } from "./ml/outcomes";
+export type {
+  OutcomeLabel,
+  OutcomeHorizon,
+  SnapshotWindows,
+  TrackPoint,
+} from "./ml/outcomes";
 export { evaluateTrackHealth, overallHealth } from "./ml/health";
 export type { HealthCheck, HealthStatus, TrackHealthInput } from "./ml/health";

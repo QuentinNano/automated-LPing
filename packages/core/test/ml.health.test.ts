@@ -133,3 +133,55 @@ describe("overallHealth", () => {
     expect(overallHealth([{ id: "a", label: "A", status: "info", detail: "" }])).toBe("ok");
   });
 });
+
+describe("Merkmalsschema v2 in der Aufzeichnung", () => {
+  const withV2 = (overrides: Record<string, number>) =>
+    byId(
+      healthy({
+        fieldCoverage: {
+          ...healthy().fieldCoverage,
+          dynamic_fee_pct: 0.95,
+          fee_tvl_1h_pct: 0.9,
+          ...overrides,
+        },
+      }),
+    );
+
+  it("bestätigt die neuen Felder, wenn sie ankommen", () => {
+    const checks = withV2({});
+    expect(checks.get("field_dynamic_fee_pct")?.status).toBe("ok");
+    expect(checks.get("field_fee_tvl_1h_pct")?.status).toBe("ok");
+  });
+
+  it("verweist bei völligem Ausfall auf den Aufzeichner, nicht auf die API", () => {
+    // Diese Felder stehen im selben Response wie die Pool-Kennzahlen. Wer bei
+    // der API sucht, verliert Aufzeichnungszeit, die nicht nachholbar ist.
+    const check = withV2({ dynamic_fee_pct: 0 }).get("field_dynamic_fee_pct");
+    expect(check?.status).toBe("fail");
+    expect(check?.hint).toContain("altem Code");
+    expect(check?.hint).toContain("pnpm aufzeichnen");
+    expect(check?.hint).not.toContain("API-Fehler");
+  });
+
+  it("erklärt Teilbelegung als Nachwirkung des Schema-Wechsels", () => {
+    const check = withV2({ fee_tvl_1h_pct: 0.4 }).get("field_fee_tvl_1h_pct");
+    expect(check?.status).toBe("warn");
+    expect(check?.hint).toContain("Schema v1");
+  });
+
+  it("lässt die Diagnose der echten Quellen unverändert", () => {
+    // Bei RugCheck & Co. bleibt der API-Hinweis richtig.
+    const check = byId(
+      healthy({ fieldCoverage: { ...healthy().fieldCoverage, risk_score: 0 } }),
+    ).get("field_risk_score");
+    expect(check?.hint).toContain("API-Fehler");
+  });
+
+  it("wertet fehlende v2-Angaben nicht als Fehler, solange sie unbekannt sind", () => {
+    // Vor dem ersten v2-Zyklus liefert healthMetrics die Schlüssel gar nicht —
+    // dann darf der Bericht nichts behaupten.
+    const checks = byId(healthy());
+    expect(checks.has("field_dynamic_fee_pct")).toBe(false);
+    expect(overallHealth(evaluateTrackHealth(healthy()))).toBe("ok");
+  });
+});

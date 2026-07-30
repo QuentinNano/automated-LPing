@@ -117,7 +117,7 @@ pnpm install
 cp .env.example .env          # DATABASE_URL etc. eintragen
 docker compose up -d postgres # lokale DB
 pnpm db:generate              # Prisma-Client generieren
-pnpm db:migrate               # Migrationen anwenden
+pnpm db:migrate               # Migrationen anwenden (auch nach jedem git pull)
 
 pnpm typecheck                # TypeScript strict über alle Pakete
 pnpm test                     # Vitest (fixture-basiert, ohne Netzwerk)

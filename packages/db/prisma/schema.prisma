@@ -172,6 +172,10 @@ model FeeClaim {
 }
 
 /// Zeitreihe für aktive UND geschattete Pools (Scoring, Backtesting, Dashboard).
+///
+/// Diese Tabelle ist die Grundlage des Replays (KONZEPT-ML.md 5): Aus ihr werden
+/// die MarketTicks rekonstruiert, gegen die optimiert wird. Was hier nicht steht,
+/// kann der Replay nicht sehen — und nachträglich beschaffen lässt es sich nicht.
 model PoolSnapshot {
   id           String   @id @default(cuid())
   poolAddress  String   @map("pool_address")
@@ -182,7 +186,18 @@ model PoolSnapshot {
   feeTvl24hPct Decimal? @map("fee_tvl_24h_pct") @db.Decimal(10, 4)
   priceNative  Decimal? @map("price_native") @db.Decimal(30, 15)
   binStep      Int?     @map("bin_step")
-  extra        Json?
+  /// Gesamtgebühr (Basis + Volatilitätsaufschlag) zum Messzeitpunkt, in %.
+  /// Der Satz, mit dem Swaps tatsächlich belastet werden — bei volatilen Pools
+  /// ein Mehrfaches der Basisgebühr.
+  dynamicFeePct  Decimal? @map("dynamic_fee_pct") @db.Decimal(10, 4)
+  baseFeePct     Decimal? @map("base_fee_pct") @db.Decimal(10, 4)
+  /// Protokollanteil in % **der Gebühr** (10 % Standard, 20 % Launch-Pool).
+  /// Ohne diesen Abzug wird der LP-Ertrag systematisch zu hoch angesetzt.
+  protocolFeePct Decimal? @map("protocol_fee_pct") @db.Decimal(10, 4)
+  /// Volumen/Gebühren/Fee-TVL/Protokollgebühren je Zeitfenster (30m…24h).
+  /// Als JSON, damit ein zusätzliches Fenster keine Migration braucht.
+  windows        Json?
+  extra          Json?
 
   @@index([poolAddress, ts])
   @@map("pool_snapshots")

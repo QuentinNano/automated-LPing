@@ -5,6 +5,7 @@ import {
   trackingIntervalSec,
   type FeatureVector,
   type PoolMetrics,
+  type SnapshotWindows,
   type TrackHealthInput,
   type TrackPoint,
 } from "@lping/core";
@@ -26,6 +27,31 @@ export interface DuePool {
   tokenMint: string;
   firstSeenAt: Date;
   lastTrackedAt: Date | null;
+}
+
+/** Prisma-Decimal in eine Zahl, `null` bleibt `null`. */
+function decimal(value: Prisma.Decimal | null): number | null {
+  return value === null ? null : Number(value);
+}
+
+/**
+ * Zeitfenster-Kennzahlen eines Messpunkts als JSON.
+ *
+ * Leere Fenster werden weggelassen statt als `{}` gespeichert: Bei Millionen
+ * Zeilen ist der Unterschied zwischen `null` und vier leeren Objekten relevant,
+ * und `null` sagt ehrlich "nicht erhoben".
+ */
+function snapshotWindows(pool: PoolMetrics): Prisma.InputJsonValue | undefined {
+  const windows: SnapshotWindows = {};
+  if (Object.keys(pool.volumeUsd).length > 0) windows.volume = pool.volumeUsd;
+  if (Object.keys(pool.feesUsd).length > 0) windows.fees = pool.feesUsd;
+  if (Object.keys(pool.feeTvlPct).length > 0) windows.feeTvl = pool.feeTvlPct;
+  if (Object.keys(pool.protocolFeesUsd).length > 0) {
+    windows.protocolFees = pool.protocolFeesUsd;
+  }
+  return Object.keys(windows).length > 0
+    ? (windows as unknown as Prisma.InputJsonValue)
+    : undefined;
 }
 
 /** Millisekunden bis zur Fälligkeit; <= 0 bedeutet "jetzt fällig". */
@@ -154,6 +180,10 @@ export class TrackRepo {
           feeTvl24hPct: pool.feeTvl24hPct ?? null,
           priceNative: pool.priceNative ?? null,
           binStep: pool.binStep,
+          dynamicFeePct: pool.dynamicFeePct ?? null,
+          baseFeePct: pool.baseFeePct ?? null,
+          protocolFeePct: pool.protocolFeePct ?? null,
+          windows: snapshotWindows(pool),
         },
       }),
       this.prisma.trackedPool.update({
@@ -223,9 +253,18 @@ export class TrackRepo {
     return written;
   }
 
-  private async loadTrack(poolAddress: string, since: Date): Promise<TrackPoint[]> {
+  /**
+   * Zeitreihe eines Pools ab einem Zeitpunkt. Öffentlich, weil der Replay
+   * (KONZEPT-ML.md 5) genau diesen Lesepfad braucht — Replay und Label-Berechnung
+   * müssen dieselben Punkte sehen, sonst optimiert man gegen andere Daten als die,
+   * mit denen man später bewertet.
+   */
+  async loadTrack(poolAddress: string, since: Date, until?: Date): Promise<TrackPoint[]> {
     const rows = await this.prisma.poolSnapshot.findMany({
-      where: { poolAddress, ts: { gte: since } },
+      where: {
+        poolAddress,
+        ts: { gte: since, ...(until !== undefined ? { lte: until } : {}) },
+      },
       orderBy: { ts: "asc" },
       select: {
         ts: true,
@@ -233,14 +272,22 @@ export class TrackRepo {
         tvlUsd: true,
         fees24hUsd: true,
         volume24hUsd: true,
+        dynamicFeePct: true,
+        baseFeePct: true,
+        protocolFeePct: true,
+        windows: true,
       },
     });
     return rows.map((row) => ({
       ts: row.ts,
-      priceNative: row.priceNative === null ? null : Number(row.priceNative),
-      tvlUsd: row.tvlUsd === null ? null : Number(row.tvlUsd),
-      fees24hUsd: row.fees24hUsd === null ? null : Number(row.fees24hUsd),
-      volume24hUsd: row.volume24hUsd === null ? null : Number(row.volume24hUsd),
+      priceNative: decimal(row.priceNative),
+      tvlUsd: decimal(row.tvlUsd),
+      fees24hUsd: decimal(row.fees24hUsd),
+      volume24hUsd: decimal(row.volume24hUsd),
+      dynamicFeePct: decimal(row.dynamicFeePct),
+      baseFeePct: decimal(row.baseFeePct),
+      protocolFeePct: decimal(row.protocolFeePct),
+      windows: (row.windows as SnapshotWindows | null) ?? null,
     }));
   }
 
@@ -325,6 +372,12 @@ export class TrackRepo {
         "risk_score",
         "roundtrip_loss_pct",
         "organic_score",
+        // Felder aus Merkmalsschema v2. Fehlen sie in den jüngsten
+        // Aufzeichnungen, läuft der Aufzeichner noch mit altem Code — der
+        // Datensatz verarmt dann still.
+        "dynamic_fee_pct",
+        "fee_tvl_1h_pct",
+        "collect_fee_mode",
       ]) {
         const filled = sample.filter((row) => {
           const features = row.features as Record<string, unknown> | null;
