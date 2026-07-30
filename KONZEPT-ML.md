@@ -22,10 +22,13 @@ aussieht und live scheitert. Das ist keine theoretische Sorge: Es ist der
 Normalfall bei Handelsstrategie-Optimierung.
 
 Verschärfend kommt hinzu: **Der Optimierer nutzt jeden Fehler des Simulators aus.**
-Unsere Paper-Engine schätzt den Fee-Anteil über den TVL-Anteil, vernachlässigt
-Slippage innerhalb eines Bins und kennt kein MEV. Eine Suche über 50.000
-Parametersätze findet zuverlässig genau die Kombination, die diese
-Modellungenauigkeiten maximal ausbeutet — und die ist live wertlos.
+Unsere Paper-Engine rechnet den Gebührenanteil zwar bin-genau, muss die
+Liquiditätsverteilung der **anderen** LPs aber annehmen (`poolLiquidityBins`);
+sie vernachlässigt Slippage innerhalb eines Bins und kennt kein MEV. Eine Suche
+über 50.000 Parametersätze findet zuverlässig genau die Kombination, die diese
+Modellungenauigkeiten maximal ausbeutet — und die ist live wertlos. Deshalb
+gehört `poolLiquidityBins` selbst in die Sensitivitätsanalyse: Hängt ein
+Ergebnis stark daran, hängt es an einer Annahme, nicht an einer Messung.
 
 **Alles Folgende ist deshalb primär gegen Overfitting konstruiert, nicht auf
 maximale Optimierungsleistung.** Ein System, das ehrlich „kein belastbarer Vorteil
@@ -414,7 +417,8 @@ kurzfristig als ertragsmindernd erkennen würde.
 |---|---|---|---|
 | **M1 — Aufzeichnung** ✅ | `tracked_pools`, `candidate_features`, `candidate_outcomes`; `track`-Kommando; Jupiter-Token-API-Adapter (Organic Score); Fortschritts- und Lückenüberwachung | umgesetzt | **läuft** |
 | **M1b — Merkmalsbreite** ✅ | Alle sechs Zeitfenster der Pool-API (`30m`–`24h`) samt Trend- und Stetigkeitsmerkmalen, Gebührenstruktur (dynamische Gebühr, Protokollanteil, `collect_fee_mode`), Farm-Rewards, Pool-Alter, Token-Angaben aus der Pool-API; Discovery über mehrere Sortierungen (`FEATURE_VERSION` 2) | umgesetzt | **läuft** |
-| **M1c — Zeitreihe für den Replay** ✅ | `pool_snapshots` trägt Gebührenstruktur und alle Zeitfenster je Messpunkt; `effectiveFeePct()` als Genauigkeits-Rangfolge; `loadTrack()` als gemeinsamer Lesepfad von Replay und Label-Berechnung | umgesetzt | **läuft** |
+| **M1c — Zeitreihe für den Replay** ✅ | `pool_snapshots` trägt Gebührenstruktur, SOL-Kurs und alle Zeitfenster je Messpunkt; `effectiveFeePct()` als Genauigkeits-Rangfolge; `loadTrack()` als gemeinsamer Lesepfad von Replay und Label-Berechnung | umgesetzt | **läuft** |
+| **M1d — Simulator repariert** ✅ | Aktiv-Bin-Gebührenmodell statt TVL-Anteil, Protokollanteil, Gesamtgebühr statt Basisgebühr, Composition Fee, Rebalancing als ein Ablauf, Wartezustand einseitiger Positionen | umgesetzt | — |
 | **M2 — Replay** | Tick-Reader, Einstiege an beliebigen Zeitpunkten, Determinismus, Gleichheitstest Replay ↔ Live | mittel | parallel zu M1 |
 | **M3 — Sensitivität** | Einzelparameter-Analyse, Auswahl der 5–10 relevanten, Bericht | gering | nach ~1 Woche Daten |
 | **M4 — Suche** | Zufallssuche + Verfeinerung, Zielfunktion, Plateau-Bewertung | mittel | nach M3 |

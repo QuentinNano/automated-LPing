@@ -3,6 +3,7 @@ import {
   aggregateMarket,
   poolPriceInSol,
   priceDivergencePct,
+  solPriceUsdOf,
   tokenSideOf,
   WSOL_MINT,
   USDC_MINT,
@@ -93,5 +94,28 @@ describe("priceDivergencePct", () => {
   it("liefert null ohne verwertbare Preise", () => {
     expect(priceDivergencePct(buildPool({ priceNative: undefined }), { medianPriceNative: 1 })).toBeNull();
     expect(priceDivergencePct(buildPool(), { medianPriceNative: null })).toBeNull();
+  });
+});
+
+describe("solPriceUsdOf", () => {
+  const withTokens = (mintX: string, mintY: string, xPrice?: number, yPrice?: number) =>
+    buildPool({
+      mintX,
+      mintY,
+      tokenX: { mint: mintX, ...(xPrice !== undefined ? { priceUsd: xPrice } : {}) },
+      tokenY: { mint: mintY, ...(yPrice !== undefined ? { priceUsd: yPrice } : {}) },
+    });
+
+  it("liest den Preis der SOL-Seite, egal auf welcher Seite SOL steht", () => {
+    expect(solPriceUsdOf(withTokens(TOKEN_MINT, WSOL_MINT, 0.0039, 180.25))).toBe(180.25);
+    // SOL als Token X: dann trägt die X-Seite den Kurs.
+    expect(solPriceUsdOf(withTokens(WSOL_MINT, TOKEN_MINT, 180.25, 4.24))).toBe(180.25);
+  });
+
+  it("meldet null statt zu raten, wenn der Kurs fehlt oder unbrauchbar ist", () => {
+    expect(solPriceUsdOf(withTokens(TOKEN_MINT, WSOL_MINT, 0.0039))).toBeNull();
+    expect(solPriceUsdOf(withTokens(TOKEN_MINT, WSOL_MINT, 0.0039, 0))).toBeNull();
+    // Pool ohne SOL-Seite: die v1-Regel lässt ihn ohnehin nicht durch.
+    expect(solPriceUsdOf(withTokens(TOKEN_MINT, USDC_MINT, 1, 1))).toBeNull();
   });
 });

@@ -43,6 +43,25 @@ export interface PaperPositionState {
   lastClaimMs: number;
   rebalanceCount: number;
   lastRebalanceMs: number | null;
+  /**
+   * Hat der Markt die Range jemals erreicht?
+   *
+   * Entscheidend für einseitige Positionen: Eine `quote_only`-Position liegt
+   * per Konstruktion **unterhalb** des aktiven Bins und wartet dort auf
+   * Befüllung — Meteora beschreibt das ausdrücklich als DCA-Muster ("Deposit
+   * quote token single-sided … below the current price", Bid-Ask "may sit away
+   * from the active price until the market moves into the edge bins"). Erst
+   * nachdem der Markt sie erreicht hatte, ist "außerhalb der Range" ein
+   * Exit-Grund und nicht der Normalzustand.
+   *
+   * Geprüft wird `Preis <= oberster Bin-Preis`, nicht `inRange`: Ein Preissturz
+   * kann die Range zwischen zwei Messpunkten vollständig durchlaufen. Die
+   * Position ist dann befüllt **und** wieder außerhalb — mit `inRange` allein
+   * bliebe sie fälschlich als "nie erreicht" markiert.
+   */
+  rangeReached: boolean;
+  /** Zeitstempel der Rebalances des laufenden Tages (für maxPerDay). */
+  rebalanceTimesMs: number[];
 }
 
 /** Marktbeobachtung für einen Tick. */
@@ -50,9 +69,24 @@ export interface MarketTick {
   /** Token-Preis in SOL. */
   priceInSol: number;
   poolTvlUsd: number;
+  /**
+   * Handelsvolumen als **24-Stunden-Rate** in USD. Darf aus einem kürzeren
+   * Fenster hochgerechnet sein (`volume.h1 × 24`) — das löst Volatilitätsphasen
+   * schärfer auf als der träge 24-Stunden-Wert.
+   */
   poolVolume24hUsd: number;
-  /** Effektive Swap-Gebühr des Pools in Prozent. */
+  /**
+   * Gesamte Swap-Gebühr des Pools in Prozent (Basis + Volatilitätsaufschlag).
+   * Nicht die Basisgebühr: Bei volatilen Pools ist sie ein Mehrfaches davon,
+   * und genau dann verdient die Position.
+   */
   poolFeePct: number;
+  /**
+   * Protokollanteil in % **der Gebühr** (Standard-Pool 10 %, Launch-Pool 20 %).
+   * Der LP erhält nur den Rest. Fehlt die Angabe, wird der Standardwert
+   * angenommen — 0 wäre die einzige Annahme, die sicher falsch ist.
+   */
+  protocolFeePct?: number;
   solPriceUsd: number;
   at: Date;
 }

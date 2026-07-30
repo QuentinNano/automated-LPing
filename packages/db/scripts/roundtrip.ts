@@ -64,6 +64,8 @@ function testPool(): PoolMetrics {
     maxFeePct: 10,
     protocolFeePct: 10,
     collectFeeMode: "only_y",
+    tokenX: { mint: "TestMint1111111111111111111111111111111111", priceUsd: 0.18 },
+    tokenY: { mint: "So11111111111111111111111111111111111111112", priceUsd: 180 },
     volumeUsd: { h1: 21_000, h24: 500_000 },
     feesUsd: { h1: 210, h24: 5_000 },
     feeTvlPct: { h1: 0.17, h24: 4.05 },
@@ -207,6 +209,10 @@ async function main(): Promise<void> {
     assert(
       firstPoint?.windows?.volume?.h1 === 21_000,
       `Zeitfenster als JSON erhalten (h1=${firstPoint?.windows?.volume?.h1})`,
+    );
+    assert(
+      firstPoint?.solPriceUsd === 180,
+      `SOL-Preis je Messpunkt gespeichert (${firstPoint?.solPriceUsd})`,
     );
     // Der Replay leitet daraus den Satz ab, mit dem er Gebühren buchet.
     assert(

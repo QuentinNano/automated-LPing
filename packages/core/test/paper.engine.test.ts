@@ -31,6 +31,7 @@ function openDegen(price = 1): PaperPositionState {
     binStep: 100,
     price,
     depositSol: 1,
+    feePct: 1,
     at: T0,
   });
 }
@@ -42,6 +43,7 @@ function openKonservativ(price = 1): PaperPositionState {
     binStep: 20,
     price,
     depositSol: 1,
+    feePct: 1,
     at: T0,
   });
 }
@@ -166,26 +168,164 @@ describe("Exit-Bedingungen", () => {
     expect(late.closeReason).toBe("max_hold_time");
   });
 
-  it("out_of_range schließt nur Presets ohne Rebalancing", () => {
-    const degen = tickPaperPosition(
+  it("hält eine noch nicht befüllte Kauforder offen, statt sie sofort zu schließen", () => {
+    // Der Kernfall: Eine quote_only-Position liegt per Konstruktion unterhalb
+    // des aktiven Bins und wartet auf Befüllung — das ist der Normalzustand,
+    // kein Fehlzustand. Wird sie hier geschlossen, verdient Degen nie eine
+    // Gebühr und der Preset-Vergleich misst nur die Eröffnungskosten.
+    const waiting = tickPaperPosition(
       openDegen(),
       tick({ priceInSol: 3 }),
       config.presets["degen"]!,
       config.global,
     );
-    expect(degen.closeReason).toBe("out_of_range");
+    expect(waiting.valuation.inRange).toBe(false);
+    expect(waiting.state.rangeReached).toBe(false);
+    expect(waiting.closeReason).toBeNull();
+  });
 
-    // Konservativ rebalanced → kein Zwangsausstieg wegen Range.
-    // (binStep 20 über ~65 Bins ergibt eine deutlich breitere Range als Degen,
-    // deshalb muss der Preis weiter laufen, um sie zu verlassen.)
+  it("schließt erst, nachdem der Markt die Range erreicht hatte und sie verließ", () => {
+    // Preis fällt in die Range (Befüllung) …
+    const filled = tickPaperPosition(
+      openDegen(),
+      tick({ priceInSol: 0.95 }),
+      config.presets["degen"]!,
+      config.global,
+    );
+    expect(filled.state.rangeReached).toBe(true);
+    expect(filled.closeReason).toBeNull();
+
+    // … und läuft anschließend darüber hinaus: jetzt ist die Position tot.
+    const left = tickPaperPosition(
+      filled.state,
+      tick({ priceInSol: 3, at: new Date(T0.getTime() + 7_200_000) }),
+      config.presets["degen"]!,
+      config.global,
+    );
+    expect(left.closeReason).toBe("out_of_range");
+  });
+
+  it("erkennt Befüllung auch, wenn der Preis die Range in einem Schritt durchläuft", () => {
+    // Zwischen zwei Messpunkten kann der Preis die Range komplett durchfallen.
+    // Die Position ist dann befüllt und wieder außerhalb — über `inRange`
+    // allein bliebe sie fälschlich als "nie erreicht" markiert.
+    const crashed = tickPaperPosition(
+      openDegen(),
+      tick({ priceInSol: 0.5 }),
+      config.presets["degen"]!,
+      config.global,
+    );
+    expect(crashed.valuation.inRange).toBe(false);
+    expect(crashed.state.rangeReached).toBe(true);
+    expect(valuePosition(crashed.state, 0.5).tokenAmount).toBeGreaterThan(0);
+  });
+
+  it("Presets mit Rebalancing steigen nicht wegen der Range aus", () => {
     const konservativ = tickPaperPosition(
       openKonservativ(),
       tick({ priceInSol: 1.3 }),
       config.presets["konservativ"]!,
       config.global,
     );
-    expect(konservativ.valuation.inRange).toBe(false);
     expect(konservativ.closeReason).toBeNull();
+    // Nicht mehr "tot außerhalb der Range liegen bleiben": die Position wird
+    // nachzentriert und ist danach wieder aktiv.
+    expect(konservativ.state.rebalanceCount).toBe(1);
+    expect(konservativ.valuation.inRange).toBe(true);
+  });
+});
+
+describe("Rebalancing", () => {
+  const konservativ = config.presets["konservativ"]!;
+
+  it("zentriert nach, sobald der Preis den Puffer verlässt", () => {
+    const before = openKonservativ();
+    const after = tickPaperPosition(before, tick({ priceInSol: 1.3 }), konservativ, config.global);
+
+    expect(after.state.rebalanceCount).toBe(1);
+    expect(after.state.lastRebalanceMs).not.toBeNull();
+    // Die Range liegt jetzt um den neuen Preis statt um den Eröffnungspreis.
+    expect(after.state.minBinId).toBeGreaterThan(before.minBinId);
+    expect(after.state.maxBinId).toBeGreaterThan(before.maxBinId);
+  });
+
+  it("bucht Kosten und Transaktionen — Rebalance ist nicht gratis", () => {
+    const before = openKonservativ();
+    const after = tickPaperPosition(before, tick({ priceInSol: 1.3 }), konservativ, config.global);
+
+    expect(after.state.costsSol).toBeGreaterThan(before.costsSol);
+    // Ein Ablauf (claim/remove/resize/add), nicht Schließen und Neueröffnen.
+    expect(after.state.txCount).toBe(before.txCount + 2);
+  });
+
+  it("rührt eine Position innerhalb des Puffers nicht an", () => {
+    const before = openKonservativ();
+    const after = tickPaperPosition(before, tick({ priceInSol: 1.01 }), konservativ, config.global);
+    expect(after.state.rebalanceCount).toBe(0);
+    expect(after.state.minBinId).toBe(before.minBinId);
+  });
+
+  it("hält den Cooldown ein, statt in Seitwärtsphasen zu zappeln", () => {
+    const first = tickPaperPosition(
+      openKonservativ(),
+      tick({ priceInSol: 1.3 }),
+      konservativ,
+      config.global,
+    );
+    expect(first.state.rebalanceCount).toBe(1);
+
+    // cooldownMin = 240 → eine Stunde später darf noch nicht erneut rebalanciert
+    // werden, auch wenn der Preis weiterläuft.
+    const tooSoon = tickPaperPosition(
+      first.state,
+      tick({ priceInSol: 1.7, at: new Date(T0.getTime() + 2 * 3_600_000) }),
+      konservativ,
+      config.global,
+    );
+    expect(tooSoon.state.rebalanceCount).toBe(1);
+
+    const later = tickPaperPosition(
+      first.state,
+      tick({ priceInSol: 1.7, at: new Date(T0.getTime() + 6 * 3_600_000) }),
+      konservativ,
+      config.global,
+    );
+    expect(later.state.rebalanceCount).toBe(2);
+  });
+
+  it("unterlässt den Rebalance, wenn er sich nicht rechnet", () => {
+    // Kaum Volumen → der erwartete Zusatzertrag deckt die Kosten nicht,
+    // minEvFactor (3) erst recht nicht.
+    const after = tickPaperPosition(
+      openKonservativ(),
+      tick({ priceInSol: 1.3, poolVolume24hUsd: 500 }),
+      konservativ,
+      config.global,
+    );
+    expect(after.state.rebalanceCount).toBe(0);
+  });
+
+  it("rebalanciert nicht, wenn die Position ohnehin geschlossen gehört", () => {
+    // Abwärts-Rebalance ist zugleich ein Stop-Loss-Check: nie in einen
+    // fallenden Preis nachzentrieren (KONZEPT.md 8.2).
+    const crash = tickPaperPosition(
+      openKonservativ(),
+      tick({ priceInSol: 0.4 }),
+      konservativ,
+      config.global,
+    );
+    expect(crash.closeReason).toBe("stop_loss");
+    expect(crash.state.rebalanceCount).toBe(0);
+  });
+
+  it("Degen rebalanciert nie — Positionen werden geschlossen, nicht nachgeführt", () => {
+    const after = tickPaperPosition(
+      openDegen(),
+      tick({ priceInSol: 0.8 }),
+      config.presets["degen"]!,
+      config.global,
+    );
+    expect(after.state.rebalanceCount).toBe(0);
   });
 });
 
@@ -224,5 +364,98 @@ describe("HODL-Benchmark & Close", () => {
     const state = openDegen();
     const closed = closePaperPosition(state, 1, config.global);
     expect(closed.state.txCount).toBe(state.txCount + 1);
+  });
+});
+
+describe("Gebührenmodell", () => {
+  const degen = config.presets["degen"]!;
+
+  /**
+   * Gesamter Gebührenertrag eines Ticks. Bewusst claimed + unclaimed: Ein
+   * Claim nullt `feesUnclaimedSol`, sodass ein höherer Ertrag als 0 erschiene.
+   */
+  const earned = (state: PaperPositionState) => state.feesClaimedSol + state.feesUnclaimedSol;
+
+  /** Eine Position mit gegebener Strategie am Preis 1, danach ein Tick in Range. */
+  function feesFor(strategy: "Spot" | "Curve" | "BidAsk", binCount = 30): number {
+    const preset = {
+      ...degen,
+      strategy: { type: strategy, sided: "balanced" as const },
+      binRange: { min: binCount, max: binCount },
+    };
+    const state = openPaperPosition({
+      preset,
+      global: config.global,
+      binStep: 100,
+      price: 1,
+      depositSol: 1,
+      feePct: 1,
+      at: T0,
+    });
+    return earned(tickPaperPosition(state, tick({ priceInSol: 1 }), preset, config.global).state);
+  }
+
+  it("unterscheidet die Strategietypen — Konzentration am aktiven Bin zahlt sich aus", () => {
+    // Über den bloßen TVL-Anteil gerechnet wären alle drei identisch. Genau das
+    // machte strategy.type für die Optimierung unbrauchbar.
+    const curve = feesFor("Curve");
+    const spot = feesFor("Spot");
+    const bidAsk = feesFor("BidAsk");
+
+    expect(curve).toBeGreaterThan(spot);
+    expect(spot).toBeGreaterThan(bidAsk);
+  });
+
+  it("belohnt engere Ranges bei gleichem Einsatz", () => {
+    expect(feesFor("Spot", 10)).toBeGreaterThan(feesFor("Spot", 60));
+  });
+
+  it("verdient nichts, wenn der aktive Bin außerhalb der Position liegt", () => {
+    const state = openDegen();
+    // Preis oberhalb der Range: kein Bin der Position ist aktiv.
+    const result = tickPaperPosition(state, tick({ priceInSol: 2 }), degen, config.global);
+    expect(earned(result.state)).toBe(0);
+  });
+
+  it("zieht den Protokollanteil ab, bevor LPs verteilt wird", () => {
+    const state = openDegen();
+    const standard = earned(
+      tickPaperPosition(state, tick({ priceInSol: 0.95, protocolFeePct: 10 }), degen, config.global)
+        .state,
+    );
+    const launchPool = earned(
+      tickPaperPosition(state, tick({ priceInSol: 0.95, protocolFeePct: 20 }), degen, config.global)
+        .state,
+    );
+
+    // 20 % Protokollanteil lässt dem LP 80/90 dessen, was 10 % übrig lassen.
+    expect(launchPool).toBeCloseTo(standard * (80 / 90), 9);
+  });
+
+  it("nimmt ohne Angabe den Standard-Protokollanteil an, nicht null", () => {
+    const state = openDegen();
+    const implicit = earned(
+      tickPaperPosition(state, tick({ priceInSol: 0.95 }), degen, config.global).state,
+    );
+    const explicit = earned(
+      tickPaperPosition(state, tick({ priceInSol: 0.95, protocolFeePct: 10 }), degen, config.global)
+        .state,
+    );
+    expect(implicit).toBeCloseTo(explicit, 12);
+  });
+
+  it("skaliert mit der angenommenen Bin-Breite der übrigen LPs", () => {
+    const state = openDegen();
+    const fees = (poolLiquidityBins: number) =>
+      earned(
+        tickPaperPosition(state, tick({ priceInSol: 0.95 }), degen, {
+          ...config.global,
+          paper: { ...config.global.paper, poolLiquidityBins },
+        }).state,
+      );
+
+    // Liegt die Fremdliquidität breiter, ist im aktiven Bin weniger davon —
+    // der eigene Anteil steigt.
+    expect(fees(200)).toBeGreaterThan(fees(20));
   });
 });

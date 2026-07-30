@@ -2,6 +2,7 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import {
   TRACKING_DURATION_HOURS,
   computeOutcomes,
+  solPriceUsdOf,
   trackingIntervalSec,
   type FeatureVector,
   type PoolMetrics,
@@ -183,6 +184,7 @@ export class TrackRepo {
           dynamicFeePct: pool.dynamicFeePct ?? null,
           baseFeePct: pool.baseFeePct ?? null,
           protocolFeePct: pool.protocolFeePct ?? null,
+          solPriceUsd: solPriceUsdOf(pool),
           windows: snapshotWindows(pool),
         },
       }),
@@ -275,6 +277,7 @@ export class TrackRepo {
         dynamicFeePct: true,
         baseFeePct: true,
         protocolFeePct: true,
+        solPriceUsd: true,
         windows: true,
       },
     });
@@ -287,6 +290,7 @@ export class TrackRepo {
       dynamicFeePct: decimal(row.dynamicFeePct),
       baseFeePct: decimal(row.baseFeePct),
       protocolFeePct: decimal(row.protocolFeePct),
+      solPriceUsd: decimal(row.solPriceUsd),
       windows: (row.windows as SnapshotWindows | null) ?? null,
     }));
   }

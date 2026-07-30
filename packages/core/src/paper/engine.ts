@@ -1,5 +1,12 @@
 import type { GlobalConfig, PresetConfig } from "../config/schema";
-import { applyPriceMove, isInRange, openBins, totalsOf } from "./bins";
+import {
+  activeBinValueSol,
+  applyPriceMove,
+  binIdFromPrice,
+  isInRange,
+  recenterBins,
+  totalsOf,
+} from "./bins";
 import type {
   MarketTick,
   PaperCloseReason,
@@ -13,12 +20,24 @@ import type {
  * Marktdaten, ohne Kapitaleinsatz (KONZEPT.md Abschnitt 13, Phase 1).
  *
  * Kostenmodell — bewusst NUR On-Chain-Kosten:
- * Priority Fees je Transaktion und Slippage/Preis-Impact je Swap. Positions-Rent
- * ist erstattungsfähig und damit gebundenes Kapital, kein Aufwand.
+ * Priority Fees je Transaktion, Slippage/Preis-Impact je Swap und die
+ * Composition Fee beim Einzahlen in den aktiven Bin. Positions-Rent ist
+ * erstattungsfähig und damit gebundenes Kapital, kein Aufwand.
  * Infrastrukturkosten (VPS, RPC-Tarife) bleiben außen vor: Sie sind monatlicher
  * Fixaufwand, keiner Position zurechenbar, und würden den Preset-Vergleich
  * verzerren statt ihn zu schärfen.
+ *
+ * Gebührenmodell nach der DLMM-Doku (core-products/dlmm/formulas):
+ * - Nur der **aktive Bin** verdient; der Anteil ist die eigene Liquidität dort
+ *   geteilt durch die gesamte Liquidität dort.
+ * - Vom Gebührenaufkommen geht der `protocol_share` ab (10 % Standard-Pool,
+ *   20 % Launch-Pool); nur der Rest ist LP-Gebühr.
+ * - Maßgeblich ist die Gesamtgebühr (Basis + Volatilitätsaufschlag), nicht die
+ *   Basisgebühr.
  */
+
+/** Protokollanteil, wenn der Pool keinen meldet — Standard-Pool nach Doku. */
+const DEFAULT_PROTOCOL_FEE_PCT = 10;
 
 export interface OpenPaperPositionParams {
   preset: PresetConfig;
@@ -28,6 +47,8 @@ export interface OpenPaperPositionParams {
   price: number;
   /** Einsatz in SOL (vor Kosten). */
   depositSol: number;
+  /** Gesamtgebühr des Pools in % — Basis der Composition Fee beim Einstieg. */
+  feePct: number;
   at: Date;
 }
 
@@ -35,7 +56,7 @@ export function openPaperPosition(params: OpenPaperPositionParams): PaperPositio
   const { preset, global, binStep, price, depositSol, at } = params;
   const binCount = Math.round((preset.binRange.min + preset.binRange.max) / 2);
 
-  const opened = openBins({
+  const opened = recenterBins({
     price,
     binStep,
     binCount,
@@ -44,11 +65,14 @@ export function openPaperPosition(params: OpenPaperPositionParams): PaperPositio
     depositSol,
   });
 
-  // Kosten des Einstiegs: eine Transaktion + Swap-Kosten auf den Anteil,
-  // der in Token getauscht werden musste (bei quote_only entfällt der Swap).
+  // Kosten des Einstiegs: eine Transaktion, Swap-Kosten auf den Anteil, der in
+  // Token getauscht werden musste (bei quote_only entfällt der Swap), plus die
+  // Composition Fee auf den Anteil, der in den aktiven Bin geht.
   const costs = global.paper.costs;
   const openCost =
-    costs.priorityFeeSol + (opened.swappedSol * costs.swapSlippagePct) / 100;
+    costs.priorityFeeSol +
+    (opened.swappedSol * costs.swapSlippagePct) / 100 +
+    compositionFee(opened.activeBinDepositSol, params.feePct);
 
   const atMs = at.getTime();
   return {
@@ -71,7 +95,22 @@ export function openPaperPosition(params: OpenPaperPositionParams): PaperPositio
     lastClaimMs: atMs,
     rebalanceCount: 0,
     lastRebalanceMs: null,
+    // Eine einseitige Position startet per Konstruktion außerhalb der Range.
+    rangeReached: isInRange(opened.bins, price),
+    rebalanceTimesMs: [],
   };
+}
+
+/**
+ * Composition Fee: fällt an, wenn eine Einzahlung die Zusammensetzung des
+ * **aktiven** Bins verändert — laut Doku "in a way that resembles a swap".
+ * Auf leere oder nicht-aktive Bins wird sie nicht erhoben, deshalb ist die
+ * Basis ausschließlich der Betrag, der in den aktiven Bin geht.
+ */
+function compositionFee(activeBinDepositSol: number, feePct: number): number {
+  if (activeBinDepositSol <= 0 || feePct <= 0) return 0;
+  const rate = feePct / 100;
+  return activeBinDepositSol * rate * (1 + rate);
 }
 
 /**
@@ -97,20 +136,11 @@ export function tickPaperPosition(
 
   const inRange = isInRange(next.bins, tick.priceInSol);
   if (inRange) next.msInRange += elapsedMs;
+  if (rangeIsReached(next, tick.priceInSol)) next.rangeReached = true;
 
   // --- Fee-Akkrual -------------------------------------------------------
-  // Nur wer im aktiven Bin liegt, verdient Fees. Der eigene Anteil am
-  // Fee-Fluss wird über den Anteil am Pool-TVL geschätzt (die tatsächliche
-  // Verteilung anderer LPs ist von außen nicht beobachtbar) und zusätzlich
-  // per feeShareHaircutPct konservativ gekürzt.
-  if (inRange && elapsedMs > 0 && tick.poolTvlUsd > 0 && tick.solPriceUsd > 0) {
-    const totals = totalsOf(next.bins, tick.priceInSol);
-    const poolTvlSol = tick.poolTvlUsd / tick.solPriceUsd;
-    const share = poolTvlSol > 0 ? Math.min(1, totals.valueSol / poolTvlSol) : 0;
-    const volumeSolInWindow =
-      (tick.poolVolume24hUsd / tick.solPriceUsd) * (elapsedMs / 86_400_000);
-    const grossFees = volumeSolInWindow * (tick.poolFeePct / 100) * share;
-    next.feesUnclaimedSol += grossFees * (1 - global.paper.feeShareHaircutPct / 100);
+  if (elapsedMs > 0) {
+    next.feesUnclaimedSol += accrueFees(next, tick, global, elapsedMs);
   }
 
   // --- Fee-Claim ---------------------------------------------------------
@@ -133,8 +163,229 @@ export function tickPaperPosition(
     next.lastClaimMs = nowMs;
   }
 
+  // --- Rebalancing -------------------------------------------------------
+  // Der geordnete Exit hat Vorrang: nie in einen fallenden Preis nachzentrieren,
+  // wenn die Position ohnehin geschlossen gehört (KONZEPT.md 8.2).
+  const exitBeforeRebalance = evaluateExit(
+    next,
+    valuePosition(next, tick.priceInSol),
+    preset,
+    nowMs,
+  );
+  if (exitBeforeRebalance === null && shouldRebalance(next, tick, preset, global, nowMs)) {
+    applyRebalance(next, tick, preset, global, nowMs);
+  }
+
   const valuation = valuePosition(next, tick.priceInSol);
   return { state: next, valuation, closeReason: evaluateExit(next, valuation, preset, nowMs) };
+}
+
+/**
+ * Gebühren des abgelaufenen Intervalls in SOL.
+ *
+ * Modell nach der DLMM-Doku: Gebühren entstehen im aktiven Bin, und der Anteil
+ * daran ist `eigene Liquidität dort / gesamte Liquidität dort`. Die fremde
+ * Verteilung ist nicht beobachtbar — sie wird als gleichmäßig über
+ * `poolLiquidityBins` Bins angenommen. Dadurch zahlt sich Konzentration nahe am
+ * Preis aus, was die Strategietypen (Spot/Curve/BidAsk) überhaupt erst
+ * unterscheidbar macht: Über den bloßen TVL-Anteil gerechnet wären sie identisch.
+ */
+function accrueFees(
+  state: PaperPositionState,
+  tick: MarketTick,
+  global: GlobalConfig,
+  elapsedMs: number,
+): number {
+  if (tick.poolTvlUsd <= 0 || tick.solPriceUsd <= 0 || tick.poolFeePct <= 0) return 0;
+
+  const ownActiveSol = activeBinValueSol(state.bins, tick.priceInSol, state.binStep);
+  if (ownActiveSol <= 0) return 0; // Aktiver Bin außerhalb der Position.
+
+  const poolTvlSol = tick.poolTvlUsd / tick.solPriceUsd;
+  const ownTotalSol = totalsOf(state.bins, tick.priceInSol).valueSol;
+  // Fremdliquidität im aktiven Bin unter der Gleichverteilungsannahme.
+  const othersTotalSol = Math.max(0, poolTvlSol - ownTotalSol);
+  const othersActiveSol = othersTotalSol / global.paper.poolLiquidityBins;
+
+  const denominator = ownActiveSol + othersActiveSol;
+  if (denominator <= 0) return 0;
+  const share = ownActiveSol / denominator;
+
+  const volumeSolInWindow =
+    (tick.poolVolume24hUsd / tick.solPriceUsd) * (elapsedMs / 86_400_000);
+  const tradingFees = volumeSolInWindow * (tick.poolFeePct / 100);
+
+  // Der Protokollanteil geht vom Gebührenaufkommen ab, bevor LPs verteilt wird.
+  const protocolPct = tick.protocolFeePct ?? DEFAULT_PROTOCOL_FEE_PCT;
+  const lpFees = tradingFees * (1 - clamp(protocolPct, 0, 100) / 100);
+
+  return lpFees * share * (1 - global.paper.feeShareHaircutPct / 100);
+}
+
+/**
+ * Rebalance-Trigger (KONZEPT.md 8.2): Der aktive Bin hat die inneren
+ * `100 − 2·bufferPct` Prozent der Range verlassen. Hysterese über Cooldown und
+ * Tageslimit verhindert Zappeln in Seitwärtsphasen.
+ */
+function shouldRebalance(
+  state: PaperPositionState,
+  tick: MarketTick,
+  preset: PresetConfig,
+  global: GlobalConfig,
+  nowMs: number,
+): boolean {
+  const rebalance = preset.rebalance;
+  if (!rebalance.enabled) return false;
+
+  const width = state.maxBinId - state.minBinId;
+  if (width <= 0) return false;
+
+  const activeId = binIdFromPrice(tick.priceInSol, state.binStep);
+  const buffer = (width * rebalance.bufferPct) / 100;
+  const insideBuffer =
+    activeId >= state.minBinId + buffer && activeId <= state.maxBinId - buffer;
+  if (insideBuffer) return false;
+
+  if (
+    state.lastRebalanceMs !== null &&
+    nowMs - state.lastRebalanceMs < rebalance.cooldownMin * 60_000
+  ) {
+    return false;
+  }
+
+  const dayAgo = nowMs - 86_400_000;
+  const recent = state.rebalanceTimesMs.filter((ts) => ts > dayAgo).length;
+  if (recent >= rebalance.maxPerDay) return false;
+
+  return rebalanceIsWorthIt(state, tick, preset, global, nowMs);
+}
+
+/**
+ * EV-Prüfung vor dem Rebalance (KONZEPT.md 8.2): Der erwartete Zusatzertrag
+ * über die Restlaufzeit muss die Kosten um `minEvFactor` übersteigen.
+ *
+ * Der erwartete Ertrag wird aus der aktuellen Pool-Gebührenrate hochgerechnet
+ * unter der Annahme, dass die nachzentrierte Position wieder im aktiven Bin
+ * liegt — genau das ist ja der Zweck des Rebalancings.
+ */
+function rebalanceIsWorthIt(
+  state: PaperPositionState,
+  tick: MarketTick,
+  preset: PresetConfig,
+  global: GlobalConfig,
+  nowMs: number,
+): boolean {
+  const remainingMs = preset.maxHoldHours * 3_600_000 - (nowMs - state.openedAtMs);
+  if (remainingMs <= 0) return false;
+
+  const cost = estimateRebalanceCost(state, tick, preset, global);
+  if (cost <= 0) return true;
+
+  // Ertrag der nachzentrierten Position: eine hypothetische Position am
+  // aktuellen Preis, über die Restlaufzeit.
+  const projected = { ...state, ...recenteredBins(state, tick, preset) };
+  const expected = accrueFees(projected, tick, global, remainingMs);
+
+  return expected >= cost * preset.rebalance.minEvFactor;
+}
+
+/**
+ * Hat der Markt die Range erreicht? Wahr, sobald der Preis den obersten Bin
+ * berührt oder unterschritten hat — auch wenn er die Range in einem Schritt
+ * ganz durchlaufen hat und jetzt darunter liegt.
+ */
+function rangeIsReached(state: PaperPositionState, price: number): boolean {
+  const top = state.bins[state.bins.length - 1];
+  return top !== undefined && price <= top.price;
+}
+
+/** Bins, wie sie nach einem Rebalance um den aktuellen Preis lägen. */
+function recenteredBins(
+  state: PaperPositionState,
+  tick: MarketTick,
+  preset: PresetConfig,
+): Pick<PaperPositionState, "bins" | "minBinId" | "maxBinId"> & {
+  swappedSol: number;
+  activeBinDepositSol: number;
+} {
+  const totals = totalsOf(state.bins, tick.priceInSol);
+  const binCount = Math.round((preset.binRange.min + preset.binRange.max) / 2);
+  const target = recenterBins({
+    price: tick.priceInSol,
+    binStep: state.binStep,
+    binCount,
+    strategy: preset.strategy.type,
+    sided: preset.strategy.sided,
+    depositSol: totals.valueSol,
+  });
+
+  // Was tatsächlich die Seite wechseln muss: Differenz zwischen dem
+  // Token-Bestand von jetzt und dem Zielbestand.
+  const currentTokenSol = totals.tokenAmount * tick.priceInSol;
+  const swappedSol = Math.abs(target.swappedSol - currentTokenSol);
+
+  return {
+    bins: target.bins,
+    minBinId: target.minBinId,
+    maxBinId: target.maxBinId,
+    swappedSol,
+    activeBinDepositSol: target.activeBinDepositSol,
+  };
+}
+
+/**
+ * Kosten eines Rebalances.
+ *
+ * Nach der DLMM-Doku ist Rebalancing **ein** Ablauf (`rebalance_liquidity`:
+ * claim, remove, resize, add) — die Position wird nicht geschlossen und neu
+ * eröffnet. Deshalb zwei Transaktionen statt eines vollen Close/Open-Zyklus,
+ * plus Swap-Kosten auf den umgeschichteten Betrag und die Composition Fee auf
+ * den Anteil, der in den aktiven Bin geht.
+ */
+function estimateRebalanceCost(
+  state: PaperPositionState,
+  tick: MarketTick,
+  preset: PresetConfig,
+  global: GlobalConfig,
+): number {
+  const costs = global.paper.costs;
+  const target = recenteredBins(state, tick, preset);
+  return (
+    costs.priorityFeeSol * 2 +
+    (target.swappedSol * costs.swapSlippagePct) / 100 +
+    compositionFee(target.activeBinDepositSol, tick.poolFeePct)
+  );
+}
+
+/** Führt den Rebalance aus: Fees vereinnahmen, Range nachzentrieren, Kosten buchen. */
+function applyRebalance(
+  state: PaperPositionState,
+  tick: MarketTick,
+  preset: PresetConfig,
+  global: GlobalConfig,
+  nowMs: number,
+): void {
+  // Pflicht-Claim vor jedem Rebalance (KONZEPT.md 8.3).
+  state.feesClaimedSol += state.feesUnclaimedSol;
+  state.feesUnclaimedSol = 0;
+
+  const cost = estimateRebalanceCost(state, tick, preset, global);
+  const target = recenteredBins(state, tick, preset);
+
+  state.bins = target.bins;
+  state.minBinId = target.minBinId;
+  state.maxBinId = target.maxBinId;
+  state.costsSol += cost;
+  state.txCount += 2;
+  state.rebalanceCount += 1;
+  state.lastRebalanceMs = nowMs;
+  state.rebalanceTimesMs = [...state.rebalanceTimesMs.filter((ts) => ts > nowMs - 86_400_000), nowMs];
+  // Nach dem Nachzentrieren liegt der Preis wieder in der Range.
+  state.rangeReached = state.rangeReached || isInRange(target.bins, tick.priceInSol);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 /** Bewertet die Position zum gegebenen Preis inkl. HODL-Vergleich. */
@@ -183,9 +434,27 @@ function evaluateExit(
   }
   if (nowMs - state.openedAtMs >= preset.maxHoldHours * 3_600_000) return "max_hold_time";
 
-  // Ohne Rebalancing ist eine Position außerhalb der Range totes Kapital:
-  // sie verdient keine Fees mehr und wird geschlossen statt gehalten.
-  if (!preset.rebalance.enabled && !valuation.inRange && state.msTotal > 0) return "out_of_range";
+  // Ohne Rebalancing ist eine Position außerhalb der Range totes Kapital: sie
+  // verdient keine Fees mehr und wird geschlossen statt gehalten.
+  //
+  // Ausnahme, und zwar die entscheidende: Eine einseitige Position liegt
+  // **beim Eröffnen** außerhalb der Range und wartet dort auf Befüllung — das
+  // ist das von Meteora dokumentierte DCA-Muster, nicht ein Fehlzustand. Erst
+  // wenn der Preis die Range einmal erreicht hatte und sie wieder verlassen
+  // hat, ist die Position tot. Ohne diese Unterscheidung wird jede
+  // quote_only-Position im ersten Tick geschlossen, verdient nie eine Gebühr,
+  // und der Preset-Vergleich misst nur noch die Eröffnungskosten.
+  //
+  // Wer nie befüllt wird, läuft ins Zeitlimit oben — das ist der richtige Exit
+  // für eine Kauforder, die der Markt nicht erreicht hat.
+  if (
+    !preset.rebalance.enabled &&
+    !valuation.inRange &&
+    state.rangeReached &&
+    state.msTotal > 0
+  ) {
+    return "out_of_range";
+  }
 
   return null;
 }

@@ -36,6 +36,22 @@ export const PaperConfigSchema = z.object({
    * am Fee-Fluss konservativ nach unten korrigiert.
    */
   feeShareHaircutPct: pct(0, 90),
+  /**
+   * Angenommene Bin-Breite der **übrigen** LPs im Pool.
+   *
+   * Gebühren verdient nur der aktive Bin, und der Anteil daran ist
+   * `eigene Liquidität dort / Gesamtliquidität dort`. Die fremde Verteilung ist
+   * von außen nicht beobachtbar, also wird sie als gleichmäßig über diese
+   * Bin-Zahl angenommen: Fremd-TVL / poolLiquidityBins liegt im aktiven Bin.
+   *
+   * Default 70 = die DLMM-Standardbreite einer Position
+   * (`DEFAULT_BIN_PER_POSITION`, zugleich `MAX_BIN_PER_ARRAY`). Der Wert steuert
+   * unmittelbar, wie stark sich Konzentration auszahlt — eine enge Curve-Position
+   * gewinnt gegenüber einer breiten Spot-Position genau dann, wenn andere LPs
+   * breiter liegen als sie selbst. Er gehört damit zu den Modellannahmen, die
+   * die Sensitivitätsanalyse (KONZEPT-ML.md 6.1) prüfen muss.
+   */
+  poolLiquidityBins: z.number().int().min(1).max(1_400).default(70),
 });
 
 export type PaperConfig = z.infer<typeof PaperConfigSchema>;

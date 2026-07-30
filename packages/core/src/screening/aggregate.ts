@@ -99,6 +99,22 @@ export function aggregateMarket(
   };
 }
 
+/**
+ * USD-Preis der SOL-Seite eines Pools, aus den Token-Angaben der Pool-API.
+ *
+ * Wird je Messpunkt gebraucht: Das Gebührenmodell rechnet den Pool-TVL in SOL
+ * um, und anders als beim reinen TVL-Anteil kürzt sich der Umrechnungskurs im
+ * Bin-Modell nicht heraus. Ohne ihn kann der Replay den Gebührenanteil nicht
+ * rekonstruieren.
+ */
+export function solPriceUsdOf(
+  pool: Pick<PoolMetrics, "mintX" | "mintY" | "tokenX" | "tokenY">,
+): number | null {
+  const side = pool.mintY === WSOL_MINT ? pool.tokenY : pool.mintX === WSOL_MINT ? pool.tokenX : null;
+  const price = side?.priceUsd;
+  return price !== undefined && Number.isFinite(price) && price > 0 ? price : null;
+}
+
 /** Absolute Abweichung des Pool-Preises vom Markt-Median in %. */
 export function priceDivergencePct(
   pool: Pick<PoolMetrics, "mintX" | "mintY" | "priceNative">,

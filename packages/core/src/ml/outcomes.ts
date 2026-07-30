@@ -37,6 +37,12 @@ export interface TrackPoint {
   baseFeePct?: number | null;
   /** Protokollanteil in % **der Gebühr** — der LP erhält nur den Rest. */
   protocolFeePct?: number | null;
+  /**
+   * USD-Preis von SOL zum Messzeitpunkt. Der Replay braucht ihn, um den
+   * Pool-TVL in SOL umzurechnen — im Bin-Modell kürzt sich der Kurs nicht
+   * heraus wie in der früheren TVL-Anteil-Rechnung.
+   */
+  solPriceUsd?: number | null;
   windows?: SnapshotWindows | null;
 }
 
