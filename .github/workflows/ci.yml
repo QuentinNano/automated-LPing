@@ -1,0 +1,48 @@
+name: CI
+
+# Das Repo hat eine strenge Testdisziplin — nur erzwungen hat sie nichts.
+# Typecheck und Tests laufen ohne Netzwerk und ohne Datenbank, es gibt also
+# keinen Grund, sie nicht bei jedem Push zu verlangen.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Ein laufender Durchgang auf demselben Branch wird abgebrochen, wenn neu
+# gepusht wird: Das Ergebnis des vorherigen Standes interessiert dann niemanden.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pruefen:
+    name: Typecheck & Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Version aus dem `packageManager`-Feld der package.json, damit CI und
+      # Entwicklungsrechner nicht auseinanderlaufen.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Untergrenze aus `engines.node`. Die CI soll das prüfen, was das
+          # Projekt zusichert, nicht die jeweils neueste Version.
+          node-version: 20
+          cache: pnpm
+
+      # `--frozen-lockfile` schlägt fehl, wenn die Lockdatei nicht zur
+      # package.json passt — genau das soll auffallen, statt still zu driften.
+      # Der postinstall von @lping/db erzeugt den Prisma-Client; ohne ihn
+      # bricht der Typecheck ab.
+      - name: Abhängigkeiten installieren
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (strict)
+        run: pnpm typecheck
+
+      - name: Tests
+        run: pnpm test
