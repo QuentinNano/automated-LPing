@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { binsForCoverage, coverageHorizonHours } from "../paper/bins";
 
 /**
  * Laufzeit-Konfiguration des Bots (KONZEPT.md Abschnitt 14).
@@ -37,6 +38,44 @@ export const PaperConfigSchema = z.object({
    */
   feeShareHaircutPct: pct(0, 90),
   /**
+   * Angenommener Anteil der Handelsgebühr, den **Limit-Order-Liquidität**
+   * abzweigt — auf Pools, die Limit Orders unterstützen.
+   *
+   * Seit `lb_clmm` 0.12.0 (Mainnet Mai 2026) ist jeder bestehende Pool **ohne
+   * Liquidity-Mining-Rewards** unumkehrbar ein Limit-Order-Pool. Das ist
+   * praktisch jeder Memecoin-Pool, den die Presets suchen. Dort teilt das
+   * Programm die Gebühr zuerst nach Liquiditätsquelle auf: Was Limit Orders
+   * gefüllt haben, geht je zur Hälfte an die Order-Steller und ans Protokoll —
+   * an Market-Maker-LPs davon nichts.
+   *
+   * Bewusst **getrennt** von `feeShareHaircutPct`: Beide senken den Ertrag,
+   * aber sie haben verschiedene Ursachen und verschiedene Messwege. In einem
+   * Sammel-Abschlag zusammengefasst ließe sich keiner von beiden je ersetzen.
+   * Dieser hier wird durch eine Auswertung der `/positions/.../historical`-
+   * Events messbar; der andere braucht den RPC-Adapter.
+   *
+   * Der Startwert ist eine Annahme, kein Messwert, und gehört deshalb in den
+   * Stresstest — nicht in eine Optimierung (KONZEPT-ML.md 6.1).
+   */
+  limitOrderShareHaircutPct: pct(0, 90).default(15),
+  /**
+   * Preisimpact eines Swaps je Anteil am Pool-TVL.
+   *
+   * Die Slippage war eine **Pauschale**: derselbe Prozentsatz, ob 0,1 oder 5
+   * SOL durch einen Pool gehen. Das ist gerade dort falsch, wo es weh tut — im
+   * Ausstieg aus einer Position, die für ihren Pool zu groß geworden ist, und
+   * damit genau im Verlust-Tail, den die Simulation abbilden soll.
+   *
+   * Modell: `Impact% = swapImpactFactor · (Swap-Wert / Pool-TVL) · 100`, additiv
+   * zur Grundslippage und gedeckelt durch `slippageCapPct` des Presets. Bei 0,5
+   * kostet ein Swap über 1 % des TVL zusätzlich 0,5 %.
+   *
+   * Ersetzbar durch eine Messung: Die Jupiter-Sellability-Prüfung ermittelt je
+   * Kandidat bereits einen Roundtrip-Verlust — bislang nur als Filter, nicht als
+   * Kalibrierung. `0` schaltet die Größenabhängigkeit ab.
+   */
+  swapImpactFactor: z.number().min(0).max(20).default(0.5),
+  /**
    * Angenommene Bin-Breite der **übrigen** LPs im Pool.
    *
    * Gebühren verdient nur der aktive Bin, und der Anteil daran ist
@@ -61,6 +100,45 @@ export const PaperConfigSchema = z.object({
 
 export type PaperConfig = z.infer<typeof PaperConfigSchema>;
 
+/**
+ * Marktregime-Tor: die Frage vor der Pool-Auswahl.
+ *
+ * Screening und Score beantworten „welcher Pool ist der beste?", nicht „ist
+ * heute überhaupt einer gut genug?". Aus einem Feld schlechter Kandidaten
+ * wählt der Score zuverlässig den besten schlechten aus — und eröffnet ihn.
+ *
+ * Gemessen wird das Verhältnis von Gebührenertrag zu erwartetem Varianzverlust
+ * über die Kandidaten eines Durchgangs. Die Schwellen sind Startwerte und
+ * gehören kalibriert, sobald `regime_snapshots` genug Historie trägt: Die
+ * Aufzeichnung läuft unabhängig davon, ob das Tor blockiert.
+ */
+export const RegimeConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  /**
+   * Unter diesem Median-Verhältnis gilt das Regime als ungünstig.
+   *
+   * 1,0 heißt wörtlich: Die Gebühren decken den erwarteten Varianzverlust
+   * gerade eben. Darunter verliert eine Position gegen schlichtes Halten,
+   * gleich welcher Pool es wird — Kosten und Zeit außerhalb der Range kommen
+   * dann noch obendrauf.
+   */
+  adverseBelow: z.number().min(0).max(100).default(1),
+  /** Ab diesem Median-Verhältnis gilt das Regime als günstig. */
+  favourableAbove: z.number().min(0).max(1_000).default(3),
+  /**
+   * Mindestzahl bewertbarer Pools für ein Urteil.
+   *
+   * Darunter lautet das Urteil `unknown` — und `unknown` blockiert nicht:
+   * Fehlende Messung ist kein Befund, und ein Tor, das ohne Daten schließt,
+   * verhindert genau die Aufzeichnung, aus der die Daten entstünden.
+   */
+  minPools: z.number().int().min(1).max(1_000).default(15),
+  /** Ob ein ungünstiges Regime das Eröffnen tatsächlich verhindert. */
+  blockOpening: z.boolean().default(true),
+});
+
+export type RegimeConfig = z.infer<typeof RegimeConfigSchema>;
+
 export const GlobalConfigSchema = z
   .object({
     /** Paper-Trading ist der sichere Default; Live erst nach Phase 1. */
@@ -73,6 +151,7 @@ export const GlobalConfigSchema = z
     hardLossLimitPct: pct(1, 80).default(10),
     priorityFeeCapLamports: z.number().int().min(0).max(1_000_000_000).default(2_000_000),
     profitSweepThresholdSol: z.number().min(0).default(5),
+    regime: RegimeConfigSchema.default({}),
     paper: PaperConfigSchema,
   })
   .superRefine((val, ctx) => {
@@ -318,6 +397,42 @@ export const PresetConfigSchema = z
         path: ["compound", "enabled"],
         message: "Compounding erfordert convertToSolPct < 100 (es bleibt sonst nichts zum Reinvestieren)",
       });
+    }
+
+    // Trägt `binRange.max` die zugelassene Volatilität überhaupt?
+    //
+    // Die Leitplanke darf begrenzen, was Kosten und Kapitalbindung tragen — sie
+    // darf die Herleitung aber nicht ersetzen. Deckt sie am oberen Rand des
+    // erlaubten Volatilitätsbands nicht einmal **eine** Standardabweichung ab,
+    // ist die Position dort strukturell zu eng: Sie verlässt die Range binnen
+    // Stunden, verdient nichts mehr und trägt trotzdem den vollen Impermanent
+    // Loss. Genau dieser Fall lief bisher lautlos in die Klemmung.
+    //
+    // 1σ ist bewusst eine Untergrenze und nicht `coverageSigmas`: Die volle
+    // Abdeckung am Extremrand zu verlangen, erzwänge Ranges, deren Bin-Arrays
+    // teurer sind als der Nutzen. Der schmalste zugelassene Bin Step ist der
+    // ungünstigste Fall — je feiner die Bins, desto mehr braucht dieselbe
+    // Preisspanne.
+    if (val.binRange.coverageSigmas !== undefined) {
+      const needed = binsForCoverage({
+        sigmas: 1,
+        volatilityPctDaily: val.volatilityBoundsPctDaily.max,
+        binStep: val.discovery.minBinStep,
+        horizonHours: coverageHorizonHours(val),
+        sided: val.strategy.sided,
+      });
+      if (needed !== null && needed > val.binRange.max) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["binRange", "max"],
+          message:
+            `binRange.max ${val.binRange.max} deckt bei ` +
+            `volatilityBoundsPctDaily.max ${val.volatilityBoundsPctDaily.max} %/Tag und ` +
+            `discovery.minBinStep ${val.discovery.minBinStep} keine volle Standardabweichung ab ` +
+            `(nötig: ${needed} Bins). Entweder binRange.max anheben, ` +
+            `volatilityBoundsPctDaily.max senken oder discovery.minBinStep erhöhen`,
+        });
+      }
     }
   });
 

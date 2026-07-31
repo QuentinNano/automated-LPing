@@ -30,6 +30,16 @@ import type { ExitConfig } from "../config/schema";
 export interface PoolObservation {
   atMs: number;
   priceInSol: number;
+  /**
+   * Höchst- und Tiefstkurs **innerhalb** des Beobachtungsintervalls.
+   *
+   * Ein Sturz, der zwischen zwei Schlusskursen passiert und sich erholt, kommt
+   * in `priceInSol` nicht vor — der Sturz-Exit sah ihn deshalb nie. Wo eine
+   * Kerze die Extrema mitbringt, wird gemessen statt abgetastet; fehlen sie,
+   * gilt unverändert der Schlusskurs.
+   */
+  priceHigh?: number;
+  priceLow?: number;
   tvlUsd: number;
   /**
    * Gebührenertragsrate des **Pools**: Gebühren je TVL und Tag, in Prozent.
@@ -101,9 +111,15 @@ export function evaluatePoolExit(input: PoolHealthInput): PoolExitReason | null 
   // --- Risiko: Preissturz ---------------------------------------------------
   // Gemessen vom Fensterhoch, nicht vom Einstieg: Ein Sturz ist ein Sturz, auch
   // wenn die Position davor im Plus lag.
+  //
+  // Hoch und Tief kommen aus den Kerzen-Extrema, wo sie vorliegen. Über
+  // Schlusskurse gemessen bliebe ein Sturz unsichtbar, der sich innerhalb eines
+  // Intervalls wieder erholt — und genau der ist der teure Fall: Die Position
+  // hat ihn voll mitgemacht, die Abtastung nicht.
   const priceWindow = since(history, now.atMs - exit.priceWindowMin * 60_000);
-  const priceHigh = Math.max(...priceWindow.map((p) => p.priceInSol));
-  if (priceHigh > 0 && dropPct(priceHigh, now.priceInSol) >= exit.priceCrashPct) {
+  const priceHigh = Math.max(...priceWindow.map((p) => p.priceHigh ?? p.priceInSol));
+  const priceNow = now.priceLow ?? now.priceInSol;
+  if (priceHigh > 0 && dropPct(priceHigh, priceNow) >= exit.priceCrashPct) {
     return "price_crash";
   }
 

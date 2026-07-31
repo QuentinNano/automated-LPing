@@ -9,6 +9,7 @@ import {
 } from "../paper/engine";
 import { poolFeeRatePctPerDay } from "../paper/poolHealth";
 import { positionSizeSol } from "../paper/sizing";
+import { realizedVolatilityPctDaily } from "../ml/volatility";
 import type { PaperCloseReason, PaperPositionState, PaperValuation } from "../paper/types";
 
 /**
@@ -41,6 +42,65 @@ export interface ReplayOptions {
   global: GlobalConfig;
   /** Einsatz in SOL; Default ist der Preset-Anteil am virtuellen Kapital. */
   depositSol?: number;
+  /**
+   * Rückblick für die Volatilitätsschätzung in Stunden.
+   *
+   * Steuert, wie viel Vergangenheit die Range-Breite bestimmt. Kürzer heißt
+   * reaktiver und verrauschter, länger heißt träger. 24 Stunden entsprechen dem
+   * Horizont, auf den `deriveBinWidth` normiert.
+   */
+  volatilityLookbackHours?: number;
+}
+
+/**
+ * Rückblick der Volatilitätsschätzung — bewusst **nur nach hinten**.
+ *
+ * Der Replay hat die gesamte Zeitreihe im Speicher, auch die Zukunft. Sie für
+ * die Range-Breite zu benutzen wäre Look-Ahead-Bias in seiner reinsten Form:
+ * Die Position wüsste beim Eröffnen, wie wild es gleich wird. Das Ergebnis sähe
+ * hervorragend aus und wäre wertlos.
+ */
+const DEFAULT_VOLATILITY_LOOKBACK_HOURS = 24;
+
+/** Pool-TVL in SOL, sofern beide Bezugsgrößen belegt sind. */
+function poolTvlSolOf(tick: { poolTvlUsd: number; solPriceUsd: number }): number | null {
+  if (tick.poolTvlUsd <= 0 || tick.solPriceUsd <= 0) return null;
+  return tick.poolTvlUsd / tick.solPriceUsd;
+}
+
+/**
+ * Volatilitätsschätzung zum Einstiegszeitpunkt aus den Punkten davor.
+ *
+ * **Warum es diese Funktion gibt.** Der Replay rief `openPaperPosition` ohne
+ * `volatilityPctDaily` — und damit fiel `deriveBinWidth` auf die Mitte von
+ * `binRange` zurück. Der Replay simulierte also eine feste Bin-Zahl, während
+ * live die aus der Volatilität hergeleitete Breite läuft: bei einem ruhigen
+ * Pool eine mehr als dreifach zu breite Position. Der eigene Anteil am aktiven
+ * Bin skaliert mit 1/Breite, der Gebührenertrag wich damit um denselben Faktor
+ * ab. Jede Kalibrierung über den Replay maß eine andere Strategie als die, die
+ * gehandelt wird — genau das, was „ein Codepfad" verhindern soll.
+ *
+ * Gemessen wird mit `realizedVolatilityPctDaily` auf der aufgezeichneten Reihe.
+ * Das ist die genauere der beiden Schätzungen; live steht im Scan-Pfad nur die
+ * gröbere aus den DexScreener-Preisänderungen zur Verfügung, weil ein frisch
+ * entdeckter Pool noch keine eigene Aufzeichnung hat.
+ */
+function volatilityAt(
+  series: TrackPoint[],
+  index: number,
+  lookbackHours: number,
+): number | null {
+  const until = series[index]?.ts.getTime();
+  if (until === undefined) return null;
+  const from = until - lookbackHours * 3_600_000;
+
+  const window: TrackPoint[] = [];
+  for (let i = index; i >= 0; i--) {
+    const point = series[i]!;
+    if (point.ts.getTime() < from) break;
+    window.push(point);
+  }
+  return realizedVolatilityPctDaily(window);
 }
 
 /**
@@ -96,12 +156,20 @@ export function replayPosition(
       entry.tick.poolFeePct,
       entry.tick.poolTvlUsd,
     ),
+    // Aus der Vergangenheit vor dem Einstieg — nie aus der Reihe danach.
+    volatilityPctDaily: volatilityAt(
+      series,
+      entry.index,
+      options.volatilityLookbackHours ?? DEFAULT_VOLATILITY_LOOKBACK_HOURS,
+    ),
+    poolTvlSol: poolTvlSolOf(entry.tick),
     at: entry.tick.at,
   });
 
   let valuation = valuePosition(state, entry.tick.priceInSol);
   let closeReason: ReplayCloseReason = "end_of_series";
   let lastPrice = entry.tick.priceInSol;
+  let lastTvlSol = poolTvlSolOf(entry.tick);
   let exitAt = entry.tick.at;
   let ticks = 0;
 
@@ -113,6 +181,7 @@ export function replayPosition(
     state = result.state;
     valuation = result.valuation;
     lastPrice = tick.priceInSol;
+    lastTvlSol = poolTvlSolOf(tick);
     exitAt = tick.at;
     ticks++;
 
@@ -124,7 +193,12 @@ export function replayPosition(
 
   // Auch die zensierte Position wird geschlossen — sonst fehlten ihr die
   // Ausstiegskosten und sie sähe systematisch besser aus als eine beendete.
-  const closed = closePaperPosition(state, lastPrice, global);
+  // Der Ausstiegs-Swap kostet mehr, je größer die Position gegenüber dem Pool
+  // ist — ohne diesen Kontext bliebe es bei der Pauschale.
+  const closed = closePaperPosition(state, lastPrice, global, {
+    preset,
+    poolTvlSol: lastTvlSol,
+  });
 
   return {
     poolAddress: pool.poolAddress,

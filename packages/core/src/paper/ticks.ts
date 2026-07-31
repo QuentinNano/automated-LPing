@@ -1,6 +1,7 @@
 import { poolPriceInSol } from "../screening/aggregate";
 import { effectiveFeePct, type TrackPoint } from "../ml/outcomes";
-import type { PoolMetrics } from "../domain/types";
+import { WSOL_MINT } from "../domain/constants";
+import { feeCurrencyOf, type CollectFeeMode, type PoolMetrics } from "../domain/types";
 import type { MarketTick } from "./types";
 
 /**
@@ -35,19 +36,32 @@ export function poolFeePct(pool: PoolMetrics): number {
  * erheblich besser und kostet nichts — die Zahl steht im selben Response.
  */
 export function volumeRate24hUsd(pool: PoolMetrics): number {
-  const windows: [keyof PoolMetrics["volumeUsd"], number][] = [
-    ["m30", 48],
-    ["h1", 24],
-    ["h2", 12],
-    ["h4", 6],
-    ["h12", 2],
-    ["h24", 1],
-  ];
-  for (const [window, factor] of windows) {
-    const value = pool.volumeUsd[window];
+  return rateFromWindows(pool.volumeUsd, FAST_WINDOWS) ?? pool.volume24hUsd ?? 0;
+}
+
+/** Zeitfenster vom kürzesten zum trägsten, mit ihrem Hochrechnungsfaktor. */
+const FAST_WINDOWS: [keyof PoolMetrics["volumeUsd"], number][] = [
+  ["m30", 48],
+  ["h1", 24],
+  ["h2", 12],
+  ["h4", 6],
+  ["h12", 2],
+  ["h24", 1],
+];
+
+const SLOW_WINDOWS = [...FAST_WINDOWS].reverse();
+
+/** Erstes belegtes Fenster der Liste, hochgerechnet auf eine 24-Stunden-Rate. */
+function rateFromWindows(
+  windows: PoolMetrics["volumeUsd"] | undefined,
+  order: [keyof PoolMetrics["volumeUsd"], number][],
+): number | null {
+  if (windows === undefined) return null;
+  for (const [window, factor] of order) {
+    const value = windows[window];
     if (value !== undefined && Number.isFinite(value)) return value * factor;
   }
-  return pool.volume24hUsd ?? 0;
+  return null;
 }
 
 /**
@@ -61,19 +75,7 @@ export function volumeRate24hUsd(pool: PoolMetrics): number {
  * trägen Wert.
  */
 export function volumeRate24hUsdSlow(pool: PoolMetrics): number {
-  const windows: [keyof PoolMetrics["volumeUsd"], number][] = [
-    ["h24", 1],
-    ["h12", 2],
-    ["h4", 6],
-    ["h2", 12],
-    ["h1", 24],
-    ["m30", 48],
-  ];
-  for (const [window, factor] of windows) {
-    const value = pool.volumeUsd[window];
-    if (value !== undefined && Number.isFinite(value)) return value * factor;
-  }
-  return pool.volume24hUsd ?? 0;
+  return rateFromWindows(pool.volumeUsd, SLOW_WINDOWS) ?? pool.volume24hUsd ?? 0;
 }
 
 /** Pool-Metriken in die Beobachtungsform, die auch die Aufzeichnung schreibt. */
@@ -91,10 +93,83 @@ export function trackPointFromPool(pool: PoolMetrics): TrackPoint {
   };
 }
 
+/**
+ * Träge 24-Stunden-Volumenrate einer aufgezeichneten Beobachtung.
+ *
+ * Die Reihenfolge ist eine Rangfolge nach Trägheit: das gleitende Fenster, das
+ * `loadHistory` über die Kerzen legt, dann die Zeitfenster eines Messpunkts,
+ * zuletzt der Messwert selbst.
+ *
+ * **Ohne diesen Wert lief die EV-Prüfung des Rebalancings im Replay in genau den
+ * Fehler, für den `poolVolume24hUsdSlow` gebaut wurde** — und zwar schlimmer als
+ * live: Eine Kerze ist eine Menge über fünf Minuten, mal 288 auf einen Tag
+ * hochgerechnet. Diese Zahl über `projectionHours` zu projizieren erklärt eine
+ * Fünf-Minuten-Spitze zur Dauerannahme über zwölf Stunden.
+ */
+function slowVolumeRateOf(point: TrackPoint): number | undefined {
+  if (point.volume24hUsdSlow !== null && point.volume24hUsdSlow !== undefined) {
+    return point.volume24hUsdSlow;
+  }
+  const fromWindows = rateFromWindows(point.windows?.volume, SLOW_WINDOWS);
+  if (fromWindows !== null) return fromWindows;
+  return point.volume24hUsd ?? undefined;
+}
+
+/**
+ * Höchst- und Tiefstkurs einer Beobachtung, in SOL.
+ *
+ * Die Umrechnung ist dieselbe wie beim Schlusskurs — und **sie kann die
+ * Reihenfolge umkehren**: Steht SOL auf der X-Seite, ist der Preis in SOL
+ * `1/price_native`, und aus dem Höchstkurs wird der Tiefstkurs. Wer hier nur
+ * umrechnet und nicht neu ordnet, vertauscht bei jedem SOL/X-Pool Hoch und Tief
+ * und lässt damit den Stop-Loss gegen das Hoch prüfen.
+ */
+function extremesInSol(
+  point: TrackPoint,
+  pool: TickPool,
+): { priceHigh?: number; priceLow?: number } {
+  const ends = [point.high, point.low]
+    .map((value) => poolPriceInSol({ ...pool, priceNative: value ?? undefined }))
+    .filter((value): value is number => value !== null && value > 0);
+  if (ends.length === 0) return {};
+  return { priceHigh: Math.max(...ends), priceLow: Math.min(...ends) };
+}
+
 /** Was der Replay über den Pool wissen muss — die Zeitreihe sagt es nicht. */
 export interface TickPool {
   mintX: string;
   mintY: string;
+  /**
+   * `collect_fee_mode` des Pools. Bestimmt zusammen mit den Mints, ob geclaimte
+   * Gebühren noch einen Swap brauchen — bei `only_y` mit SOL als Token Y
+   * entfallen Konvertierungskosten vollständig.
+   */
+  collectFeeMode?: CollectFeeMode;
+  /**
+   * Reward-Mints des Pools. Leer heißt seit `lb_clmm` 0.12.0: Limit-Order-Pool,
+   * und dort zweigt Order-Liquidität einen Teil der Gebühr ab.
+   */
+  rewardMints?: string[];
+  hasFarm?: boolean;
+}
+
+/**
+ * Betreibt der Pool Liquidity Mining?
+ *
+ * Seit `lb_clmm` 0.12.0 ist das gleichbedeutend mit „unterstützt **keine** Limit
+ * Orders": Bestehende Pools ohne initialisierte Rewards wurden unumkehrbar zu
+ * Limit-Order-Pools, alle mit Rewards blieben Liquidity-Mining-Pools.
+ *
+ * `undefined`, wenn die Quelle nichts dazu sagt — dann wird der ungünstige Fall
+ * angenommen und der Limit-Order-Abschlag greift.
+ */
+function liquidityMiningOf(pool: {
+  rewardMints?: string[];
+  hasFarm?: boolean;
+}): boolean | undefined {
+  if (pool.hasFarm === true) return true;
+  if (pool.rewardMints === undefined) return pool.hasFarm;
+  return pool.rewardMints.length > 0;
 }
 
 /**
@@ -119,7 +194,30 @@ export function marketTickFromPool(
     poolFeePct: poolFeePct(pool),
     solPriceUsd: context.solPriceUsd,
     ...(pool.protocolFeePct !== undefined ? { protocolFeePct: pool.protocolFeePct } : {}),
+    ...poolEconomics(pool),
     at: context.at,
+  };
+}
+
+/**
+ * Pool-Eigenschaften, die weder Preis noch Volumen sind, aber über Kosten und
+ * Ertrag mitentscheiden: Gebührenwährung und Pooltyp.
+ *
+ * Eine Stelle für beide Tick-Pfade — sonst kennt der Live-Betrieb Größen, die
+ * dem Replay fehlen, und die Simulation bewertet in beiden Welten anders.
+ */
+function poolEconomics(pool: {
+  mintX: string;
+  mintY: string;
+  collectFeeMode?: CollectFeeMode;
+  rewardMints?: string[];
+  hasFarm?: boolean;
+}): { feeCurrency?: "quote" | "base" | "mixed"; liquidityMining?: boolean } {
+  const feeCurrency = feeCurrencyOf(pool, WSOL_MINT);
+  const liquidityMining = liquidityMiningOf(pool);
+  return {
+    ...(feeCurrency !== null ? { feeCurrency } : {}),
+    ...(liquidityMining !== undefined ? { liquidityMining } : {}),
   };
 }
 
@@ -142,6 +240,7 @@ export function marketTickFromPoint(point: TrackPoint, pool: TickPool): MarketTi
 
   const feePct = effectiveFeePct(point);
   const protocolFeePct = point.protocolFeePct;
+  const slow = slowVolumeRateOf(point);
 
   return {
     priceInSol: price,
@@ -150,9 +249,12 @@ export function marketTickFromPoint(point: TrackPoint, pool: TickPool): MarketTi
     // KONZEPT-ML.md 5.2.
     poolTvlUsd: point.tvlUsd ?? 0,
     poolVolume24hUsd: point.volume24hUsd ?? 0,
+    ...(slow !== undefined ? { poolVolume24hUsdSlow: slow } : {}),
+    ...extremesInSol(point, pool),
     poolFeePct: feePct ?? 0,
     solPriceUsd: point.solPriceUsd ?? 0,
     ...(protocolFeePct !== undefined && protocolFeePct !== null ? { protocolFeePct } : {}),
+    ...poolEconomics(pool),
     at: point.ts,
   };
 }

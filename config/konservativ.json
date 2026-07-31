@@ -38,7 +38,7 @@
   },
   "binRange": {
     "min": 50,
-    "max": 250,
+    "max": 400,
     "coverageSigmas": 1.5
   },
   "feeHarvest": {

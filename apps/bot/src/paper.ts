@@ -1,4 +1,5 @@
 import {
+  assessRegime,
   closePaperPosition,
   deployedCapitalSol,
   marketTickFromPool,
@@ -7,6 +8,8 @@ import {
   poolFeeRatePctPerDay,
   poolPriceInSol,
   positionSizeSol,
+  regimeBlocksOpening,
+  solPriceUsdOf,
   tickPaperPosition,
   valuePosition,
   volumeRate24hUsd,
@@ -16,6 +19,7 @@ import {
   type PoolMetrics,
   type PresetKind,
   type PresetPerformance,
+  type RegimeVerdict,
 } from "@lping/core";
 import type { ScanRow } from "./scan";
 
@@ -67,8 +71,30 @@ export interface PaperDeps {
   getPool(poolAddress: string): Promise<PoolMetrics>;
   /** SOL-Preis in USD (für die Umrechnung von TVL/Volumen). */
   getSolPriceUsd(): Promise<number>;
+  /**
+   * Hält das Regime-Urteil fest, falls eine Ablage vorhanden ist.
+   *
+   * Optional, weil die Beurteilung ohne Datenbank funktionieren muss. Ohne
+   * Aufzeichnung ließen sich die Schwellen aber nie kalibrieren: Erst die
+   * Historie zeigt, ob „ungünstig" tatsächlich schlechtere Ergebnisse
+   * vorhersagt — und das ist die einzige Rechtfertigung eines Tors.
+   */
+  recordRegime?: (verdict: RegimeVerdict, at: Date) => Promise<void>;
   log?: (line: string) => void;
   now?: () => Date;
+}
+
+/**
+ * Pool-TVL in SOL — Bezugsgröße des größenabhängigen Preisimpacts.
+ *
+ * Der SOL-Kurs kommt aus den Token-Angaben, die die Pool-API ohnehin
+ * mitliefert. Fehlt eine der beiden Größen, bleibt es bei der Grundslippage:
+ * Eine unbekannte Bezugsgröße wird nicht geschätzt.
+ */
+function poolTvlSolOf(pool: PoolMetrics): number | null {
+  const solPriceUsd = solPriceUsdOf(pool);
+  if (solPriceUsd === null || pool.tvlUsd === undefined || pool.tvlUsd <= 0) return null;
+  return pool.tvlUsd / solPriceUsd;
 }
 
 export interface PaperCycleResult {
@@ -86,11 +112,39 @@ export async function openFromScan(
   deps: PaperDeps,
   config: BotConfig,
   rows: ScanRow[],
-): Promise<{ opened: number; notes: string[] }> {
+): Promise<{ opened: number; notes: string[]; regime: RegimeVerdict }> {
   const log = deps.log ?? (() => {});
   const now = (deps.now ?? (() => new Date()))();
   const notes: string[] = [];
   let opened = 0;
+
+  // Die Frage vor der Pool-Auswahl: Ist heute überhaupt einer gut genug?
+  //
+  // Bewertet wird das **ganze** Kandidatenfeld, nicht nur das angenommene:
+  // Ein Regime-Urteil aus den Pools, die die Filter passiert haben, misst die
+  // Filter mit — und wäre per Konstruktion immer freundlich.
+  const regime = assessRegime(
+    rows.map((row) => ({
+      poolAddress: row.pool.poolAddress,
+      feeRatePctPerDay: poolFeeRatePctPerDay(
+        volumeRate24hUsd(row.pool),
+        poolFeePct(row.pool),
+        row.pool.tvlUsd ?? 0,
+      ),
+      volatilityPctDaily: row.volatilityPctDaily,
+    })),
+    config.global.regime,
+  );
+  await deps.recordRegime?.(regime, now);
+  log(`Regime: ${regime.status} — ${regime.reason}`);
+
+  if (regimeBlocksOpening(regime, config.global.regime)) {
+    notes.push(
+      `Kein Einstieg: Das Regime ist ungünstig (${regime.reason}). ` +
+        `Bestehende Positionen laufen weiter, die Aufzeichnung ebenfalls.`,
+    );
+    return { opened, notes, regime };
+  }
 
   const accepted = rows.filter((row) => row.screening.verdict === "accepted");
   for (const row of accepted) {
@@ -128,6 +182,9 @@ export async function openFromScan(
       // Steuert die Range-Breite: Sie folgt der Bewegung des Marktes, nicht
       // einer festen Bin-Zahl (ANALYSE.md 6, Punkt 6).
       volatilityPctDaily: row.volatilityPctDaily,
+      // Bezugsgröße des Preisimpacts beim Einstiegs-Swap. Der SOL-Kurs steht
+      // in den Token-Angaben des Pools — kein zusätzlicher Abruf nötig.
+      poolTvlSol: poolTvlSolOf(row.pool),
       at: now,
     });
 
@@ -143,13 +200,23 @@ export async function openFromScan(
       openedAt: now,
     });
     opened++;
+    // Die Klemmung gehört ins Protokoll, nicht nur in den Zustand: Eine Range
+    // an der Leitplanke ist nicht die Range, die die Volatilität verlangt, und
+    // das ist beim Öffnen die einzige Gelegenheit, es zu bemerken.
+    const clampNote =
+      state.binWidthClamped === "max"
+        ? ` ⚠ Breite an binRange.max geklemmt (nötig: ${state.binWidthDerived})`
+        : state.binWidthClamped === "min"
+          ? ` ⚠ Breite an binRange.min geklemmt (nötig: ${state.binWidthDerived})`
+          : "";
     log(
       `+ ${row.preset}: ${row.pool.name ?? row.pool.poolAddress.slice(0, 10)} ` +
-        `${depositSol.toFixed(3)} SOL, Bins ${state.minBinId}…${state.maxBinId}, Score ${row.screening.score.total}`,
+        `${depositSol.toFixed(3)} SOL, Bins ${state.minBinId}…${state.maxBinId}, Score ${row.screening.score.total}` +
+        clampNote,
     );
   }
 
-  return { opened, notes };
+  return { opened, notes, regime };
 }
 
 /** Aktualisiert alle offenen Positionen mit frischen Marktdaten. */
@@ -217,7 +284,12 @@ export async function tickOpenPositions(
       continue;
     }
 
-    const closeResult = closePaperPosition(result.state, tick.priceInSol, config.global);
+    // Der Ausstiegs-Swap ist der größte im Leben einer Position — seine
+    // Slippage hängt an ihrer Größe gegenüber dem Pool.
+    const closeResult = closePaperPosition(result.state, tick.priceInSol, config.global, {
+      preset,
+      poolTvlSol: tick.solPriceUsd > 0 ? tick.poolTvlUsd / tick.solPriceUsd : null,
+    });
     await deps.store.close({
       positionId: position.id,
       state: closeResult.state,

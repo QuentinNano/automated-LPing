@@ -187,3 +187,38 @@ describe("poolFeeRatePctPerDay", () => {
     expect(poolFeeRatePctPerDay(1_000_000, 0, 200_000)).toBe(0);
   });
 });
+
+describe("Preissturz aus den Kerzen-Extrema", () => {
+  const input = (history: PoolObservation[]) => ({
+    history,
+    exit,
+    entryFeeRatePctPerDay: 10,
+    depositSol: 1,
+    ageMs: 3_600_000,
+    rangeReached: true,
+  });
+
+  it("sieht einen Sturz, der sich innerhalb des Intervalls wieder erholt hat", () => {
+    // Über Schlusskurse gemessen ist hier nichts passiert: 1,00 → 1,00.
+    const nurSchluss = [obs(0), obs(15), obs(30)];
+    expect(evaluatePoolExit(input(nurSchluss))).toBeNull();
+
+    // Tatsächlich fiel der Preis zwischendurch um 40 %. Die Position hat das
+    // voll mitgemacht — die Abtastung nicht.
+    const mitDocht = [obs(0), obs(15), obs(30, { priceLow: 0.6 })];
+    expect(evaluatePoolExit(input(mitDocht))).toBe("price_crash");
+  });
+
+  it("misst das Fensterhoch ebenfalls aus den Extrema", () => {
+    // Schlusskurse bleiben bei 1,00, aber ein früheres Hoch lag bei 1,40 —
+    // gemessen daran ist der aktuelle Stand ein Rückgang von 28 %.
+    const history = [obs(0, { priceHigh: 1.4 }), obs(15), obs(30)];
+    expect(evaluatePoolExit(input(history))).toBe("price_crash");
+  });
+
+  it("fällt ohne Extrema exakt auf das frühere Verhalten zurück", () => {
+    const ohne = [obs(0), obs(15), obs(30, { priceInSol: 0.7 })];
+    const mit = [obs(0), obs(15), obs(30, { priceInSol: 0.7, priceLow: 0.7, priceHigh: 0.7 })];
+    expect(evaluatePoolExit(input(ohne))).toBe(evaluatePoolExit(input(mit)));
+  });
+});

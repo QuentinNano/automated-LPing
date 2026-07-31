@@ -43,6 +43,20 @@ export interface TrackPoint {
   tvlUsd: number | null;
   fees24hUsd: number | null;
   volume24hUsd: number | null;
+  /**
+   * Volumen als 24-Stunden-Rate aus einem **trägen** Fenster.
+   *
+   * Gegenstück zu `volume24hUsd`, das bei Kerzen die Menge eines einzelnen
+   * Intervalls hochrechnet (5 Minuten × 288). Für den Gebühren-Akkrual über
+   * genau dieses Intervall ist das richtig. Für **Projektionen** über Stunden
+   * ist es falsch — dort wird eine Fünf-Minuten-Spitze zur Dauerannahme, und
+   * genau das öffnete die EV-Prüfung vor jedem Rebalance.
+   *
+   * `loadHistory` füllt das Feld mit einem gleitenden Mittel über die
+   * zurückliegenden 24 Stunden. Ein Messpunkt braucht es nicht: Seine
+   * `windows` enthalten die trägen Fenster bereits.
+   */
+  volume24hUsdSlow?: number | null;
   /** Gesamtgebühr (Basis + Volatilitätsaufschlag) zum Messzeitpunkt, in %. */
   dynamicFeePct?: number | null;
   baseFeePct?: number | null;

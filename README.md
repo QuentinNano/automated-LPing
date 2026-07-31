@@ -67,6 +67,7 @@ pnpm --filter @lping/web dev      # Oberfläche → http://localhost:3000
 
 | Befehl | Wozu |
 |---|---|
+| `pnpm --filter @lping/bot calibrate -- --wallet <Adresse>` | **Misst die Engine an echten Positionen.** Der einzige Weg, die Ertragsannahmen zu prüfen statt sie zu setzen |
 | `pnpm --filter @lping/bot api:check` | **Erste Anlaufstelle bei API-Problemen.** Zeigt, welche Schnittstelle antwortet und welche Felder ankommen |
 | `pnpm --filter @lping/bot validate` | Konfiguration prüfen |
 | `pnpm --filter @lping/bot health` | Erreichbarkeit aller Adapter |
@@ -93,6 +94,10 @@ pnpm abspielen -- --pool <Adresse>                    # ein einzelner Pool
 # Stresstest (braucht kein Netzwerk und keine Datenbank)
 pnpm stresstest -- --preset balanced --runs 3000
 
+# Kalibrierung gegen echte Positionen (braucht Netzwerk, keine Datenbank)
+pnpm --filter @lping/bot calibrate -- --wallet <Adresse>
+pnpm --filter @lping/bot calibrate -- --wallet <Adresse> --pool <Adresse> --max 50
+
 # Nachladen
 pnpm nachladen -- --status                            # Bestand der Historie
 pnpm nachladen -- --timeframe 1h                      # gröber, weniger Zeilen
@@ -115,15 +120,17 @@ bash scripts/backup.sh zurueck backups/DATEI
 
 ```
 apps/
-  bot/      CLI: validate, health, scan, paper, track, backfill, replay
+  bot/      CLI: validate, health, scan, paper, track, backfill, replay,
+            stress, calibrate
   web/      Next.js-UI: Preset-Vergleich, Positionen, Scanner, Parameter
 packages/
   core/     Pure Domänenlogik ohne Netzwerk: Config-Schemas + versionierter
             ConfigService, Screening/Scoring, Paper-Engine (Bin-Modell, Fees,
-            PnL, HODL-Benchmark), Replay-Engine, ML-Merkmale und -Labels
+            PnL, HODL-Benchmark), Replay-Engine, Regime-Beurteilung,
+            Ground-Truth-Kalibrierung, ML-Merkmale und -Labels
   adapters/ Meteora-API, DexScreener, RugCheck, Jupiter; HTTP-Infrastruktur
             (Retry/Backoff, Rate-Limiting, zod-Validierung)
-  db/       Prisma-Schema (12 Tabellen), Migrationen, Repositories
+  db/       Prisma-Schema (13 Tabellen), Migrationen, Repositories
 config/     global.json + eine Datei je Preset
 ```
 
@@ -305,6 +312,15 @@ Bei Datenbankproblemen: `docker compose up -d postgres`, dann `pnpm db:migrate`
 
 **Als Nächstes:**
 
+0. **Kalibrierung gegen echte Positionen** (`pnpm --filter @lping/bot calibrate`).
+   Der Replay prüft, ob die Engine ihre eigenen Regeln konsistent anwendet — er
+   kann nicht prüfen, ob ihre **Annahmen** stimmen. `poolLiquidityBins`,
+   `feeShareHaircutPct` und der Limit-Order-Abschlag wirken gemeinsam als ein
+   Faktor unbekannter Größe auf der gesamten Ertragsseite. Fremde Positionen
+   sind öffentlich abfragbar und machen ihn messbar, ohne Kapital und ohne RPC.
+   Vor M3, weil eine Sensitivitätsanalyse über einen unkalibrierten Faktor vor
+   allem das eigene Rauschen misst.
+
 1. **Sensitivitätsanalyse** (KONZEPT-ML.md M3) — welche Parameter überhaupt etwas
    bewirken, und ob ein Ergebnis an den Daten hängt oder an den Modellannahmen.
    Der wirksamste Einzelschritt gegen Überanpassung.
@@ -321,6 +337,8 @@ sie würden sonst ungeprüft live gehen:
 |---|---|
 | **Risk Manager nicht scharf:** Kill-Switch, globale Positions- und Exposure-Grenzen und Verlustlimits sind konfigurierbar, werden aber von keiner Logik durchgesetzt. (Die positionsbezogenen Notfall-Schwellen sind seit `exit.*` scharf — die portfolioweiten nicht) | KONZEPT.md 6.3, 9 |
 | **Keine On-Chain-Reads:** Authorities kommen nur von RugCheck; die Token-2022-Prüfung und die LP-Dominanz fehlen ganz | KONZEPT.md 5.1 |
-| **Exit-Slippage pauschal** statt größen- und liquiditätsabhängig — der Verlust-Tail der Simulation ist dadurch zu freundlich | KONZEPT.md 13 |
+| **Slippage-Impact geschätzt, nicht gemessen:** Die Größenabhängigkeit ist seit `swapImpactFactor` da, ihr Faktor ist aber eine Annahme. Die Jupiter-Roundtrip-Prüfung könnte ihn kalibrieren — sie filtert bislang nur | KONZEPT-ML.md 6.1 |
+| **Limit-Order-Anteil geschätzt:** Seit `lb_clmm` 0.12.0 zweigt Order-Liquidität einen Teil der Gebühr ab. Der Abschlag ist als eigene Annahme geführt, aber nicht gemessen | KONZEPT-ML.md 6.1 |
 | **Shadow-Tracking wird erfasst, aber nicht ausgewertet** (Filter-Güte) | KONZEPT.md 5.5 |
+| **Regime-Schwellen ungeprüft:** Das Tor blockiert bereits, seine Schwellen sind aber gesetzt und nicht kalibriert. `regime_snapshots` sammelt die Grundlage | KONZEPT-ML.md 6.1 |
 | **Web-UI ohne Authentifizierung** | KONZEPT.md 11 |

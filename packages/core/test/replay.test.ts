@@ -101,6 +101,46 @@ describe("replayPosition", () => {
     expect(position!.valuation.pnlPct).toBeLessThanOrEqual(-balanced.preset.stopLossPct);
   });
 
+  it("leitet die Range-Breite aus der Volatilität ab statt aus der Mitte von binRange", () => {
+    // Der Befund, den das behebt: Der Replay rief `openPaperPosition` ohne
+    // Volatilität, `deriveBinWidth` fiel auf die Mitte von binRange zurück, und
+    // damit simulierte der Replay eine feste Breite, während live die
+    // hergeleitete läuft.
+    const mitte = Math.round(
+      (balanced.preset.binRange.min + balanced.preset.binRange.max) / 2,
+    );
+
+    // Ein Verlauf mit spürbarer Bewegung vor dem Einstieg.
+    const vorlauf = Array.from({ length: 40 }, (_, i) =>
+      point(i * 5, 0.001 * (1 + 0.06 * Math.sin(i * 1.7))),
+    );
+    const series = [...vorlauf, ...Array.from({ length: 40 }, (_, i) => point(200 + i * 5, 0.001))];
+
+    const spaet = replayPosition(series, pool, balanced, 39)!;
+    expect(spaet.state.binWidthDerived).not.toBeNull();
+    expect(spaet.state.bins.length).not.toBe(mitte);
+    expect(spaet.state.bins.length).toBe(
+      Math.min(
+        balanced.preset.binRange.max,
+        Math.max(balanced.preset.binRange.min, spaet.state.binWidthDerived!),
+      ),
+    );
+  });
+
+  it("schätzt die Volatilität nur aus der Vergangenheit — kein Look-Ahead", () => {
+    // Ruhiger Vorlauf, wilde Zukunft. Wüsste die Herleitung von der Zukunft,
+    // fiele die Range breiter aus.
+    const ruhig = Array.from({ length: 30 }, (_, i) => point(i * 5, 0.001));
+    const wild = Array.from({ length: 30 }, (_, i) =>
+      point(150 + i * 5, 0.001 * (1 + 0.3 * Math.sin(i * 2.3))),
+    );
+
+    const nurRuhig = replayPosition(ruhig, pool, balanced, 29)!;
+    const mitZukunft = replayPosition([...ruhig, ...wild], pool, balanced, 29)!;
+
+    expect(mitZukunft.state.bins.length).toBe(nurRuhig.state.bins.length);
+  });
+
   it("markiert am Datenende abgeschnittene Positionen als zensiert", () => {
     // Der Verlauf endet, bevor irgendeine Exit-Regel greift.
     const position = replayPosition(flatSeries(4), pool, balanced);
@@ -271,17 +311,78 @@ describe("Gleichheit Replay ↔ Live", () => {
     return { live, replay };
   }
 
-  it("beide Wege ergeben denselben Tick", () => {
+  /**
+   * Felder, die sich zwischen den Wegen unterscheiden **dürfen** — jedes mit
+   * seinem Grund. Alles andere muss übereinstimmen.
+   *
+   * Diese Liste ist der eigentliche Test. Vorher zählte er Feld für Feld auf,
+   * was gleich sein soll, und übersah damit zwangsläufig jedes **neue** Feld:
+   * `poolVolume24hUsdSlow` kam hinzu, wurde im Replay nie gesetzt, und die
+   * EV-Prüfung des Rebalancings fiel dort auf das kürzeste Volumenfenster
+   * zurück — der Fehler, gegen den das Feld eingeführt worden war. Umgekehrt
+   * formuliert schlägt der Test bei jedem neuen Feld an, bis jemand entscheidet,
+   * ob es gleich sein muss.
+   */
+  const DARF_ABWEICHEN: Record<string, string> = {
+    poolVolume24hUsd:
+      "Live aus dem kürzesten Fenster hochgerechnet, im Replay steht die Rate " +
+      "bereits in der Zeitreihe — dieselbe Größe, andere Umrechnungsstelle",
+  };
+
+  it("beide Wege ergeben in jedem Feld denselben Tick", () => {
     const { live, replay } = bothTicks();
 
     expect(live).not.toBeNull();
     expect(replay).not.toBeNull();
-    expect(replay!.priceInSol).toBeCloseTo(live!.priceInSol, 15);
-    expect(replay!.poolFeePct).toBeCloseTo(live!.poolFeePct, 12);
-    expect(replay!.poolTvlUsd).toBeCloseTo(live!.poolTvlUsd, 6);
-    expect(replay!.protocolFeePct).toBe(live!.protocolFeePct);
-    expect(replay!.solPriceUsd).toBe(live!.solPriceUsd);
-    expect(replay!.at).toEqual(live!.at);
+
+    const keys = new Set([...Object.keys(live!), ...Object.keys(replay!)]);
+    const abweichungen: string[] = [];
+    for (const key of keys) {
+      if (key in DARF_ABWEICHEN) continue;
+      const a = live![key as keyof typeof live];
+      const b = replay![key as keyof typeof replay];
+      const gleich =
+        typeof a === "number" && typeof b === "number"
+          ? Math.abs(a - b) <= Math.abs(a) * 1e-12
+          : JSON.stringify(a) === JSON.stringify(b);
+      if (!gleich) abweichungen.push(`${key}: live=${String(a)} replay=${String(b)}`);
+    }
+    expect(abweichungen).toEqual([]);
+
+    // Beide Wege müssen dieselben Felder überhaupt kennen.
+    expect(Object.keys(replay!).sort()).toEqual(Object.keys(live!).sort());
+  });
+
+  it("das träge Volumenfenster kommt in beiden Wegen an", () => {
+    // Der konkrete Regressionsfall: Ohne diesen Wert projiziert das EV-Tor des
+    // Rebalancings die kürzeste verfügbare Volumenspitze über Stunden.
+    const { live, replay } = bothTicks({ volumeUsd: { m30: 25_000, h24: 600_000 } });
+    expect(live!.poolVolume24hUsdSlow).toBe(600_000);
+    expect(replay!.poolVolume24hUsdSlow).toBe(600_000);
+    // Und es ist wirklich das träge, nicht das schnelle Fenster.
+    expect(live!.poolVolume24hUsd).toBe(25_000 * 48);
+  });
+
+  it("Hoch und Tief kommen in SOL an — bei SOL auf der X-Seite vertauscht", () => {
+    const basis = point(0, 0.001, { high: 0.0012, low: 0.0008 });
+
+    const normal = marketTickFromPoint(basis, { mintX: TOKEN_MINT, mintY: WSOL_MINT })!;
+    expect(normal.priceHigh).toBeCloseTo(0.0012, 12);
+    expect(normal.priceLow).toBeCloseTo(0.0008, 12);
+
+    // SOL ist Token X: Der Preis in SOL ist 1/price_native, und damit wird aus
+    // dem Höchst- der Tiefstkurs. Ohne die Neuordnung prüfte der Stop-Loss
+    // gegen das Hoch statt gegen das Tief.
+    const invertiert = marketTickFromPoint(basis, { mintX: WSOL_MINT, mintY: TOKEN_MINT })!;
+    expect(invertiert.priceHigh).toBeCloseTo(1 / 0.0008, 6);
+    expect(invertiert.priceLow).toBeCloseTo(1 / 0.0012, 6);
+    expect(invertiert.priceHigh!).toBeGreaterThan(invertiert.priceLow!);
+  });
+
+  it("ohne Extrema bleiben die Felder leer statt geraten", () => {
+    const ohne = marketTickFromPoint(point(0, 0.001), pool)!;
+    expect(ohne.priceHigh).toBeUndefined();
+    expect(ohne.priceLow).toBeUndefined();
   });
 
   it("auch für Pools mit SOL auf der X-Seite", () => {

@@ -242,8 +242,9 @@ Positionslogik** — sie ruft `openPaperPosition`, `tickPaperPosition` und
 | Tick-Reader aus der Datenbank | ✅ `loadSeries()` — ein Pfad für Replay **und** Labels |
 | Einstiege an beliebigen Zeitpunkten | ✅ `replayEntries` mit einstellbarem Abstand |
 | Determinismus | ✅ keine Wanduhr, kein Zufall; durch Tests festgehalten |
-| Gleichheit Replay ↔ Live | ✅ beide Wege bauen ihren Tick an derselben Stelle, ein Test hält sie aneinander |
-| `high`/`low` für Zeit-in-Range | offen (Abschnitt 5.3) — bei den Labels bereits genutzt |
+| Gleichheit Replay ↔ Live | ✅ beide Wege bauen ihren Tick an derselben Stelle; der Test vergleicht **alle** Tick-Felder und führt die zulässigen Abweichungen mit Begründung auf |
+| `high`/`low` für Zeit-in-Range | ✅ Überlappungsanteil statt Abtastung (Abschnitt 5.3); offen bleibt allein der Bin-Zustand |
+| Range-Breite im Replay | ✅ aus `realizedVolatilityPctDaily` über ein **rückwärts** gerichtetes Fenster — vorher fiel der Replay auf die Mitte von `binRange` zurück und simulierte damit eine andere Strategie als der Live-Pfad |
 
 **Nicht verhandelbar:** Replay und Live-Betrieb nutzen denselben Codepfad. Gäbe
 es zwei Implementierungen, optimierte man gegen die eine und handelte mit der
@@ -298,8 +299,25 @@ bestraft, die sie nicht überlebt hätte. `high`/`low` je Kerze machen aus einer
 Stichprobe ein Intervall.
 
 Bei den **Labels** ist das umgesetzt: `maxDrawdownPct` nutzt `low`, wo es
-vorliegt, und misst den Einbruch, statt ihn zu verpassen. In der Engine steht es
-noch aus.
+vorliegt, und misst den Einbruch, statt ihn zu verpassen.
+
+**In der Engine inzwischen ebenfalls**, an den drei Stellen, an denen ein
+Intervall etwas anderes aussagt als sein Endpunkt:
+
+| Größe | vorher | jetzt |
+|---|---|---|
+| Zeit in Range | ja/nein am Intervallende | **Überlappungsanteil** von [Tief, Hoch] mit der Range, in log-Preisen |
+| Stop-Loss und Preissturz | nur am Schlusskurs | zusätzlich am **Tief**; löst der Ausstieg erst dort aus, wird die Position auch dort bewertet |
+| „Range erreicht" (einseitig) | nur am Schlusskurs | auch per Docht — eine Leiter, die der Preis kurz berührt hat, **hat** gekauft |
+
+Nicht umgesetzt und bewusst offen: der **Bin-Zustand** folgt weiter dem
+Schlusskurs. Ob der Preis innerhalb einer Kerze erst zum Hoch und dann zum Tief
+lief oder umgekehrt, steht nirgends — und die beiden Reihenfolgen ergeben
+verschiedene Bestände. Eine Reihenfolge zu raten hieße, eine Verzerrung
+unbekannter Richtung einzubauen; die drei Größen oben haben dagegen eine
+eindeutige Lesart. Der verbleibende Fehler unterschätzt damit weiterhin
+Bin-Überquerungen, also **beides**: realisierten Impermanent Loss und
+Gebührenanfall.
 
 ### 5.4 Zensierte Positionen zählen anders
 
@@ -341,14 +359,82 @@ hängt, ist keins:
 |---|---|
 | `poolLiquidityBins` | Skaliert den Gebührenanteil linear und entscheidet, ob sich Konzentration auszahlt. **Gemessen: Faktor 14 zwischen 10 und 140** — der Default steht deshalb auf dem konservativen 30 statt 70 |
 | `feeShareHaircutPct` | Pauschaler Sicherheitsabschlag auf den Gebührenanteil |
+| `limitOrderShareHaircutPct` | Was Limit-Order-Liquidität von der Handelsgebühr abzweigt. Seit `lb_clmm` 0.12.0 ist jeder Pool ohne Rewards ein Limit-Order-Pool — also praktisch jeder Zielpool. Messbar aus den `/positions/.../historical`-Events |
 | TVL-Forttragen (6 h) | Bestimmt, welche nachgeladenen Zeiträume überhaupt Gebühren buchen (5.2) |
-| `costs.swapSlippagePct` | Der größte variable Kostenposten, derzeit größenunabhängig |
+| `costs.swapSlippagePct` | Grundslippage je Swap, größenunabhängig |
+| `swapImpactFactor` | Preisimpact je Anteil am Pool-TVL. Trifft vor allem den Ausstiegs-Swap und damit den Verlust-Tail. Messbar über die Jupiter-Roundtrip-Prüfung, die heute nur filtert |
+| `costs.priorityFeeSol` | Nicht der größte Posten, aber der einzige, der in Stressphasen um Größenordnungen springt — und Stressphasen sind die, in denen die Ausstiege feuern |
 | `rebalance.projectionHours` | Über welchen Zeitraum der Zusatzertrag eines Rebalances gilt. Vorher implizit die gesamte Restlaufzeit — das öffnete das EV-Tor vollständig |
 | Abtastraster (`tickMinutes`) | Verschiebt Zeit-in-Range und Ergebnis um mehrere Prozentpunkte; die Richtung ist **nicht** offensichtlich und gehört gemessen |
+
+Eine Beobachtung aus der Messung, die gegen die Erwartung läuft: Gebühren in den
+**überquerten** Bins statt nur im aktiven zu verteilen, erhöht den Ertrag nicht
+durchgehend. Bei kleinen Bewegungen sinkt er sogar (−12 % bei ±5 %), weil eine
+Position, die breiter ist als die unterstellte Fremdverteilung, pro berührtem
+Bin weniger beisteuert als die Konkurrenz. Erst wenn der Preis über die eigene
+Range hinausläuft, dreht es (+57 % bei ±15 %). Die Richtung hängt damit am
+Verhältnis von Positionsbreite zu `poolLiquidityBins` — was beide Annahmen
+aneinanderkoppelt und ein weiteres Argument dafür ist, `poolLiquidityBins` zu
+**messen** statt zu schätzen.
 
 Die Sensitivitätsanalyse variiert sie wie jeden anderen Parameter. Anders als
 diese werden sie danach aber **nicht optimiert**, sondern auf dem konservativen
 Ende festgesetzt. Einen Modellfehler zu „optimieren" heißt, ihn auszunutzen.
+
+### 6.1b Die Ausnahme: was sich messen lässt, wird gemessen
+
+Für drei dieser Annahmen — `poolLiquidityBins`, `feeShareHaircutPct` und
+`limitOrderShareHaircutPct` — gilt der Satz „konservativ festsetzen" nur so
+lange, wie sie unmessbar sind. Sie sind es nicht mehr.
+
+Die DLMM-Positions-Endpunkte sind **öffentlich**: `/portfolio` nennt die Pools
+eines Wallets, `/positions/{pool}/pnl` seine Positionen mit Zeitraum, Einsatz,
+Bin-Range und Gebührenertrag. Damit lässt sich jede fremde Position durch die
+eigene Engine schicken und der Gebührenertrag vergleichen —
+`pnpm --filter @lping/bot calibrate -- --wallet <Adresse>`.
+
+Was dabei herauskommt, ist **nicht** der Wert der drei Annahmen einzeln; aus
+einer Beobachtung sind sie nicht zu trennen. Was herauskommt, ist ihr Produkt,
+ausgedrückt als der `poolLiquidityBins`-Wert, der die Lücke schließt. Genau das
+ist die Größe, die zählt: Ob die Simulation um Faktor 3 zu großzügig oder zu
+streng rechnet, entscheidet über jede Aussage zur Profitabilität — welche der
+drei Annahmen den Fehler trägt, ist demgegenüber zweitrangig.
+
+Zwei Vorbehalte, die zum Verfahren gehören:
+
+1. **Der TVL wird fortgetragen.** Die Historien-Endpunkte liefern keinen TVL;
+   die Kalibrierung nimmt den heutigen. Ein Pool, dessen Liquidität sich seither
+   halbiert hat, verschiebt den Faktor um denselben Betrag. Deshalb sind kurze,
+   junge Zeiträume vorzuziehen und der Median über viele Positionen belastbarer
+   als jeder Einzelfall.
+2. **Ohne Bin-Range kein Fall.** Positionen, deren Antwort die Range nicht
+   ausweist, werden übersprungen statt geschätzt. Ein Vergleich auf geratener
+   Breite sähe aus wie eine Messung und wäre keine.
+
+### 6.1c Regime statt Auswahl: die vorgelagerte Frage
+
+Screening und Score beantworten „welcher Pool ist der beste?". Sie beantworten
+nicht „ist heute überhaupt einer gut genug?" — und aus einem Feld schlechter
+Kandidaten wählt der Score zuverlässig den besten schlechten aus und eröffnet
+ihn.
+
+Die Bedingung, unter der LPing trägt, ist dieselbe wie beim einzelnen Pool:
+Gebührenertrag über Varianzverlust. Über die Kandidaten eines Durchgangs
+aggregiert (Median, nicht Mittelwert — ein Ausreißer soll den Markt nicht
+drehen) ergibt sie ein Urteil über das **Regime**, und ein Tor davor wirkt auf
+alle Presets gleichzeitig. Das ist der billigste verfügbare Hebel: Er kostet
+keine Kalenderzeit, während jede Parametersuche erst einen Datensatz braucht
+und danach nur ein Preset verbessert.
+
+Bewertet wird das **ganze** Kandidatenfeld, auch das abgelehnte. Ein Urteil aus
+den Pools, die die Filter passiert haben, misst die Filter mit und wäre per
+Konstruktion immer freundlich.
+
+Die Schwellen (`adverseBelow`, `favourableAbove`) sind gesetzt, nicht gemessen.
+`regime_snapshots` zeichnet deshalb **jedes** Urteil auf, auch wenn es nicht
+blockiert hat: Erst diese Reihe zeigt, ob „ungünstig" tatsächlich schlechtere
+Ergebnisse vorhersagt — und damit, ob das Tor mehr nützt als es an Einstiegen
+kostet. Ein Tor, das nie gemessen wird, ist eine Behauptung.
 
 ### 6.1a Zwei Wege, zwei Fragen: Replay und Stresstest
 
@@ -570,7 +656,7 @@ ihre Variation nicht stabil ist, ist ein Ergebnis über den Simulator und nicht
 | Meilenstein | Inhalt | Stand |
 |---|---|---|
 | **M1 — Aufzeichnung** | `tracked_pools`, `candidate_features`, `candidate_outcomes`, `pool_snapshots`, `pool_history_candles`; `track`- und `backfill`-Kommando; Merkmalsschema v2 mit allen Zeitfenstern, Gebührenstruktur und Organic Score; Sammelabruf über `filter_by`; Prüfbericht mit Lücken- und Rückstandsüberwachung | ✅ |
-| **M2 — Replay** | `loadSeries()` als ein Lesepfad für Replay und Labels; Replay über dieselbe Paper-Engine; Einstiege an beliebigen Zeitpunkten; Determinismus; Gleichheitstest gegen den Live-Pfad; `replay`-Kommando mit Preset-Vergleich | ✅ (offen: `high`/`low` für Zeit-in-Range) |
+| **M2 — Replay** | `loadSeries()` als ein Lesepfad für Replay und Labels; Replay über dieselbe Paper-Engine; Einstiege an beliebigen Zeitpunkten; Determinismus; feldweise vollständiger Gleichheitstest gegen den Live-Pfad; Range-Breite und träges Volumenfenster auch im Replay; `high`/`low` für Zeit-in-Range und Ausstieg; `replay`-Kommando mit Preset-Vergleich | ✅ |
 | **M3 — Sensitivität** | Einzelparameter-Analyse **inklusive der Modellannahmen** (6.1), Auswahl der 5–10 relevanten, Bericht | **teilweise** — `pnpm stresstest` fährt Modellannahmen, Strategie-Stellschrauben, Marktbedingungen und eine Regime-Landkarte auf synthetischen Pfaden. Offen: dieselbe Analyse auf den **aufgezeichneten** Verläufen |
 | **M4 — Suche** | Zufallssuche und Verfeinerung, Zielfunktion, Plateau-Bewertung | offen |
 | **M5 — Validierung** | Vorwärts-Testen, Sperrzonen, Mehrfachtestkorrektur, Zufallsvergleich | offen, mit M4 |

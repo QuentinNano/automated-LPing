@@ -1,7 +1,13 @@
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
-import { ConfigValidationError, type AdapterHealth, type BotConfig } from "@lping/core";
+import {
+  ConfigValidationError,
+  assessSizes,
+  regimeBlocksOpening,
+  type AdapterHealth,
+  type BotConfig,
+} from "@lping/core";
 import {
   AdapterError,
   DexScreenerAdapter,
@@ -40,6 +46,7 @@ import {
   stressBatch,
   type StressSummary,
 } from "./stress";
+import { formatCalibration, runCalibration } from "./calibrate";
 import { formatScanTable, runScan, type ScanDeps } from "./scan";
 import {
   formatComparison,
@@ -80,11 +87,13 @@ async function main(): Promise<number> {
       return cmdReplay(process.argv.slice(3));
     case "stress":
       return cmdStress(process.argv.slice(3));
+    case "calibrate":
+      return cmdCalibrate(process.argv.slice(3));
     default:
       console.error(
         `Unbekanntes Kommando: ${command}\n` +
           `Verfügbar: validate | health | scan | paper | track | backfill | replay |\n` +
-            `            stress | api:check | fabriq:check <URL>`,
+            `            stress | calibrate | api:check | fabriq:check <URL>`,
       );
       return 2;
   }
@@ -116,6 +125,17 @@ function cmdValidate(): number {
         `Halten max ${preset.maxHoldHours}h`,
     );
   }
+  // Trägt jede Positionsgröße ihre eigenen On-Chain-Fixkosten? Die Prüfung gab
+  // es als Funktion schon, nur rief sie niemand auf — und eine Position, die
+  // vor dem ersten Tick im Rückstand ist, fällt sonst nirgends auf.
+  const sizeWarnings = assessSizes(config.presets, config.global);
+  if (sizeWarnings.length > 0) {
+    console.warn("\n⚠ Positionsgrößen, die ihre On-Chain-Fixkosten kaum tragen:");
+    for (const warning of sizeWarnings) {
+      console.warn(`  ${warning.preset.padEnd(12)}: ${warning.reason}`);
+    }
+  }
+
   if (!config.global.paperTrading) {
     console.warn("\n⚠ paperTrading ist deaktiviert — dieser Stand darf noch nicht live handeln (Phase 1)!");
   }
@@ -256,6 +276,19 @@ async function cmdPaper(args: string[]): Promise<number> {
       const withPrice = pairs.find((p) => p.priceUsd !== undefined && p.priceUsd > 0);
       if (withPrice?.priceUsd === undefined) throw new Error("SOL-Preis nicht ermittelbar");
       return withPrice.priceUsd;
+    },
+    // Das Regime-Urteil wird immer festgehalten, auch wenn es nicht blockiert:
+    // Ohne diese Reihe ließe sich nie prüfen, ob das Tor mehr nützt als kostet.
+    recordRegime: async (verdict, at) => {
+      const db = await import("@lping/db");
+      const prisma = db.createPrisma();
+      await new db.ScanRepo(prisma).recordRegime({
+        status: verdict.status,
+        medianYieldPerVariance: verdict.medianYieldPerVariance,
+        sampled: verdict.sampled,
+        skipped: verdict.skipped,
+        blockedOpening: regimeBlocksOpening(verdict, config.global.regime),
+      });
     },
     log: (line) => console.log(`  ${line}`),
   };
@@ -701,6 +734,60 @@ function intFlag(args: string[], name: string): number | undefined {
  * verschieben kann, misst jede Parametersuche darüber vor allem das eigene
  * Rauschen.
  */
+/**
+ * Kalibrierung gegen echte Positionen.
+ *
+ * Die Antwort auf die Frage, die der Replay nicht beantworten kann: Stimmen die
+ * Annahmen? Braucht ein Wallet, das auf Meteora Liquidität stellt — die
+ * Positions-Endpunkte sind öffentlich, es geht auch ein fremdes.
+ */
+async function cmdCalibrate(argv: string[]): Promise<number> {
+  const wallet = stringFlag(argv, "--wallet");
+  if (wallet === undefined) {
+    console.error(
+      "Ein Wallet wird gebraucht:\n" +
+        "  pnpm --filter @lping/bot calibrate -- --wallet <Adresse> [--pool <Adresse>]\n" +
+        "                                       [--preset balanced] [--max 25]\n\n" +
+        "Die Positions-Endpunkte sind öffentlich — jedes Wallet, das auf Meteora\n" +
+        "Liquidität stellt, ist eine Messreihe. Eigenes Kapital braucht es nicht.",
+    );
+    return 2;
+  }
+
+  let config: BotConfig;
+  try {
+    config = loadDefaultsFromDir(configDir);
+  } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      console.error(error.message);
+      return 1;
+    }
+    throw error;
+  }
+
+  const presetId = stringFlag(argv, "--preset");
+  const pool = stringFlag(argv, "--pool");
+  const max = intFlag(argv, "--max");
+
+  try {
+    const report = await runCalibration(
+      { meteora: new MeteoraAdapter(), log: (line) => console.log(`  ${line}`) },
+      config,
+      {
+        wallet,
+        ...(pool !== undefined ? { pool } : {}),
+        ...(presetId !== undefined ? { presetId } : {}),
+        ...(max !== undefined ? { maxPositions: max } : {}),
+      },
+    );
+    console.log("\n" + formatCalibration(report, config.presets[report.preset]!));
+    return 0;
+  } catch (error) {
+    console.error("\n" + explainFailure(error));
+    return 1;
+  }
+}
+
 function cmdStress(argv: string[]): number {
   let config: BotConfig;
   try {

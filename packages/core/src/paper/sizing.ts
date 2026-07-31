@@ -73,3 +73,54 @@ export function assessSize(preset: PresetConfig, global: GlobalConfig): SizeViab
     viable: fixedCostPct <= 2 && worstCasePct <= 5,
   };
 }
+
+export interface SizeWarning extends SizeViability {
+  preset: string;
+  /** Ausformulierter Befund — die Zahlen allein sagen nicht, was daran stört. */
+  reason: string;
+}
+
+/**
+ * Presets, deren Positionsgröße ihre eigenen On-Chain-Fixkosten nicht trägt.
+ *
+ * **Warum das eine eigene Funktion ist.** `assessSize` gab es schon, sie war
+ * exportiert und getestet — und wurde von keinem Produktionspfad aufgerufen.
+ * Eine Prüfung, die niemand ausführt, ist keine Prüfung; sie erweckt nur den
+ * Eindruck, die Frage sei geklärt. Das Schema kann sie nicht ersetzen, weil die
+ * Grenze von `paper.costs.priorityFeeSol` abhängt und damit von der globalen
+ * Konfiguration, nicht vom Preset allein.
+ *
+ * Bewusst eine **Warnung**, keine Ablehnung: Die Schwellen (2 % laufend, 5 % im
+ * ungünstigen Fall) sind eine begründete Faustregel, kein Naturgesetz — und im
+ * Paper-Betrieb ist eine zu kleine Position ein Erkenntnisproblem, kein
+ * Sicherheitsproblem. Vor echtem Kapital ist sie beides.
+ */
+export function assessSizes(
+  presets: Record<string, PresetConfig>,
+  global: GlobalConfig,
+): SizeWarning[] {
+  const warnings: SizeWarning[] = [];
+  for (const [id, preset] of Object.entries(presets)) {
+    if (!preset.enabled) continue;
+    const assessment = assessSize(preset, global);
+    if (assessment.viable) continue;
+
+    const teile: string[] = [];
+    if (assessment.fixedCostPct > 2) {
+      teile.push(`laufende Fixkosten ${assessment.fixedCostPct.toFixed(1)} % des Einsatzes`);
+    }
+    if (assessment.worstCasePct > 5) {
+      teile.push(
+        `mit einer Bin-Array-Initialisierung ${assessment.worstCasePct.toFixed(1)} %`,
+      );
+    }
+    warnings.push({
+      ...assessment,
+      preset: id,
+      reason:
+        `${assessment.positionSizeSol} SOL je Position: ${teile.join(", ")}. ` +
+        `Dazu bindet die Position ${assessment.rentBindingPct.toFixed(1)} % als Rent`,
+    });
+  }
+  return warnings;
+}

@@ -1,0 +1,29 @@
+{
+  "data": [
+    {
+      "position_address": "PosAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "pool_address": "PoolXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      "status": "closed",
+      "opened_at": 1785000000,
+      "closed_at": 1785086400,
+      "lower_bin_id": -40,
+      "upper_bin_id": 39,
+      "total_deposit_sol": 12.5,
+      "total_fees_sol": 0.0812,
+      "pnl_sol": -0.34
+    },
+    {
+      "position_address": "PosBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "pool_address": "PoolXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      "status": "open",
+      "opened_at": "2026-07-20T08:00:00Z",
+      "total_deposit_sol": 4,
+      "total_fees_sol": 0.01
+    },
+    {
+      "position_address": "PosCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      "status": "closed",
+      "total_deposit_sol": 3
+    }
+  ]
+}

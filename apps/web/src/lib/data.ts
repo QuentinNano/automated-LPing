@@ -69,6 +69,34 @@ export interface PositionRow {
   closeReason: string | null;
   openedAt: Date | null;
   closedAt: Date | null;
+  /**
+   * Ob die aus der Volatilität hergeleitete Breite an eine Leitplanke gestoßen
+   * ist. Eine geklemmte Range ist nicht die Range, die der Markt verlangt —
+   * ohne Ausweis sieht die Position aus wie jede andere.
+   */
+  binWidthClamped: "min" | "max" | null;
+  /** Hergeleitete Bin-Zahl vor der Klemmung; `null` ohne Herleitung. */
+  binWidthDerived: number | null;
+}
+
+/**
+ * Liest die Herkunft der Bin-Breite aus dem serialisierten Zustand.
+ *
+ * Bewusst aus `simState` statt aus eigenen Spalten: Der Zustand ist ohnehin
+ * vollständig gespeichert, und Positionen aus der Zeit vor diesem Feld haben
+ * es schlicht nicht — sie liefern `null` statt einer erfundenen Angabe.
+ */
+function binWidthOf(simState: unknown): {
+  binWidthClamped: "min" | "max" | null;
+  binWidthDerived: number | null;
+} {
+  const state = simState as Record<string, unknown> | null | undefined;
+  const clamped = state?.["binWidthClamped"];
+  const derived = state?.["binWidthDerived"];
+  return {
+    binWidthClamped: clamped === "min" || clamped === "max" ? clamped : null,
+    binWidthDerived: typeof derived === "number" && Number.isFinite(derived) ? derived : null,
+  };
 }
 
 export async function listPositions(limit = 100): Promise<PositionRow[]> {
@@ -98,6 +126,7 @@ export async function listPositions(limit = 100): Promise<PositionRow[]> {
     closeReason: row.closeReason,
     openedAt: row.openedAt,
     closedAt: row.closedAt,
+    ...binWidthOf(row.simState),
   }));
 }
 
