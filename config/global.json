@@ -12,9 +12,13 @@
     "capitalPerPresetSol": 25,
     "costs": {
       "priorityFeeSol": 0.0005,
-      "swapSlippagePct": 0.5
+      "swapSlippagePct": 0.5,
+      "binArrayInitSol": 0.075
     },
+    "binArrayInitProbability": 0.5,
     "feeShareHaircutPct": 30,
+    "limitOrderShareHaircutPct": 15,
+    "swapImpactFactor": 0.5,
     "poolLiquidityBins": 30
   }
 }

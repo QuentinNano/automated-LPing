@@ -196,6 +196,137 @@ export function fitPoolLiquidityBins(
   return best;
 }
 
+/** Ein Durchgang der Kreuzprüfung: gefittet auf der einen Hälfte, gemessen auf der anderen. */
+export interface HeldOutFit {
+  /** Auf der Trainingshälfte gefundener Wert. */
+  poolLiquidityBins: number;
+  /** Restfaktor auf der Trainingshälfte — per Konstruktion nahe 1. */
+  trainFactor: number;
+  /**
+   * Restfaktor auf der zurückgehaltenen Hälfte — **die ehrliche Zahl.**
+   *
+   * Weicht er deutlich stärker von 1 ab als `trainFactor`, hat der Fit die
+   * Eigenheiten der Trainingshälfte gelernt statt die Physik des Pools.
+   */
+  holdoutFactor: number | null;
+  trainCases: number;
+  holdoutCases: number;
+  trainPools: number;
+  holdoutPools: number;
+}
+
+export interface CrossFitResult {
+  /** Beide Richtungen: A→B und B→A. */
+  folds: HeldOutFit[];
+  /** Median der Faktoren auf den zurückgehaltenen Hälften. */
+  holdoutMedianFactor: number | null;
+  /**
+   * Verhältnis des größeren zum kleineren gefundenen `poolLiquidityBins`.
+   *
+   * `1` heißt: Beide Hälften kommen auf denselben Wert — der Fit hängt nicht
+   * daran, welche Positionen zufällig hineingerieten. Ein großer Wert heißt das
+   * Gegenteil, und dann ist die Zahl aus `fitPoolLiquidityBins` keine Messung,
+   * sondern ein Artefakt der Stichprobe.
+   */
+  spread: number | null;
+}
+
+/**
+ * Teilt die Fälle **nach Pool** in zwei Hälften.
+ *
+ * Nach Pool und nicht nach Position, weil Positionen desselben Pools sich einen
+ * Fehler teilen: Die Historien-Endpunkte liefern keinen TVL, die Kalibrierung
+ * trägt deshalb den heutigen fort (KONZEPT-ML.md 6.1b). Liegt dieser TVL für
+ * einen Pool daneben, liegen **alle** seine Positionen gleichsinnig daneben.
+ * Sie über Training und Holdout zu verstreuen, hieße denselben Fehler auf
+ * beiden Seiten zu haben — die Kreuzprüfung sähe dann stabil aus, gerade weil
+ * sie leckt.
+ *
+ * Aufgeteilt wird deterministisch über die sortierten Pool-Adressen im
+ * Wechsel: kein Zufall, keine Wanduhr, und bei ungerader Pool-Zahl ist der
+ * Unterschied genau ein Pool.
+ */
+function splitByPool(inputs: CalibrationInput[]): [CalibrationInput[], CalibrationInput[]] {
+  const pools = [...new Set(inputs.map((input) => input.pool.poolAddress))].sort();
+  const groupA = new Set(pools.filter((_, index) => index % 2 === 0));
+  return [
+    inputs.filter((input) => groupA.has(input.pool.poolAddress)),
+    inputs.filter((input) => !groupA.has(input.pool.poolAddress)),
+  ];
+}
+
+/**
+ * Fittet `poolLiquidityBins` auf einer Hälfte der Pools und misst den
+ * verbleibenden Fehler auf der anderen.
+ *
+ * **Warum das nötig ist.** `fitPoolLiquidityBins` sucht über ein Gitter den
+ * Wert, der den Median-Faktor auf 1 bringt — auf allen Fällen. Wandert dieser
+ * Wert danach in die Konfiguration und wird der Replay damit bewertet, steckt
+ * die Kalibrierung im Ergebnis. Bei einem Parameter und grobem Gitter ist die
+ * Überanpassung klein, aber KONZEPT-ML.md 7.2 verlangt einen unberührten
+ * Zeitraum, und dieselbe Regel gilt hier: Wer die Zahl, mit der er rechnet, aus
+ * denselben Daten holt, gegen die er sie prüft, prüft nichts.
+ *
+ * Gerechnet werden **beide** Richtungen. Der Vergleich der zwei gefundenen
+ * Werte ist die eigentliche Auskunft: Liegen sie weit auseinander, ist der Fit
+ * ein Artefakt der Stichprobe, und keiner der beiden Werte gehört in die
+ * Konfiguration.
+ *
+ * `null`, wenn weniger als zwei Pools vorliegen — dann gibt es nichts zu
+ * teilen, und eine erfundene Aufteilung sähe aus wie eine Prüfung.
+ */
+export function crossFitPoolLiquidityBins(
+  inputs: CalibrationInput[],
+  options: { preset: PresetConfig; global: GlobalConfig },
+  grid: readonly number[] = POOL_LIQUIDITY_BIN_GRID,
+): CrossFitResult | null {
+  const halves = splitByPool(inputs);
+  if (halves[0].length === 0 || halves[1].length === 0) return null;
+
+  const folds: HeldOutFit[] = [];
+  for (const [train, holdout] of [halves, [halves[1], halves[0]] as const]) {
+    const fitted = fitPoolLiquidityBins(train, options, grid);
+    if (fitted === null) continue;
+
+    const measured = calibrate(holdout, {
+      ...options,
+      global: {
+        ...options.global,
+        paper: { ...options.global.paper, poolLiquidityBins: fitted.poolLiquidityBins },
+      },
+    });
+
+    folds.push({
+      poolLiquidityBins: fitted.poolLiquidityBins,
+      trainFactor: fitted.medianFactor,
+      holdoutFactor: measured.medianFactor,
+      trainCases: train.length,
+      holdoutCases: measured.cases.length,
+      trainPools: countPools(train),
+      holdoutPools: countPools(holdout),
+    });
+  }
+
+  if (folds.length === 0) return null;
+
+  const values = folds.map((fold) => fold.poolLiquidityBins);
+  const smallest = Math.min(...values);
+
+  return {
+    folds,
+    holdoutMedianFactor: median(
+      folds
+        .map((fold) => fold.holdoutFactor)
+        .filter((factor): factor is number => factor !== null),
+    ),
+    spread: smallest > 0 ? Math.max(...values) / smallest : null,
+  };
+}
+
+function countPools(inputs: CalibrationInput[]): number {
+  return new Set(inputs.map((input) => input.pool.poolAddress)).size;
+}
+
 function calibrateOne(
   input: CalibrationInput,
   options: { preset: PresetConfig; global: GlobalConfig },

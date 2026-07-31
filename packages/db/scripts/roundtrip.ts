@@ -237,7 +237,9 @@ async function main(): Promise<void> {
       `Effektive Gebührenrate bestimmbar (${firstPoint && effectiveFeePct(firstPoint)})`,
     );
 
-    const written = await track.computeDueOutcomes();
+    // Mit `global`: Dann entstehen zusätzlich die Simulations-Labels, für die
+    // die Engine über dieselbe Zeitreihe läuft.
+    const written = await track.computeDueOutcomes(new Date(), 200, parseBotConfig(loadDefaults()).global);
     assert(written > 0, `Ergebnis-Labels berechnet (${written})`);
 
     const outcomes = await prisma.candidateOutcome.findMany({
@@ -245,6 +247,34 @@ async function main(): Promise<void> {
       orderBy: { horizonHours: "asc" },
     });
     assert(outcomes.length >= 3, `Labels für mehrere Horizonte (${outcomes.length})`);
+
+    // Die Simulations-Labels sind der Punkt von F4: `feeYieldPct` misst den
+    // Ertrag eines POOLS, `replayPnlPct` den einer Position — nach Impermanent
+    // Loss, Zeit außerhalb der Range und Kosten. Auf einem fallenden Verlauf
+    // müssen sie deshalb auseinanderlaufen.
+    const simulated = outcomes.filter((o) => o.replayPnlPct !== null);
+    assert(simulated.length > 0, `Simulations-Labels berechnet (${simulated.length})`);
+    const simH24 = outcomes.find((o) => o.horizonHours === 24 && o.replayPnlPct !== null);
+    assert(
+      simH24 !== undefined && Number(simH24.replayPnlPct) < Number(simH24.feeYieldPct),
+      `Positions-Ertrag liegt unter der Pool-Rate (${simH24 && Number(simH24.replayPnlPct).toFixed(2)} % ` +
+        `vs. ${simH24 && Number(simH24.feeYieldPct).toFixed(2)} %)`,
+    );
+    assert(
+      simH24 !== undefined && simH24.replayVsHodlPct !== null,
+      "HODL-Vergleich als Label vorhanden",
+    );
+
+    // Ohne `global` bleiben sie NULL — eine fehlende Konfiguration darf die
+    // Nachberechnung ärmer machen, aber nicht anhalten.
+    await prisma.candidateOutcome.deleteMany({ where: { featureId } });
+    const withoutGlobal = await track.computeDueOutcomes();
+    assert(withoutGlobal > 0, `Labels entstehen auch ohne Konfiguration (${withoutGlobal})`);
+    const plain = await prisma.candidateOutcome.findMany({ where: { featureId } });
+    assert(
+      plain.every((o) => o.replayPnlPct === null && !o.replayCensored),
+      "Ohne Konfiguration bleiben die Simulations-Labels leer statt geraten",
+    );
 
     const h24 = outcomes.find((o) => o.horizonHours === 24);
     assert(h24 !== undefined, "24-Stunden-Label vorhanden");

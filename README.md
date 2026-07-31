@@ -160,6 +160,36 @@ Zusammengeführt werden beide in `loadSeries()` — dem **einen** Lesepfad, den
 Replay und Label-Berechnung teilen: Kerzen bilden das Raster, Messpunkte steuern
 den TVL bei. Ausführlich in [KONZEPT-ML.md](./KONZEPT-ML.md) Abschnitt 3.3.
 
+### Zwei Arten von Ergebnis-Labels
+
+`candidate_outcomes` führt je Horizont **zwei verschiedene Antworten** auf die
+Frage „war das ein guter Kandidat?", und sie können weit auseinanderliegen:
+
+| | `fee_yield_pct` | `replay_pnl_pct` / `replay_vs_hodl_pct` |
+|---|---|---|
+| Misst | den Ertrag des **Pools**: Gebühren je TVL | den Ertrag einer **Position** durch die Paper-Engine |
+| Enthält | nur die Gebührenrate | Range, Zeit außerhalb, Impermanent Loss, Kosten, Limit-Order-Abzweig |
+| Braucht | nur die Zeitreihe | zusätzlich Pool-Stammdaten (Mints, Bin Step) |
+| `NULL` heißt | keine Rate bestimmbar | nicht simulierbar — **nicht** „null Ertrag" |
+
+Der Unterschied ist keine Feinheit. Im DB-Roundtrip liefert derselbe fallende
+Verlauf **+4,05 %** als Pool-Rate und **−15,52 %** als tatsächlichen
+Positionsertrag. Ein Auswahlmodell auf `fee_yield_pct` trainiert lernt „welcher
+Pool hat viel Umschlag" — nicht „welcher Pool trägt eine Position". Genau diese
+Verwechslung stehen `volatilityBoundsPctDaily` und der `yield_per_variance`-Term
+im Score bereits entgegen: Gebühren wachsen linear mit dem Umschlag, der
+Varianzverlust quadratisch mit der Volatilität.
+
+Gemessen wird an einer **Standardposition** (`REFERENCE_POSITION`): feste Breite,
+Spot, zweiseitig, Ausstiegsregeln an ihren Extremwerten. Eine Konstante im Code
+und kein Preset aus der Konfiguration — hinge das Label an einer editierbaren
+Datei, verschöbe jede Parameteränderung rückwirkend die Zielgröße.
+
+Die Modellannahmen in `global.paper` gehen dagegen sehr wohl ein. Wer
+`poolLiquidityBins` oder einen der Abschläge ändert, ändert **jedes** Label und
+sollte sie neu berechnen — der Weg dafür steht unten unter „Aufzeichnung neu
+beginnen".
+
 ---
 
 ## Presets
@@ -182,6 +212,21 @@ zustandsabhängigen Regeln in `exit` (KONZEPT.md 6.2a).
 
 Ein weiteres Profil entsteht durch eine zusätzliche Datei in `config/` (etwa
 `degen_eng.json`) — sie erscheint automatisch in UI, Paper-Vergleich und Replay.
+
+**Die globalen Grenzen `maxOpenPositions` und `maxTotalExposureSol` beschreiben
+eine gemeinsame Wallet — im Paper-Betrieb gibt es die nicht.** Jedes Preset läuft
+dort mit eigenem virtuellem Kapital, und genau diese Unabhängigkeit ist die
+Grundlage des Vergleichs: Eine gemeinsame Obergrenze, die bindet, gäbe dem zuerst
+gescannten Preset seine Positionen und dem letzten keine — gemessen würde
+Reihenfolge statt Strategie. Deshalb greifen beide erst bei
+`paperTrading: false`, und dann sowohl in der Schema-Prüfung (gegen die **Summe**
+der aktiven Presets) als auch zur Laufzeit. Passt die Preset-Aufstellung nicht in
+die Live-Grenzen, sagt `pnpm --filter @lping/bot validate` das schon im
+Paper-Betrieb als Warnung — der Umstieg soll keine Überraschung sein.
+
+Der **Kill-Switch** ist davon ausgenommen und wirkt immer: `pause` verhindert
+neue Einstiege, `flatten` schließt zusätzlich alle offenen Positionen
+(Ausstiegsgrund `kill_switch`). „Nichts mehr tun" gilt auch für eine Simulation.
 
 ---
 
@@ -313,6 +358,10 @@ Bei Datenbankproblemen: `docker compose up -d postgres`, dann `pnpm db:migrate`
 **Als Nächstes:**
 
 0. **Kalibrierung gegen echte Positionen** (`pnpm --filter @lping/bot calibrate`).
+   Der Bericht weist den Fit **kreuzgeprüft** aus: gesucht auf einer Hälfte der
+   Pools, gemessen auf der anderen. Maßgeblich ist der Holdout-Faktor — der Fit
+   über alle Fälle liegt per Konstruktion nahe 1, weil er genau darauf optimiert
+   wurde.
    Der Replay prüft, ob die Engine ihre eigenen Regeln konsistent anwendet — er
    kann nicht prüfen, ob ihre **Annahmen** stimmen. `poolLiquidityBins`,
    `feeShareHaircutPct` und der Limit-Order-Abschlag wirken gemeinsam als ein
@@ -323,7 +372,9 @@ Bei Datenbankproblemen: `docker compose up -d postgres`, dann `pnpm db:migrate`
 
 1. **Sensitivitätsanalyse** (KONZEPT-ML.md M3) — welche Parameter überhaupt etwas
    bewirken, und ob ein Ergebnis an den Daten hängt oder an den Modellannahmen.
-   Der wirksamste Einzelschritt gegen Überanpassung.
+   Der wirksamste Einzelschritt gegen Überanpassung. `pnpm abspielen` weist dafür
+   jetzt Konfidenzintervalle aus (Block-Bootstrap über Pools): Ein Unterschied,
+   der innerhalb der Intervalle liegt, ist keiner.
 2. **Parametersuche und Validierung** (M4, M5) — Zufallssuche, Verfeinerung,
    rollierendes Vorwärts-Testen mit Sperrzonen.
 3. **Execution Engine** (KONZEPT.md Abschnitt 7) — Transaktionsbau, Simulation
@@ -335,10 +386,12 @@ sie würden sonst ungeprüft live gehen:
 
 | Lücke | Betrifft |
 |---|---|
-| **Risk Manager nicht scharf:** Kill-Switch, globale Positions- und Exposure-Grenzen und Verlustlimits sind konfigurierbar, werden aber von keiner Logik durchgesetzt. (Die positionsbezogenen Notfall-Schwellen sind seit `exit.*` scharf — die portfolioweiten nicht) | KONZEPT.md 6.3, 9 |
+| **Verlustlimits nicht scharf:** `dailyLossLimitPct`, `hardLossLimitPct`, `minSolReserve`, `profitSweepThresholdSol` und `priorityFeeCapLamports` sind konfigurierbar, werden aber von keiner Logik durchgesetzt. Sie brauchen eine Bezugsgröße, die erst der Live-Betrieb liefert (Wallet-Stand, realisierter Tagesverlust). Kill-Switch sowie Positions- und Exposure-Grenzen sind seit F1 scharf | KONZEPT.md 6.3, 9 |
 | **Keine On-Chain-Reads:** Authorities kommen nur von RugCheck; die Token-2022-Prüfung und die LP-Dominanz fehlen ganz | KONZEPT.md 5.1 |
 | **Slippage-Impact geschätzt, nicht gemessen:** Die Größenabhängigkeit ist seit `swapImpactFactor` da, ihr Faktor ist aber eine Annahme. Die Jupiter-Roundtrip-Prüfung könnte ihn kalibrieren — sie filtert bislang nur | KONZEPT-ML.md 6.1 |
 | **Limit-Order-Anteil geschätzt:** Seit `lb_clmm` 0.12.0 zweigt Order-Liquidität einen Teil der Gebühr ab. Der Abschlag ist als eigene Annahme geführt, aber nicht gemessen | KONZEPT-ML.md 6.1 |
+| **Bin-Array-Initialisierung geschätzt:** Die Kosten werden seit F2 gebucht, aber als Erwartungswert über `binArrayInitProbability` — ob der Preisbereich tatsächlich neu ist, steht on-chain und wäre über den RPC-Adapter messbar | KONZEPT-ML.md 6.1 |
 | **Shadow-Tracking wird erfasst, aber nicht ausgewertet** (Filter-Güte) | KONZEPT.md 5.5 |
+| **Keine Sperrzonen im Replay:** Die Konfidenzintervalle sind da, das rollierende Vorwärts-Testen mit Sperrzone noch nicht — ein Replay über den ganzen Zeitraum vermischt weiterhin Trainings- und Prüfperiode | KONZEPT-ML.md 7.1 |
 | **Regime-Schwellen ungeprüft:** Das Tor blockiert bereits, seine Schwellen sind aber gesetzt und nicht kalibriert. `regime_snapshots` sammelt die Grundlage | KONZEPT-ML.md 6.1 |
 | **Web-UI ohne Authentifizierung** | KONZEPT.md 11 |

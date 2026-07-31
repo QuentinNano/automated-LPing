@@ -109,10 +109,25 @@ mitzutrainieren.
 > **Was `feeYieldPct` ist und was nicht.** Das Label rechnet die laufende
 > Rate `Gebühren / TVL` über den Horizont hoch. Das ist die Ertragskraft des
 > **Pools**, nicht der Ertrag einer Position: Es fehlen Bin-Konzentration, Zeit in
-> Range, Protokollanteil und Kosten. Als **Rangsignal** für Teil A ist das richtig
-> und ausreichend — die Frage dort lautet „welcher Pool verdient mehr?", nicht
-> „wie viel verdienen wir?". Die zweite Frage beantwortet ausschließlich der
-> Replay. Wer `feeYieldPct` als Ertragsprognose liest, überschätzt jede Strategie.
+> Range, Protokollanteil und Kosten. Wer es als Ertragsprognose liest,
+> überschätzt jede Strategie.
+>
+> **Und als Rangsignal reicht es ebenfalls nicht.** Die Annahme, „welcher Pool
+> verdient mehr?" sei eine andere und einfachere Frage, hält nicht: Zwei Pools
+> mit gleicher Fee/TVL-Rate sind verschieden gute Kandidaten, wenn einer halb so
+> wild ist — Gebühren wachsen linear mit dem Umschlag, der Varianzverlust
+> quadratisch mit der Volatilität. Genau deshalb gibt es
+> `volatilityBoundsPctDaily` und den `yield_per_variance`-Term im Score. Ein
+> Modell auf `feeYieldPct` trainiert lernt diesen Zusammenhang nie, weil das
+> Label ihn nicht enthält.
+>
+> Seit M2 gibt es die Komponente, die es besser kann: `replay_pnl_pct` und
+> `replay_vs_hodl_pct` schicken eine **Standardposition** (`REFERENCE_POSITION`)
+> durch dieselbe Engine, die auch handelt. Im DB-Roundtrip liefert derselbe
+> fallende Verlauf +4,05 % als Pool-Rate und −15,52 % als Positionsertrag.
+> `feeYieldPct` bleibt daneben stehen: Es ist billig, braucht keine
+> Pool-Stammdaten und beantwortet die Frage nach der Ertragskraft des Pools
+> weiterhin korrekt — es ist nur nicht die Zielgröße.
 
 ### 3.3 Zwei Quellen: Messpunkte und Kerzen
 
@@ -365,6 +380,7 @@ hängt, ist keins:
 | `swapImpactFactor` | Preisimpact je Anteil am Pool-TVL. Trifft vor allem den Ausstiegs-Swap und damit den Verlust-Tail. Messbar über die Jupiter-Roundtrip-Prüfung, die heute nur filtert |
 | `costs.priorityFeeSol` | Nicht der größte Posten, aber der einzige, der in Stressphasen um Größenordnungen springt — und Stressphasen sind die, in denen die Ausstiege feuern |
 | `rebalance.projectionHours` | Über welchen Zeitraum der Zusatzertrag eines Rebalances gilt. Vorher implizit die gesamte Restlaufzeit — das öffnete das EV-Tor vollständig |
+| `binArrayInitProbability` | Wie oft eine neue Position eine nicht erstattete Bin-Array-Initialisierung auslöst. Vorher implizit **null** — die Kosten waren in `assessSize` bekannt und wurden von der Engine nie gebucht. Wirkt asymmetrisch: 0,075 SOL sind bei 1 SOL Einsatz 7,5 Prozentpunkte, bei 5 SOL 1,5. Messbar über den RPC-Adapter, denn ob ein Bin-Array existiert, steht on-chain |
 | Abtastraster (`tickMinutes`) | Verschiebt Zeit-in-Range und Ergebnis um mehrere Prozentpunkte; die Richtung ist **nicht** offensichtlich und gehört gemessen |
 
 Eine Beobachtung aus der Messung, die gegen die Erwartung läuft: Gebühren in den
@@ -410,6 +426,18 @@ Zwei Vorbehalte, die zum Verfahren gehören:
 2. **Ohne Bin-Range kein Fall.** Positionen, deren Antwort die Range nicht
    ausweist, werden übersprungen statt geschätzt. Ein Vergleich auf geratener
    Breite sähe aus wie eine Messung und wäre keine.
+3. **Der Fit gehört kreuzgeprüft.** Wer den Wert, mit dem er rechnet, aus
+   denselben Daten holt, gegen die er ihn prüft, prüft nichts — 7.2 gilt hier
+   genauso. `crossFitPoolLiquidityBins` sucht deshalb auf einer Hälfte der Pools
+   und misst auf der anderen, in beide Richtungen. Geteilt wird **nach Pool**,
+   weil der fortgetragene TVL-Fehler aus Vorbehalt 1 allen Positionen desselben
+   Pools gemeinsam ist; über beide Hälften verstreut steckte er auf beiden Seiten,
+   und die Kreuzprüfung sähe stabil aus, gerade weil sie leckt. Maßgeblich ist der
+   Holdout-Faktor. Liegen die beiden gefundenen Werte weit auseinander, ist der
+   Fit ein Artefakt der Stichprobe und gehört in keine Konfiguration.
+4. **Der Wert absorbiert die anderen beiden Abschläge.** Wer `feeShareHaircutPct`
+   oder `limitOrderShareHaircutPct` später einzeln misst, muss `poolLiquidityBins`
+   neu fitten — sonst wird derselbe Abschlag zweimal gezählt.
 
 ### 6.1c Regime statt Auswahl: die vorgelagerte Frage
 
@@ -474,7 +502,10 @@ Datenbedarf, schwerer zu validieren, keine interpretierbaren Ergebnisse.
   Filter-Schwellen werden als Parameter mitoptimiert. Bleibt vollständig
   interpretierbar und in TypeScript, kein zusätzliches Werkzeug.
 - **Stufe 2 (optional):** Gradient Boosting auf den Merkmalen aus 3.2, Ziel ist
-  der erwartete Netto-Ertrag einer Standardposition. Lohnt sich erst, wenn
+  der erwartete Netto-Ertrag einer Standardposition — als Label `replay_pnl_pct`
+  beziehungsweise `replay_vs_hodl_pct`, **nicht** `fee_yield_pct`. Letzteres misst
+  den Ertrag eines Pools und kennt weder Range noch Impermanent Loss noch Kosten;
+  ein Modell darauf lernt „viel Umschlag" statt „trägt eine Position". Lohnt sich erst, wenn
   Stufe 1 zeigt, dass noch Signal übrig ist — und rechtfertigt erst dann eine
   Python-Komponente.
 
@@ -497,7 +528,11 @@ Ziel = Median(Bootstrap(risikoadjustierter Netto-Ertrag))
   findet der Optimierer garantiert eine Hochfrequenz-Rebalancing-Strategie, die
   live an Gebühren stirbt.
 - **Bootstrap-Median** statt Mittelwert: Ein einziger Glückstreffer soll keine
-  Strategie gewinnen lassen.
+  Strategie gewinnen lassen. Gezogen wird über **Pools**, nicht über Positionen:
+  `replayEntries` erzeugt per Konstruktion überlappende Einstiege, und ein
+  Bootstrap über Zeilen unterstellte, sie seien unabhängig. `summarizeReplay`
+  liefert die Intervalle mit (`medianPnlPctCI`, `winRatePctCI`) und weist die
+  Zahl verschiedener Pools getrennt von der Zahl der Einstiege aus.
 - **Strafterm** gegen Parametersätze, die nur eine Handvoll Positionen erzeugen —
   dort ist jedes Ergebnis Zufall.
 - **Nebenbedingung:** Das Ergebnis muss auch gegen die HODL-Benchmark positiv

@@ -294,18 +294,28 @@ model CandidateFeature {
 /// Ergebnis-Labels je Horizont, ausschließlich aus der Zeit NACH der
 /// Entscheidung berechnet.
 model CandidateOutcome {
-  id             String           @id @default(cuid())
-  featureId      String           @map("feature_id")
-  feature        CandidateFeature @relation(fields: [featureId], references: [id], onDelete: Cascade)
-  horizonHours   Int              @map("horizon_hours")
-  priceChangePct Decimal?         @map("price_change_pct") @db.Decimal(14, 4)
-  tvlChangePct   Decimal?         @map("tvl_change_pct") @db.Decimal(14, 4)
-  feeYieldPct    Decimal?         @map("fee_yield_pct") @db.Decimal(14, 4)
-  maxDrawdownPct Decimal?         @map("max_drawdown_pct") @db.Decimal(14, 4)
-  rugged         Boolean          @default(false)
-  observations   Int              @default(0)
-  coveredHours   Decimal          @default(0) @map("covered_hours") @db.Decimal(10, 3)
-  computedAt     DateTime         @default(now()) @map("computed_at")
+  id              String           @id @default(cuid())
+  featureId       String           @map("feature_id")
+  feature         CandidateFeature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  horizonHours    Int              @map("horizon_hours")
+  priceChangePct  Decimal?         @map("price_change_pct") @db.Decimal(14, 4)
+  tvlChangePct    Decimal?         @map("tvl_change_pct") @db.Decimal(14, 4)
+  feeYieldPct     Decimal?         @map("fee_yield_pct") @db.Decimal(14, 4)
+  maxDrawdownPct  Decimal?         @map("max_drawdown_pct") @db.Decimal(14, 4)
+  /// Netto-Ertrag einer Standardposition durch die Paper-Engine, in % des
+  /// Einsatzes. Anders als feeYieldPct enthält er Impermanent Loss, Zeit
+  /// außerhalb der Range und alle simulierten On-Chain-Kosten.
+  replayPnlPct    Decimal?         @map("replay_pnl_pct") @db.Decimal(14, 4)
+  /// Derselbe Ertrag gegenüber schlichtem Halten — die eigentliche Frage an
+  /// eine LP-Position (KONZEPT-ML.md 6.4).
+  replayVsHodlPct Decimal?         @map("replay_vs_hodl_pct") @db.Decimal(14, 4)
+  /// Wurde die simulierte Position vom Ende der Daten abgeschnitten statt vom
+  /// Horizont? Solche Labels messen einen kürzeren Zeitraum als sie behaupten.
+  replayCensored  Boolean          @default(false) @map("replay_censored")
+  rugged          Boolean          @default(false)
+  observations    Int              @default(0)
+  coveredHours    Decimal          @default(0) @map("covered_hours") @db.Decimal(10, 3)
+  computedAt      DateTime         @default(now()) @map("computed_at")
 
   @@unique([featureId, horizonHours])
   @@map("candidate_outcomes")

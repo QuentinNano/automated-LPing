@@ -190,6 +190,15 @@ export type PaperCloseReason =
   | "tvl_drain"
   | "fee_collapse"
   | "fee_stall"
+  /**
+   * Der globale Kill-Switch stand auf `flatten`.
+   *
+   * Bewusst von `manual` getrennt: Ein Ausstieg, den eine Notbremse ausgelöst
+   * hat, ist im Ausstiegsgrund-Histogramm etwas anderes als einer, den jemand
+   * von Hand angestoßen hat — und dieses Histogramm ist der Blick in die
+   * Mechanik.
+   */
+  | "kill_switch"
   | "manual";
 
 export interface PaperValuation {

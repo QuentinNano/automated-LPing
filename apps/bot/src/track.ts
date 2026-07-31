@@ -4,6 +4,7 @@ import {
   type HealthCheck,
   type PoolMetrics,
   type TrackHealthInput,
+  type GlobalConfig,
 } from "@lping/core";
 
 /**
@@ -29,7 +30,7 @@ export interface TrackStore {
   /** Messpunkte einer ganzen Runde in einem Stapel. */
   recordPoints(pools: PoolMetrics[], now?: Date): Promise<number>;
   deactivateExpired(now?: Date): Promise<number>;
-  computeDueOutcomes(now?: Date, limit?: number): Promise<number>;
+  computeDueOutcomes(now?: Date, limit?: number, global?: GlobalConfig): Promise<number>;
   stats(now?: Date): Promise<{
     trackedActive: number;
     trackedTotal: number;
@@ -82,7 +83,7 @@ export interface TrackCycleResult {
 
 export async function runTrackCycle(
   deps: TrackDeps,
-  options: { limit?: number; denseIntervalMin?: number } = {},
+  options: { limit?: number; denseIntervalMin?: number; global?: GlobalConfig } = {},
 ): Promise<TrackCycleResult> {
   const log = deps.log ?? (() => {});
   const now = (deps.now ?? (() => new Date()))();
@@ -122,7 +123,11 @@ export async function runTrackCycle(
     }
   }
 
-  const outcomes = await deps.store.computeDueOutcomes(now);
+  // `global` trägt die Modellannahmen, mit denen die Simulations-Labels
+  // gerechnet werden. Fehlt es, entstehen weiterhin die Kennzahl-Labels — eine
+  // fehlende Konfiguration soll die Nachberechnung nicht anhalten, sondern nur
+  // ärmer machen.
+  const outcomes = await deps.store.computeDueOutcomes(now, undefined, options.global);
 
   if (due.length === 0) {
     // Ohne Erklärung sieht "0/0" wie ein Stillstand aus, obwohl es der

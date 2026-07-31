@@ -13,6 +13,7 @@ import {
   tickPaperPosition,
   valuePosition,
   volumeRate24hUsd,
+  volumeRate24hUsdSlow,
   type BotConfig,
   type PaperCloseReason,
   type PaperPositionState,
@@ -105,6 +106,63 @@ export interface PaperCycleResult {
 }
 
 /**
+ * Portfolioweite Grenzen einer **gemeinsamen Wallet**.
+ *
+ * `maxOpenPositions` und `maxTotalExposureSol` waren konfigurierbar, in der
+ * Oberfläche editierbar und wurden von keiner Logik gelesen. Eine Grenze, die
+ * niemand durchsetzt, ist keine Grenze — sie ist ein Versprechen, das die
+ * Oberfläche gibt und der Code bricht.
+ *
+ * **Warum sie im Paper-Betrieb trotzdem nicht greifen.** Sie beschreiben eine
+ * Wallet, und im Paper-Betrieb gibt es die nicht: Jedes Preset läuft als eigenes
+ * Experiment mit eigenem virtuellem Kapital. Eine gemeinsame Obergrenze, die
+ * dort bindet, würde dem Preset, dessen Scan zuerst läuft, seine Positionen
+ * geben und dem letzten keine — der Vergleich misst dann Reihenfolge statt
+ * Strategiegüte. Der Kill-Switch ist davon ausgenommen und greift immer: Er sagt
+ * „nichts mehr tun", und das gilt auch für eine Simulation.
+ *
+ * Sobald `paperTrading` auf `false` steht, ist die Wallet real. Dann prüft das
+ * Schema bereits die Summe der Presets gegen diese Grenzen, und diese Prüfung
+ * hier ist die Rückfalllinie für das, was das Schema nicht sieht: eine
+ * nachträglich in der UI gesenkte Grenze oder offene Positionen aus einer
+ * älteren Konfiguration.
+ */
+function portfolioBlocker(params: {
+  config: BotConfig;
+  openCount: number;
+  exposureSol: number;
+  nextDepositSol: number;
+}): string | null {
+  const { global } = params.config;
+  if (global.paperTrading) return null;
+
+  if (params.openCount >= global.maxOpenPositions) {
+    return (
+      `globales Positions-Limit erreicht (${params.openCount}/${global.maxOpenPositions}). ` +
+      `Die Presets sollten so konfiguriert sein, dass diese Grenze nie bindet — ` +
+      `bindet sie doch, rationiert sie den Preset-Vergleich nach Reihenfolge`
+    );
+  }
+
+  if (params.exposureSol + params.nextDepositSol > global.maxTotalExposureSol) {
+    // Bewusst ohne den Einsatz des aktuellen Kandidaten in der Meldung: Sonst
+    // erzeugt jede Positionsgröße ihren eigenen Wortlaut, und derselbe Befund
+    // steht am Ende dreimal verschieden formuliert in der Ausgabe.
+    return (
+      `globales Einsatz-Limit erreicht (${params.exposureSol.toFixed(2)} SOL offen, ` +
+      `Grenze ${global.maxTotalExposureSol} SOL)`
+    );
+  }
+
+  return null;
+}
+
+/** Summe der Einsätze aller offenen Positionen in SOL. */
+function exposureOf(open: { simState: PaperPositionState }[]): number {
+  return open.reduce((sum, position) => sum + position.simState.depositSol, 0);
+}
+
+/**
  * Eröffnet neue Positionen für akzeptierte Scan-Kandidaten — je Preset
  * getrennt, mit eigenem virtuellem Kapital und eigenen Limits.
  */
@@ -123,11 +181,32 @@ export async function openFromScan(
   // Bewertet wird das **ganze** Kandidatenfeld, nicht nur das angenommene:
   // Ein Regime-Urteil aus den Pools, die die Filter passiert haben, misst die
   // Filter mit — und wäre per Konstruktion immer freundlich.
+  //
+  // Gemessen wird über das **träge** Volumenfenster, nicht über das schnellste
+  // verfügbare. Das Regime ist eine Aussage über die nächsten Stunden, also eine
+  // Projektion, und für Projektionen gilt im Projekt durchgehend der träge Wert
+  // (`volumeRate24hUsdSlow`, `rebalanceIsWorthIt`): Eine halbstündige
+  // Volumenspitze als Dauerannahme zu lesen, überschätzt jeden erwarteten Ertrag
+  // um Größenordnungen.
+  //
+  // Zugleich schließt das eine Lücke zwischen zwei Entscheidungen, die im selben
+  // Durchgang fallen: Der Score bewertet den Kandidaten über `feeTvl24hPct` —
+  // laut Adapter ausdrücklich das 24-Stunden-Fenster —, das Regime-Tor bewertete
+  // denselben Pool über `m30 × 48`. Ein abklingendes Strohfeuer sah damit für
+  // das Tor günstig und für den Score mittelmäßig aus. Dieselbe Klasse
+  // Abweichung wie die zwei Bezugsgrößen von `positionSizePct` (ANALYSE.md 4.2):
+  // Beide Zahlen sind für sich plausibel, und genau deshalb fällt es nicht auf.
+  //
+  // Der Gebühren-Akkrual bleibt beim schnellen Fenster — dort wird über das
+  // gerade abgelaufene Intervall gerechnet, nicht in die Zukunft. Aus demselben
+  // Grund bleibt auch `entryFeeRatePctPerDay` unten beim schnellen Wert: Er ist
+  // die Bezugsgröße für `fee_collapse`, und die laufende Messung dagegen kommt
+  // aus genau diesem Fenster.
   const regime = assessRegime(
     rows.map((row) => ({
       poolAddress: row.pool.poolAddress,
       feeRatePctPerDay: poolFeeRatePctPerDay(
-        volumeRate24hUsd(row.pool),
+        volumeRate24hUsdSlow(row.pool),
         poolFeePct(row.pool),
         row.pool.tvlUsd ?? 0,
       ),
@@ -138,6 +217,18 @@ export async function openFromScan(
   await deps.recordRegime?.(regime, now);
   log(`Regime: ${regime.status} — ${regime.reason}`);
 
+  // Der Kill-Switch steht vor allem anderen: `pause` und `flatten` heißen beide
+  // „keine neuen Positionen". Die Regime-Beurteilung läuft trotzdem vorher, weil
+  // sie reine Aufzeichnung ist — die Reihe, aus der die Schwellen kalibriert
+  // werden, darf nicht davon abhängen, ob gerade gehandelt werden durfte.
+  if (config.global.killSwitch !== "off") {
+    notes.push(
+      `Kein Einstieg: killSwitch steht auf "${config.global.killSwitch}". ` +
+        `Die Aufzeichnung läuft weiter.`,
+    );
+    return { opened, notes, regime };
+  }
+
   if (regimeBlocksOpening(regime, config.global.regime)) {
     notes.push(
       `Kein Einstieg: Das Regime ist ungünstig (${regime.reason}). ` +
@@ -145,6 +236,12 @@ export async function openFromScan(
     );
     return { opened, notes, regime };
   }
+
+  // Einmal gelesen statt je Kandidat: Der Bestand ändert sich nur durch das,
+  // was diese Schleife selbst eröffnet, und das wird mitgezählt.
+  const openPositions = await deps.store.listOpen();
+  let globalOpen = openPositions.length;
+  let globalExposureSol = exposureOf(openPositions);
 
   const accepted = rows.filter((row) => row.screening.verdict === "accepted");
   for (const row of accepted) {
@@ -167,6 +264,18 @@ export async function openFromScan(
     // Eine Quelle für die Positionsgröße, für Screening, Paper und Replay
     // dieselbe (ANALYSE.md 4.2).
     const depositSol = positionSizeSol(preset);
+
+    const blocker = portfolioBlocker({
+      config,
+      openCount: globalOpen,
+      exposureSol: globalExposureSol,
+      nextDepositSol: depositSol,
+    });
+    if (blocker !== null) {
+      if (!notes.includes(blocker)) notes.push(blocker);
+      continue;
+    }
+
     const state = openPaperPosition({
       preset,
       global: config.global,
@@ -200,6 +309,8 @@ export async function openFromScan(
       openedAt: now,
     });
     opened++;
+    globalOpen++;
+    globalExposureSol += depositSol;
     // Die Klemmung gehört ins Protokoll, nicht nur in den Zustand: Eine Range
     // an der Leitplanke ist nicht die Range, die die Volatilität verlangt, und
     // das ist beim Öffnen die einzige Gelegenheit, es zu bemerken.
@@ -275,7 +386,14 @@ export async function tickOpenPositions(
     const result = tickPaperPosition(position.simState, tick, preset, config.global);
     ticked++;
 
-    if (result.closeReason === null) {
+    // `flatten` heißt: alles heraus, unabhängig davon, was die Preset-Regeln
+    // sagen. Geprüft wird nach dem Tick und nicht davor, damit die Position mit
+    // aktuellen Marktdaten bewertet und geschlossen wird statt mit dem Stand des
+    // letzten Durchgangs.
+    const closeReason =
+      config.global.killSwitch === "flatten" ? "kill_switch" : result.closeReason;
+
+    if (closeReason === null) {
       await deps.store.tick({
         positionId: position.id,
         state: result.state,
@@ -294,13 +412,13 @@ export async function tickOpenPositions(
       positionId: position.id,
       state: closeResult.state,
       valuation: closeResult.valuation,
-      reason: result.closeReason,
+      reason: closeReason,
       realizedPnlSol: closeResult.realizedPnlSol,
       closedAt: now,
     });
     closed++;
     log(
-      `- ${position.preset}: ${position.poolAddress.slice(0, 10)}… geschlossen (${result.closeReason}), ` +
+      `- ${position.preset}: ${position.poolAddress.slice(0, 10)}… geschlossen (${closeReason}), ` +
         `PnL ${closeResult.realizedPnlSol >= 0 ? "+" : ""}${closeResult.realizedPnlSol.toFixed(4)} SOL`,
     );
   }

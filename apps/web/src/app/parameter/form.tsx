@@ -64,14 +64,57 @@ export function ParameterForm({ config, version }: { config: BotConfig; version:
             value={config.global.paper.costs.swapSlippagePct}
           />
           <Num
+            path="global.paper.costs.binArrayInitSol"
+            label="Bin-Array-Initialisierung (SOL)"
+            value={config.global.paper.costs.binArrayInitSol}
+            step="0.005"
+          />
+          <Num
+            path="global.paper.binArrayInitProbability"
+            label="…davon Wahrscheinlichkeit (0–1)"
+            value={config.global.paper.binArrayInitProbability}
+            step="0.05"
+          />
+          <Num
             path="global.paper.feeShareHaircutPct"
             label="Abschlag auf Fee-Anteil (%)"
             value={config.global.paper.feeShareHaircutPct}
+          />
+          {/*
+            Die drei folgenden fehlten hier, obwohl sie das Ergebnis stärker
+            bewegen als alles darüber. `poolLiquidityBins` skaliert die gesamte
+            Ertragsseite linear — zwischen 10 und 140 liegt Faktor 14. Ausgerechnet
+            die folgenreichste Annahme des Modells war die einzige nicht
+            editierbare, während der harmlosere Sammel-Abschlag darüber stand.
+          */}
+          <Num
+            path="global.paper.poolLiquidityBins"
+            label="Fremd-Liquidität über … Bins"
+            value={config.global.paper.poolLiquidityBins}
+            step="1"
+          />
+          <Num
+            path="global.paper.limitOrderShareHaircutPct"
+            label="Limit-Order-Abzweig (%)"
+            value={config.global.paper.limitOrderShareHaircutPct}
+          />
+          <Num
+            path="global.paper.swapImpactFactor"
+            label="Preisimpact je TVL-Anteil"
+            value={config.global.paper.swapImpactFactor}
+            step="0.1"
           />
         </div>
         <p className="muted" style={{ fontSize: 12, margin: "10px 0 0" }}>
           Nur On-Chain-Kosten: Infrastruktur (VPS, RPC) ist monatlicher Fixaufwand und
           keiner einzelnen Position zurechenbar — sie würde den Preset-Vergleich verzerren.
+        </p>
+        <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+          <strong>Die unteren vier Werte sind Modellannahmen, keine Strategieparameter.</strong>{" "}
+          Sie gehören in den Stresstest und werden dort am konservativen Ende
+          festgesetzt — nicht optimiert. Einen Modellfehler zu optimieren heißt,
+          ihn auszunutzen. <code>poolLiquidityBins</code> skaliert die gesamte
+          Ertragsseite linear; <code>calibrate</code> misst ihn gegen echte Positionen.
         </p>
       </fieldset>
 

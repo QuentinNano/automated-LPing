@@ -30,7 +30,37 @@ export const PaperConfigSchema = z.object({
     priorityFeeSol: z.number().min(0).max(0.5),
     /** Angenommener Slippage-/Preis-Impact-Verlust je Swap. */
     swapSlippagePct: pct(0, 10),
+    /**
+     * Kosten einer Bin-Array-Initialisierung in SOL — **nicht erstattet**.
+     *
+     * Sie fällt an, wenn der gewählte Preisbereich noch nie Liquidität getragen
+     * hat. Anders als das Positions-Rent (~0,057 SOL) kommt sie beim Schließen
+     * nicht zurück und ist damit echter Aufwand.
+     */
+    binArrayInitSol: z.number().min(0).max(1).default(0.075),
   }),
+  /**
+   * Wahrscheinlichkeit, dass eine neue Position eine Bin-Array-Initialisierung
+   * auslöst.
+   *
+   * **Warum eine Wahrscheinlichkeit und keine Konstante.** Die Kosten fallen nur
+   * beim erstmalig belegten Preisbereich an — in einem etablierten Pool selten,
+   * bei einem frischen Memecoin-Pool mit weiter Range keineswegs. Beide Extreme
+   * wären falsch: Sie immer zu buchen bestraft Pools, die sie nie auslösen; sie
+   * nie zu buchen verschenkt sie genau dort, wo sie am meisten wiegt.
+   *
+   * **Warum das nicht folgenlos war.** `assessSize` kannte diese Kosten und
+   * warnte vor ihnen (Degen: 8 % des Einsatzes) — die Engine buchte sie nie. Das
+   * Projekt wusste also von einem Aufwand, warnte davor und ließ ihn aus der
+   * Simulation heraus. Die Verzerrung wirkt **asymmetrisch**: Sie trifft kleine
+   * Einsätze, junge Pools und weite Ranges, also genau das Degen-Profil.
+   *
+   * Der Startwert ist eine Annahme, kein Messwert. Er gehört damit in den
+   * Stresstest und wird dort auf dem konservativen Ende festgesetzt statt
+   * optimiert (KONZEPT-ML.md 6.1). Messbar wäre er über den RPC-Adapter: Ob ein
+   * Bin-Array existiert, steht on-chain. `0` schaltet die Kosten ab.
+   */
+  binArrayInitProbability: z.number().min(0).max(1).default(0.5),
   /**
    * Sicherheitsabschlag auf den geschätzten Fee-Anteil: Wir kennen die
    * Liquiditätsverteilung anderer LPs nicht, deshalb wird der eigene Anteil
@@ -465,6 +495,14 @@ export const BotConfigSchema = z
     }
 
     let share = 0;
+    // Was alle aktiven Presets zusammen belegen, wenn sie voll ausgelastet sind.
+    // Die Summe zu prüfen ist der Punkt: Je Preset geprüft blieb
+    // `global.maxOpenPositions` wirkungslos — drei Presets mit je 5 erlaubten
+    // Positionen passierten eine Grenze von 10 anstandslos, und genau das war
+    // der ausgelieferte Zustand (4 + 5 + 5 = 14 bei einer Grenze von 10).
+    let totalPositions = 0;
+    let totalExposureSol = 0;
+    const breakdown: string[] = [];
     for (const [id, preset] of entries) {
       if (!PRESET_ID_RE.test(id)) {
         ctx.addIssue({
@@ -473,7 +511,12 @@ export const BotConfigSchema = z
           message: "Preset-ID muss aus Kleinbuchstaben/Ziffern/_ bestehen (2–24 Zeichen)",
         });
       }
-      if (preset.enabled) share += preset.capitalSharePct;
+      if (preset.enabled) {
+        share += preset.capitalSharePct;
+        totalPositions += preset.maxPositions;
+        totalExposureSol += preset.positionSizeSol * preset.maxPositions;
+        breakdown.push(`${id} ${preset.maxPositions}`);
+      }
       if (preset.maxPositions > val.global.maxOpenPositions) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -502,6 +545,51 @@ export const BotConfigSchema = z
         code: z.ZodIssueCode.custom,
         path: ["presets"],
         message: `Summe der capitalSharePct aktiver Presets (${share}) darf 100 nicht überschreiten`,
+      });
+    }
+
+    // Die globalen Grenzen müssen die **Summe** aller aktiven Presets tragen,
+    // nicht nur das größte einzelne — aber nur im Live-Betrieb.
+    //
+    // **Warum die Unterscheidung nach `paperTrading` und nicht immer.**
+    // `maxOpenPositions` und `maxTotalExposureSol` beschreiben **eine Wallet**.
+    // Im Paper-Betrieb gibt es die nicht: Jedes Preset läuft als eigenes
+    // Experiment mit eigenem virtuellem Kapital (`capitalPerPresetSol`), und
+    // genau diese Unabhängigkeit ist die Grundlage des Vergleichs. Eine
+    // gemeinsame Obergrenze, die dort bindet, zerstört ihn — dann bekommt das
+    // Preset, dessen Scan zuerst läuft, seine Positionen, und gemessen wird
+    // Reihenfolge statt Strategiegüte. Aus demselben Grund prüft das Schema
+    // `capitalPerPresetSol` je Preset und nicht als Summe.
+    //
+    // Die Prüfung immer laufen zu lassen hätte zudem eine dokumentierte
+    // Zusage gebrochen: Ein weiteres Profil entsteht durch eine zusätzliche
+    // Datei in `config/` und sonst nichts (README, „Presets"). Mit einer harten
+    // Summenprüfung bräuchte jede neue Datei zusätzlich einen Eingriff in
+    // `global.json`.
+    //
+    // Sobald `paperTrading` auf `false` steht, ist die Wallet real und die
+    // Summe die richtige Bezugsgröße. Dann greift die Prüfung — und zwar
+    // **bevor** echtes Kapital fließt, nicht danach.
+    if (!val.global.paperTrading && totalPositions > val.global.maxOpenPositions) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["global", "maxOpenPositions"],
+        message:
+          `Aktive Presets erlauben zusammen ${totalPositions} Positionen ` +
+          `(${breakdown.join(" + ")}), global.maxOpenPositions ist ` +
+          `${val.global.maxOpenPositions}. Entweder maxOpenPositions anheben oder ` +
+          `maxPositions eines Presets senken — sonst rationiert die globale Grenze ` +
+          `den Preset-Vergleich nach Reihenfolge statt nach Strategie`,
+      });
+    }
+
+    if (!val.global.paperTrading && totalExposureSol > val.global.maxTotalExposureSol) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["global", "maxTotalExposureSol"],
+        message:
+          `Aktive Presets setzen bei voller Auslastung ${round2(totalExposureSol)} SOL ein, ` +
+          `global.maxTotalExposureSol ist ${val.global.maxTotalExposureSol}`,
       });
     }
   });

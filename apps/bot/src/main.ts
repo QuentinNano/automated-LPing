@@ -136,6 +136,37 @@ function cmdValidate(): number {
     }
   }
 
+  // Was die Presets zusammen belegen, gegen die Grenzen der **gemeinsamen
+  // Wallet**. Im Paper-Betrieb gelten die nicht — jedes Preset ist ein eigenes
+  // Experiment mit eigenem virtuellem Kapital — und deshalb prüft sie das Schema
+  // dort auch nicht. Verschwiegen werden darf die Differenz trotzdem nicht: Sie
+  // ist genau das, was beim Umschalten auf `paperTrading: false` die Validierung
+  // scheitern lässt, und dann soll es keine Überraschung sein.
+  const active = Object.values(config.presets).filter((preset) => preset.enabled);
+  const slots = active.reduce((sum, preset) => sum + preset.maxPositions, 0);
+  const exposure = active.reduce(
+    (sum, preset) => sum + preset.positionSizeSol * preset.maxPositions,
+    0,
+  );
+  if (config.global.paperTrading) {
+    const tight: string[] = [];
+    if (slots > config.global.maxOpenPositions) {
+      tight.push(`${slots} Positionen gegen maxOpenPositions ${config.global.maxOpenPositions}`);
+    }
+    if (exposure > config.global.maxTotalExposureSol) {
+      tight.push(
+        `${exposure} SOL Einsatz gegen maxTotalExposureSol ${config.global.maxTotalExposureSol}`,
+      );
+    }
+    if (tight.length > 0) {
+      console.warn(
+        `\n⚠ Die aktiven Presets passen nicht in die Live-Grenzen: ${tight.join(", ")}.` +
+          `\n  Im Paper-Betrieb folgenlos (jedes Preset hat eigenes Kapital), aber` +
+          `\n  paperTrading: false wird mit genau dieser Meldung abgelehnt.`,
+      );
+    }
+  }
+
   if (!config.global.paperTrading) {
     console.warn("\n⚠ paperTrading ist deaktiviert — dieser Stand darf noch nicht live handeln (Phase 1)!");
   }
@@ -483,7 +514,11 @@ async function cmdTrack(args: string[]): Promise<number> {
       }
     }
     // Verfolgung: Messpunkte der bekannten Pools schreiben.
-    const result = await runTrackCycle(deps, { limit, denseIntervalMin });
+    const result = await runTrackCycle(deps, {
+      limit,
+      denseIntervalMin,
+      ...(config !== null ? { global: config.global } : {}),
+    });
     for (const note of result.notes) console.log(`  ! ${note}`);
 
     // Nachladen: Preis-, Volumen- und Gebührenverlauf rückwirkend holen.

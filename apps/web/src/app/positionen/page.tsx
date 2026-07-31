@@ -8,6 +8,14 @@ const CLOSE_REASONS: Record<string, string> = {
   take_profit: "Take-Profit",
   max_hold_time: "Haltezeit",
   out_of_range: "Range verlassen",
+  // Die zustandsabhängigen Ausstiege fehlten hier und erschienen deshalb als
+  // rohe Bezeichner — ausgerechnet die Gründe, die seit `exit.*` der primäre
+  // Ausgang sind.
+  price_crash: "Preissturz",
+  tvl_drain: "Liquiditätsabzug",
+  fee_collapse: "Ertrag des Pools eingebrochen",
+  fee_stall: "Position verdient nichts mehr",
+  kill_switch: "Kill-Switch",
   manual: "manuell",
 };
 

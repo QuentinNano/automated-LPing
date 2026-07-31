@@ -37,6 +37,11 @@ export const RENT_BINDING_SOL = 0.057;
  * Mögliche Bin-Array-Initialisierung, **nicht erstattet**. Fällt nur an, wenn
  * der gewählte Preisbereich noch nie Liquidität hatte — in aktiven Pools selten,
  * aber bei frischen Memecoin-Pools und weiten Ranges keineswegs ausgeschlossen.
+ *
+ * Nur noch der Schema-Default. Maßgeblich ist `paper.costs.binArrayInitSol`:
+ * Solange die Zahl an zwei Stellen stand, konnte die Warnung mit einem anderen
+ * Wert rechnen als die Engine — und genau diese Klasse Abweichung hat das
+ * Projekt schon einmal teuer bezahlt (ANALYSE.md 4.2).
  */
 export const BIN_ARRAY_INIT_SOL = 0.075;
 
@@ -64,7 +69,9 @@ export function assessSize(preset: PresetConfig, global: GlobalConfig): SizeViab
   const size = positionSizeSol(preset);
   const fixed = fixedCostSol(global);
   const fixedCostPct = (fixed / size) * 100;
-  const worstCasePct = ((fixed + BIN_ARRAY_INIT_SOL) / size) * 100;
+  // Aus der Konfiguration, nicht aus der Konstante: Die Engine bucht denselben
+  // Wert, und beide dürfen nicht auseinanderlaufen.
+  const worstCasePct = ((fixed + global.paper.costs.binArrayInitSol) / size) * 100;
   return {
     positionSizeSol: size,
     fixedCostPct,

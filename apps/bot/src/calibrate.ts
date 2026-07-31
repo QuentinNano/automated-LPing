@@ -1,7 +1,9 @@
 import {
   calibrate,
+  crossFitPoolLiquidityBins,
   fitPoolLiquidityBins,
   type BotConfig,
+  type CrossFitResult,
   type CalibrationInput,
   type CalibrationResult,
   type PoolCandle,
@@ -49,6 +51,11 @@ export interface CalibrateReport {
   preset: string;
   result: CalibrationResult;
   fitted: { poolLiquidityBins: number; medianFactor: number } | null;
+  /**
+   * Derselbe Fit, aber kreuzgeprüft: auf der einen Hälfte der Pools gesucht,
+   * auf der anderen gemessen. `null`, wenn es weniger als zwei Pools gibt.
+   */
+  crossFit: CrossFitResult | null;
   /** `poolLiquidityBins`, mit dem gerechnet wurde. */
   configured: number;
   positionsSeen: number;
@@ -126,12 +133,14 @@ export async function runCalibration(
 
   const result = calibrate(inputs, { preset, global: config.global });
   const fitted = fitPoolLiquidityBins(inputs, { preset, global: config.global });
+  const crossFit = crossFitPoolLiquidityBins(inputs, { preset, global: config.global });
 
   return {
     wallet: options.wallet,
     preset: presetId,
     result,
     fitted,
+    crossFit,
     configured: config.global.paper.poolLiquidityBins,
     positionsSeen: positions.length,
   };
@@ -250,9 +259,76 @@ export function formatCalibration(report: CalibrateReport, preset: PresetConfig)
       "  und Limit-Order-Anteil. Er ist die Größe, mit der ihr Produkt korrigiert",
       "  wird — nicht die Behauptung, die anderen beiden seien richtig.",
     );
+    lines.push(
+      "",
+      "  ACHTUNG bei späteren Messungen: Der Wert absorbiert die beiden anderen",
+      "  Abschläge mit. Wer feeShareHaircutPct oder limitOrderShareHaircutPct",
+      "  später einzeln misst, muss poolLiquidityBins neu fitten — sonst wird",
+      "  derselbe Abschlag zweimal gezählt und der Ertrag doppelt gekürzt.",
+    );
   }
 
+  lines.push(...crossFitLines(report));
+
   return lines.join("\n");
+}
+
+/**
+ * Der kreuzgeprüfte Fit — die Zahl, die zählt.
+ *
+ * Der Fit über alle Fälle liegt per Konstruktion nahe 1: Er wurde genau darauf
+ * optimiert. Erst der Faktor auf der zurückgehaltenen Hälfte sagt, ob der Wert
+ * etwas über den Markt weiß oder nur über die Stichprobe, aus der er stammt.
+ */
+function crossFitLines(report: CalibrateReport): string[] {
+  const cross = report.crossFit;
+  if (cross === null) {
+    if (report.fitted === null) return [];
+    return [
+      "",
+      "Keine Kreuzprüfung möglich: Dafür braucht es Positionen aus mindestens",
+      "zwei Pools. Der Fit oben ist damit auf denselben Daten gemessen, auf denen",
+      "er gesucht wurde — er ist eine Anpassung, keine Messung.",
+    ];
+  }
+
+  const lines: string[] = ["", "Kreuzprüfung (gefittet auf einer Pool-Hälfte, gemessen auf der anderen):"];
+  for (const fold of cross.folds) {
+    lines.push(
+      `  ${String(fold.trainPools).padStart(2)} Pools / ${String(fold.trainCases).padStart(3)} Fälle → ` +
+        `poolLiquidityBins ${String(fold.poolLiquidityBins).padStart(3)}, ` +
+        `Training ${fold.trainFactor.toFixed(2)}×, ` +
+        `Holdout ${fold.holdoutFactor === null ? "–" : `${fold.holdoutFactor.toFixed(2)}×`} ` +
+        `(${fold.holdoutPools} Pools / ${fold.holdoutCases} Fälle)`,
+    );
+  }
+
+  if (cross.holdoutMedianFactor !== null) {
+    const factor = cross.holdoutMedianFactor;
+    lines.push(
+      "",
+      `  Holdout-Median: ${factor.toFixed(2)}× — das ist die belastbare Zahl.`,
+    );
+    if (Math.abs(Math.log(factor)) > Math.log(1.5)) {
+      lines.push(
+        "  Sie weicht deutlich von 1 ab: Der Fit überträgt sich nicht auf Pools,",
+        "  die er nicht gesehen hat. Der gefundene Wert gehört dann NICHT in die",
+        "  Konfiguration — er beschreibt die Stichprobe, nicht den Markt.",
+      );
+    }
+  }
+
+  if (cross.spread !== null && cross.spread > 2) {
+    lines.push(
+      "",
+      `  ⚠ Die beiden Hälften kommen auf Werte, die um Faktor ${cross.spread.toFixed(1)}`,
+      "    auseinanderliegen. Damit hängt das Ergebnis daran, welche Positionen",
+      "    zufällig in welche Hälfte fielen — mehr Pools messen, bevor der Wert",
+      "    irgendetwas begründet.",
+    );
+  }
+
+  return lines;
 }
 
 function skippedLines(result: CalibrationResult): string[] {

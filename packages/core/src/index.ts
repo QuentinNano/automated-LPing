@@ -211,8 +211,17 @@ export type {
   TrackPoint,
 } from "./ml/outcomes";
 export {
+  LABEL_VERSION,
+  REFERENCE_POSITION,
+  computeReplayOutcomes,
+} from "./ml/replayLabel";
+export type { ReplayOutcomeLabel } from "./ml/replayLabel";
+export { clusterBootstrapCI, groupBy } from "./replay/bootstrap";
+export type { BootstrapOptions, ConfidenceInterval } from "./replay/bootstrap";
+export {
   calibrate,
   calibrationPreset,
+  crossFitPoolLiquidityBins,
   fitPoolLiquidityBins,
   POOL_LIQUIDITY_BIN_GRID,
 } from "./calibrate/groundTruth";
@@ -220,6 +229,8 @@ export type {
   CalibrationInput,
   CalibrationCase,
   CalibrationResult,
+  CrossFitResult,
+  HeldOutFit,
   SkippedCase,
 } from "./calibrate/groundTruth";
 

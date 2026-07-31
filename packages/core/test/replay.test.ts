@@ -424,3 +424,52 @@ describe("Gleichheit Replay ↔ Live", () => {
     expect(marketTickFromPoint(recorded, livePool)!.poolVolume24hUsd).toBeCloseTo(50_000 * 24);
   });
 });
+
+describe("summarizeReplay: Unsicherheit", () => {
+  it("zählt verschiedene Pools, nicht nur Einstiege", () => {
+    // Der Unterschied ist der Punkt: `positions` sagt, wie oft gerechnet wurde,
+    // `pools`, wie viel beobachtet.
+    const a = replayEntries(flatSeries(200), pool, { ...balanced, everyMinutes: 30 });
+    const b = replayEntries(flatSeries(200), { ...pool, poolAddress: "PoolB" }, {
+      ...balanced,
+      everyMinutes: 30,
+    });
+
+    const summary = summarizeReplay([...a, ...b]);
+    expect(summary.pools).toBe(2);
+    expect(summary.positions).toBeGreaterThan(summary.pools);
+  });
+
+  it("liefert kein Intervall aus einem einzigen Pool", () => {
+    const summary = summarizeReplay(replayEntries(flatSeries(200), pool, balanced));
+    expect(summary.pools).toBe(1);
+    // Ehrlicher als ein enges Intervall: Aus einem Pool lässt sich die Streuung
+    // zwischen Pools nicht schätzen.
+    expect(summary.medianPnlPctCI).toBeNull();
+    expect(summary.winRatePctCI).toBeNull();
+  });
+
+  it("klammert den Punktschätzer ein", () => {
+    const positions = ["PoolA", "PoolB", "PoolC", "PoolD"].flatMap((poolAddress, i) =>
+      replayEntries(flatSeries(150, 0.001 * (1 + i * 0.1)), { ...pool, poolAddress }, {
+        ...balanced,
+        everyMinutes: 60,
+      }),
+    );
+
+    const summary = summarizeReplay(positions);
+    expect(summary.pools).toBe(4);
+    expect(summary.medianPnlPctCI).not.toBeNull();
+    expect(summary.medianPnlPctCI!.low).toBeLessThanOrEqual(summary.medianPnlPct!);
+    expect(summary.medianPnlPctCI!.high).toBeGreaterThanOrEqual(summary.medianPnlPct!);
+  });
+
+  it("ist deterministisch", () => {
+    const positions = ["PoolA", "PoolB", "PoolC"].flatMap((poolAddress) =>
+      replayEntries(flatSeries(150), { ...pool, poolAddress }, { ...balanced, everyMinutes: 60 }),
+    );
+    expect(summarizeReplay(positions).medianPnlPctCI).toEqual(
+      summarizeReplay(positions).medianPnlPctCI,
+    );
+  });
+});
