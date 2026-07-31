@@ -4,13 +4,16 @@ import {
   TIMEFRAME_MINUTES,
   TRACKING_DURATION_HOURS,
   computeOutcomes,
+  computeReplayOutcomes,
   solPriceUsdOf,
   trackingIntervalSec,
   type FeatureVector,
+  type GlobalConfig,
   type HistoryTimeframe,
   type PoolCandle,
   type PoolMetrics,
   type SnapshotWindows,
+  type ReplayOutcomeLabel,
   type TrackHealthInput,
   type TrackPoint,
 } from "@lping/core";
@@ -97,6 +100,48 @@ export interface ReplayPoolRow {
   collectFeeMode?: "input_only" | "only_y";
   rewardMints?: string[];
   hasFarm?: boolean;
+}
+
+/**
+ * Pool-Stammdaten aus den gespeicherten Metriken eines Kandidaten.
+ *
+ * Eine Stelle für beide Leser — den Replay und die Label-Berechnung. Solange
+ * jeder für sich parste, konnten sie über denselben Pool verschieden urteilen:
+ * ein übersehener `collectFeeMode` heißt Konvertierungskosten, die es nicht
+ * gibt, ein übersehenes `rewardMints` den fehlenden Limit-Order-Abschlag.
+ *
+ * `null`, wenn Mints oder Bin Step fehlen — ohne sie ist keine Bin-Zuordnung
+ * möglich, und eine geratene läge womöglich invertiert.
+ */
+export function replayPoolFrom(poolAddress: string, rawMetrics: unknown): ReplayPoolRow | null {
+  const metrics = (rawMetrics ?? {}) as {
+    mintX?: unknown;
+    mintY?: unknown;
+    binStep?: unknown;
+    collectFeeMode?: unknown;
+    rewardMints?: unknown;
+    hasFarm?: unknown;
+  };
+  const { mintX, mintY, binStep } = metrics;
+  if (typeof mintX !== "string" || typeof mintY !== "string" || typeof binStep !== "number") {
+    return null;
+  }
+  const collectFeeMode =
+    metrics.collectFeeMode === "only_y" || metrics.collectFeeMode === "input_only"
+      ? metrics.collectFeeMode
+      : undefined;
+  const rewardMints = Array.isArray(metrics.rewardMints)
+    ? metrics.rewardMints.filter((mint): mint is string => typeof mint === "string")
+    : undefined;
+  return {
+    poolAddress,
+    mintX,
+    mintY,
+    binStep,
+    ...(collectFeeMode !== undefined ? { collectFeeMode } : {}),
+    ...(rewardMints !== undefined ? { rewardMints } : {}),
+    ...(typeof metrics.hasFarm === "boolean" ? { hasFarm: metrics.hasFarm } : {}),
+  };
 }
 
 export interface DuePool {
@@ -470,7 +515,11 @@ export class TrackRepo {
    * ist die Zeile unschädlich — `exportDataset` und `datasetQuality` verlangen
    * beide `observations >= 2` und fangen sie ab.
    */
-  async computeDueOutcomes(now: Date = new Date(), limit = 200): Promise<number> {
+  async computeDueOutcomes(
+    now: Date = new Date(),
+    limit = 200,
+    global?: GlobalConfig,
+  ): Promise<number> {
     const features = await this.prisma.candidateFeature.findMany({
       where: { OR: pendingHorizonConditions(now) },
       orderBy: { capturedAt: "asc" },
@@ -482,6 +531,23 @@ export class TrackRepo {
         outcomes: { select: { horizonHours: true } },
       },
     });
+
+    // Stammdaten für die Simulations-Labels. Ohne `global` bleiben sie NULL —
+    // die Kennzahl-Labels entstehen trotzdem, damit eine fehlende Konfiguration
+    // nicht die ganze Nachberechnung anhält.
+    const pools = new Map<string, ReplayPoolRow | null>();
+    if (global !== undefined && features.length > 0) {
+      const addresses = [...new Set(features.map((feature) => feature.poolAddress))];
+      const candidates = await this.prisma.poolCandidate.findMany({
+        where: { poolAddress: { in: addresses } },
+        orderBy: { discoveredAt: "desc" },
+        distinct: ["poolAddress"],
+        select: { poolAddress: true, rawMetrics: true },
+      });
+      for (const candidate of candidates) {
+        pools.set(candidate.poolAddress, replayPoolFrom(candidate.poolAddress, candidate.rawMetrics));
+      }
+    }
 
     const rows: Prisma.CandidateOutcomeCreateManyInput[] = [];
     for (const feature of features) {
@@ -495,11 +561,24 @@ export class TrackRepo {
       // statt ihn zwischen zwei Stichproben zu verpassen.
       const points = await this.loadSeries(feature.poolAddress, feature.capturedAt, until);
 
+      // Die Simulations-Labels laufen über dieselbe Zeitreihe und dieselbe
+      // Engine, die auch handelt. Sie beantworten, was `feeYieldPct` nicht
+      // kann: was eine Standardposition hier netto verdient hätte — nach
+      // Impermanent Loss, Zeit außerhalb der Range und Kosten.
+      const pool = pools.get(feature.poolAddress) ?? null;
+      const replayed = new Map<number, ReplayOutcomeLabel>();
+      if (global !== undefined && pool !== null) {
+        for (const label of computeReplayOutcomes(feature.capturedAt, points, pool, global)) {
+          replayed.set(label.horizonHours, label);
+        }
+      }
+
       for (const label of computeOutcomes(feature.capturedAt, points)) {
         if (done.has(label.horizonHours)) continue;
         const horizonEnd = feature.capturedAt.getTime() + label.horizonHours * 3_600_000;
         if (horizonEnd > now.getTime()) continue;
 
+        const sim = replayed.get(label.horizonHours);
         rows.push({
           featureId: feature.id,
           horizonHours: label.horizonHours,
@@ -507,6 +586,9 @@ export class TrackRepo {
           tvlChangePct: label.tvlChangePct,
           feeYieldPct: label.feeYieldPct,
           maxDrawdownPct: label.maxDrawdownPct,
+          replayPnlPct: sim?.replayPnlPct ?? null,
+          replayVsHodlPct: sim?.replayVsHodlPct ?? null,
+          replayCensored: sim?.censored ?? false,
           rugged: label.rugged,
           observations: label.observations,
           coveredHours: label.coveredHours,
@@ -774,39 +856,8 @@ export class TrackRepo {
     });
 
     return rows.flatMap((row) => {
-      const metrics = row.rawMetrics as {
-        mintX?: unknown;
-        mintY?: unknown;
-        binStep?: unknown;
-        collectFeeMode?: unknown;
-        rewardMints?: unknown;
-        hasFarm?: unknown;
-      };
-      const { mintX, mintY, binStep } = metrics;
-      if (typeof mintX !== "string" || typeof mintY !== "string" || typeof binStep !== "number") {
-        return [];
-      }
-      // Gebührenwährung und Pooltyp gehören dazu: Ohne sie rechnet der Replay
-      // Konvertierungskosten, die es nicht gibt, und übersieht den
-      // Limit-Order-Abschlag, den es gibt.
-      const collectFeeMode =
-        metrics.collectFeeMode === "only_y" || metrics.collectFeeMode === "input_only"
-          ? metrics.collectFeeMode
-          : undefined;
-      const rewardMints = Array.isArray(metrics.rewardMints)
-        ? metrics.rewardMints.filter((mint): mint is string => typeof mint === "string")
-        : undefined;
-      return [
-        {
-          poolAddress: row.poolAddress,
-          mintX,
-          mintY,
-          binStep,
-          ...(collectFeeMode !== undefined ? { collectFeeMode } : {}),
-          ...(rewardMints !== undefined ? { rewardMints } : {}),
-          ...(typeof metrics.hasFarm === "boolean" ? { hasFarm: metrics.hasFarm } : {}),
-        },
-      ];
+      const pool = replayPoolFrom(row.poolAddress, row.rawMetrics);
+      return pool === null ? [] : [pool];
     });
   }
 

@@ -514,7 +514,11 @@ async function cmdTrack(args: string[]): Promise<number> {
       }
     }
     // Verfolgung: Messpunkte der bekannten Pools schreiben.
-    const result = await runTrackCycle(deps, { limit, denseIntervalMin });
+    const result = await runTrackCycle(deps, {
+      limit,
+      denseIntervalMin,
+      ...(config !== null ? { global: config.global } : {}),
+    });
     for (const note of result.notes) console.log(`  ! ${note}`);
 
     // Nachladen: Preis-, Volumen- und Gebührenverlauf rückwirkend holen.

@@ -2,6 +2,7 @@ import {
   replayEntries,
   summarizeReplay,
   type BotConfig,
+  type ConfidenceInterval,
   type PresetKind,
   type ReplayPool,
   type ReplayPosition,
@@ -172,9 +173,51 @@ export function formatReplayResult(result: ReplayRunResult): string {
 
   lines.push("", `Grundlage: ${result.pools} Pools, ${result.points} Beobachtungen.`);
 
+  // Die Konfidenzintervalle stehen bewusst **unter** der Tabelle und nicht in
+  // ihr: Sie sind das Urteil über die Zahlen darüber, nicht eine weitere Spalte.
+  //
+  // Gebündelt wird nach Pool, weil überlappende Einstiege desselben Pools keine
+  // unabhängigen Beobachtungen sind. Ohne diese Zeilen sieht eine Trefferquote
+  // aus 500 Einstiegen über fünf Pools nach n = 500 aus und trägt die
+  // Information von fünf.
+  lines.push("", "Streuung (90 %, Block-Bootstrap über Pools):");
+  for (const row of result.byPreset) {
+    const s = row.summary;
+    lines.push(
+      `  ${pad(row.label, 14)} ` +
+        `Median% ${interval(s.medianPnlPctCI, 2)}   ` +
+        `Win% ${interval(s.winRatePctCI, 0)}   ` +
+        `(${s.pools} Pool(s), ${s.positions} Einstiege)`,
+    );
+  }
+
+  const thin = result.byPreset.filter((row) => row.summary.pools < 5);
+  if (thin.length > 0) {
+    lines.push(
+      "",
+      "Weniger als 5 verschiedene Pools: Die Intervalle sind dann selbst",
+      "unzuverlässig — ein Block-Bootstrap kann nicht mehr Streuung zeigen, als",
+      "zwischen den vorhandenen Pools steckt. Mehr Pools verfolgen schlägt hier",
+      "jede Verfeinerung der Einstiege.",
+    );
+  }
+
+  const straddling = result.byPreset.filter(
+    (row) => row.summary.medianPnlPctCI !== null && row.summary.medianPnlPctCI.low <= 0,
+  );
+  if (straddling.length > 0) {
+    lines.push(
+      "",
+      `Bei ${straddling.map((row) => row.label).join(", ")} schließt das Intervall die Null ein:`,
+      "Ein positiver Median ist dort mit den Daten vereinbar — ein negativer aber",
+      "auch. Das ist kein Ergebnis, das eine Parameterwahl begründet.",
+    );
+  }
+
   // Ausstiegsgründe zeigen, wodurch die Positionen endeten — ohne sie ist eine
   // Zahl nicht zu deuten. Ein Preset, das nur ins Zeitlimit läuft, wird anders
   // gelesen als eines, das reihenweise Stop-Loss auslöst.
+  lines.push("", "Ausstiegsgründe:");
   for (const row of result.byPreset) {
     const reasons = Object.entries(row.summary.closeReasons)
       .sort((a, b) => b[1] - a[1])
@@ -212,4 +255,16 @@ function pad(value: string, width: number): string {
 
 function signed(value: number, digits: number): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
+}
+
+/**
+ * Ein Konfidenzintervall als Spanne.
+ *
+ * `–` heißt: nicht bestimmbar, weil es weniger als zwei Pools gibt. Das ist
+ * eine Auskunft und keine Lücke — aus einem einzigen Pool lässt sich die
+ * Streuung zwischen Pools nicht schätzen.
+ */
+function interval(ci: ConfidenceInterval | null, digits: number): string {
+  if (ci === null) return "–".padEnd(17);
+  return `[${signed(ci.low, digits)} … ${signed(ci.high, digits)}]`.padEnd(17);
 }

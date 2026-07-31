@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   calibrate,
   calibrationPreset,
+  crossFitPoolLiquidityBins,
   fitPoolLiquidityBins,
   WSOL_MINT,
   type CalibrationInput,
@@ -169,5 +170,76 @@ describe("fitPoolLiquidityBins", () => {
 
   it("liefert null, wenn kein Fall vergleichbar ist", () => {
     expect(fitPoolLiquidityBins([input({ minBinId: undefined })], options)).toBeNull();
+  });
+});
+
+describe("crossFitPoolLiquidityBins", () => {
+  /** Ein Fall aus einem bestimmten Pool — die Einheit, nach der geteilt wird. */
+  function inPool(poolAddress: string, feesSol: number): CalibrationInput {
+    return {
+      position: position({ positionAddress: `Pos-${poolAddress}-${feesSol}`, poolAddress, feesSol }),
+      series: series(40),
+      pool: { ...POOL, poolAddress },
+    };
+  }
+
+  it("liefert nichts, wenn es nur einen Pool gibt", () => {
+    // Aus einem einzigen Pool lässt sich keine Hälfte zurückhalten. Eine
+    // erfundene Aufteilung sähe aus wie eine Prüfung und wäre keine.
+    expect(
+      crossFitPoolLiquidityBins([inPool("PoolA", 0.02), inPool("PoolA", 0.03)], options),
+    ).toBeNull();
+  });
+
+  it("teilt nach Pool und misst auf der zurückgehaltenen Hälfte", () => {
+    const inputs = ["PoolA", "PoolB", "PoolC", "PoolD"].map((pool) => inPool(pool, 0.02));
+    const result = crossFitPoolLiquidityBins(inputs, options);
+
+    expect(result).not.toBeNull();
+    expect(result!.folds).toHaveLength(2);
+    for (const fold of result!.folds) {
+      // Keine Position darf in beiden Hälften stecken.
+      expect(fold.trainPools + fold.holdoutPools).toBe(4);
+      expect(fold.trainCases).toBeGreaterThan(0);
+      expect(fold.holdoutCases).toBeGreaterThan(0);
+    }
+  });
+
+  it("hält Positionen desselben Pools zusammen", () => {
+    // Sonst steckte derselbe fortgetragene TVL-Fehler auf beiden Seiten, und
+    // die Kreuzprüfung sähe stabil aus, gerade weil sie leckt.
+    const inputs = [
+      inPool("PoolA", 0.02),
+      inPool("PoolA", 0.03),
+      inPool("PoolA", 0.04),
+      inPool("PoolB", 0.02),
+    ];
+    const result = crossFitPoolLiquidityBins(inputs, options);
+    expect(result).not.toBeNull();
+    for (const fold of result!.folds) {
+      // Drei Fälle aus PoolA, einer aus PoolB — jede Hälfte ist entweder 3 oder 1.
+      expect([1, 3]).toContain(fold.trainCases);
+      expect([1, 3]).toContain(fold.holdoutCases);
+      expect(fold.trainCases + fold.holdoutCases).toBe(4);
+    }
+  });
+
+  it("meldet die Streuung zwischen den beiden gefundenen Werten", () => {
+    const inputs = ["PoolA", "PoolB", "PoolC", "PoolD"].map((pool, i) =>
+      // Sehr verschiedene Gebühren je Pool → die Hälften kommen auf
+      // verschiedene Werte, und genau das soll `spread` sichtbar machen.
+      inPool(pool, i % 2 === 0 ? 0.002 : 0.2),
+    );
+    const result = crossFitPoolLiquidityBins(inputs, options);
+    expect(result).not.toBeNull();
+    expect(result!.spread).not.toBeNull();
+    expect(result!.spread!).toBeGreaterThanOrEqual(1);
+  });
+
+  it("ist deterministisch — kein Zufall in der Aufteilung", () => {
+    const inputs = ["PoolA", "PoolB", "PoolC"].map((pool) => inPool(pool, 0.02));
+    expect(crossFitPoolLiquidityBins(inputs, options)).toEqual(
+      crossFitPoolLiquidityBins(inputs, options),
+    );
   });
 });

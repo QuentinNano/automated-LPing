@@ -17,6 +17,8 @@
     },
     "binArrayInitProbability": 0.5,
     "feeShareHaircutPct": 30,
+    "limitOrderShareHaircutPct": 15,
+    "swapImpactFactor": 0.5,
     "poolLiquidityBins": 30
   }
 }

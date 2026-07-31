@@ -10,6 +10,12 @@ import {
 import { poolFeeRatePctPerDay } from "../paper/poolHealth";
 import { positionSizeSol } from "../paper/sizing";
 import { realizedVolatilityPctDaily } from "../ml/volatility";
+import {
+  clusterBootstrapCI,
+  groupBy,
+  type BootstrapOptions,
+  type ConfidenceInterval,
+} from "./bootstrap";
 import type { PaperCloseReason, PaperPositionState, PaperValuation } from "../paper/types";
 
 /**
@@ -280,6 +286,26 @@ export interface ReplaySummary {
   avgTimeInRangePct: number | null;
   /** Wie oft welcher Ausstiegsgrund griff — der Blick in die Mechanik. */
   closeReasons: Record<string, number>;
+  /**
+   * Zahl **verschiedener Pools** — die belastbare Stichprobengröße.
+   *
+   * `positions` zählt Einstiege, und die überlappen einander: Bei 30 Minuten
+   * Abstand und 96 Stunden Haltedauer sehen bis zu 192 aufeinander folgende
+   * Positionen fast dieselbe Preisbewegung. Ihre Zahl beschreibt, wie oft
+   * gerechnet wurde, nicht wie viel beobachtet. Innerhalb eines Pools geht die
+   * Korrelation bei dichten Einstiegen gegen 1 — dann ist die Zahl der Pools
+   * die konservative Obergrenze unabhängiger Beobachtungen.
+   */
+  pools: number;
+  /**
+   * Konfidenzintervall des Median-Ertrags, Block-Bootstrap über Pools.
+   *
+   * `null` bei weniger als zwei Pools: Aus einem einzigen lässt sich die
+   * Streuung zwischen Pools nicht schätzen.
+   */
+  medianPnlPctCI: ConfidenceInterval | null;
+  /** Dasselbe für die Trefferquote, über die regulär beendeten Positionen. */
+  winRatePctCI: ConfidenceInterval | null;
 }
 
 /**
@@ -288,10 +314,23 @@ export interface ReplaySummary {
  * Zensierte Positionen fließen in Erträge und Kosten ein (sie haben ja
  * stattgefunden), aber **nicht** in Trefferquote und Ausstiegsgründe: Ob sie
  * gewonnen hätten, weiß niemand.
+ *
+ * Zu jeder der beiden Kennzahlen, die eine Strategie beurteilen — Median-Ertrag
+ * und Trefferquote —, gehört ihr Konfidenzintervall. Ohne es ist die Zahl eine
+ * Behauptung: 58 % Trefferquote über 500 überlappende Positionen aus fünf Pools
+ * sind von 50 % nicht zu unterscheiden, und nichts an der Zahl allein sagt das.
  */
-export function summarizeReplay(positions: ReplayPosition[]): ReplaySummary {
+export function summarizeReplay(
+  positions: ReplayPosition[],
+  bootstrap: BootstrapOptions = {},
+): ReplaySummary {
   const decided = positions.filter((position) => !position.censored);
   const wins = decided.filter((position) => position.valuation.pnlSol > 0).length;
+
+  // Gebündelt wird nach Pool: Positionen desselben Pools teilen sich
+  // Preisverlauf und Gebührenregime und sind damit keine unabhängigen Ziehungen.
+  const byPool = groupBy(positions, (position) => position.poolAddress);
+  const decidedByPool = groupBy(decided, (position) => position.poolAddress);
 
   const closeReasons: Record<string, number> = {};
   for (const position of decided) {
@@ -319,6 +358,21 @@ export function summarizeReplay(positions: ReplayPosition[]): ReplaySummary {
     vsHodlSol: sum(positions.map((position) => position.valuation.vsHodlSol)),
     avgTimeInRangePct: inRange.length > 0 ? sum(inRange) / inRange.length : null,
     closeReasons,
+    pools: byPool.length,
+    medianPnlPctCI: clusterBootstrapCI(
+      byPool,
+      (sample) => median(sample.map((position) => position.valuation.pnlPct)),
+      bootstrap,
+    ),
+    winRatePctCI: clusterBootstrapCI(
+      decidedByPool,
+      (sample) =>
+        sample.length === 0
+          ? null
+          : (sample.filter((position) => position.valuation.pnlSol > 0).length / sample.length) *
+            100,
+      bootstrap,
+    ),
   };
 }
 
