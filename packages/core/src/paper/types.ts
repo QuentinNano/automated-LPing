@@ -79,6 +79,20 @@ export interface PaperPositionState {
    * damit der als JSON persistierte Zustand nicht wächst.
    */
   poolHistory: PoolObservation[];
+  /**
+   * Aus der Volatilität hergeleitete Bin-Zahl **vor** den Leitplanken.
+   * `null`, wenn ohne Herleitung eröffnet wurde (keine Volatilitätsschätzung
+   * oder kein `coverageSigmas`) — dann galt die Mitte von `binRange`.
+   */
+  binWidthDerived?: number | null;
+  /**
+   * An welche Leitplanke die Herleitung gestoßen ist, oder `null`.
+   *
+   * Eine geklemmte Breite ist nicht die Breite, die der Markt verlangt. Ohne
+   * diesen Ausweis passiert das lautlos — und zwar bevorzugt bei den volatilen
+   * Pools, also genau dort, wo die Herleitung den größten Unterschied macht.
+   */
+  binWidthClamped?: "min" | "max" | null;
 }
 
 /** Marktbeobachtung für einen Tick. */
@@ -104,6 +118,22 @@ export interface MarketTick {
    * `poolVolume24hUsd` zurück.
    */
   poolVolume24hUsdSlow?: number;
+  /**
+   * Höchst- und Tiefstkurs **innerhalb** des Tick-Intervalls, in SOL.
+   *
+   * Eine laufende Stichprobe kennt sie nicht — sie sieht nur den Preis zum
+   * Messzeitpunkt. Nachgeladene Kerzen liefern sie, und der Unterschied ist
+   * keine Feinheit: Zwischen zwei Schlusskursen kann der Preis die Range
+   * verlassen und zurückkehren, ohne je in einer Stichprobe aufzutauchen.
+   * Solange die Engine nur Schlusskurse sah, wirkte das durchgehend in **eine**
+   * Richtung — Zeit in Range überschätzt, Stop-Loss und Preissturz zu selten
+   * ausgelöst.
+   *
+   * Fehlen sie, fällt jede Auswertung auf `priceInSol` zurück; das Verhalten ist
+   * dann exakt das frühere.
+   */
+  priceHigh?: number;
+  priceLow?: number;
   /**
    * Gesamte Swap-Gebühr des Pools in Prozent (Basis + Volatilitätsaufschlag).
    * Nicht die Basisgebühr: Bei volatilen Pools ist sie ein Mehrfaches davon,

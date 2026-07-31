@@ -413,20 +413,27 @@ async function checkHistory(
   console.log("\nNachgeladene Historie:");
 
   const start = new Date(decisionAt.getTime() + 3_600_000);
-  const candles: PoolCandle[] = [0, 5, 10].map((offsetMin) => ({
-    poolAddress: TEST_POOL,
-    ts: new Date(start.getTime() + offsetMin * 60_000),
-    timeframe: "5m",
-    open: 0.001,
-    high: 0.0012,
-    // Der Tiefstkurs liegt unter jedem Messpunkt: Genau diesen Einbruch würde
-    // eine Stichprobe verpassen.
-    low: 0.0004,
-    close: 0.0009,
-    volumeUsd: 2_000,
-    feesUsd: 30,
-    protocolFeesUsd: 3,
-  }));
+  // Die letzte Kerze trägt das Dreifache: Erst dadurch unterscheidet sich das
+  // gleitende Mittel von der Einzelkerze, und genau diesen Unterschied prüft
+  // die träge Volumenrate weiter unten. Gebühren steigen mit, der Satz bleibt
+  // damit über alle Kerzen bei 1,5 %.
+  const candles: PoolCandle[] = [0, 5, 10].map((offsetMin, index) => {
+    const faktor = index === 2 ? 3 : 1;
+    return {
+      poolAddress: TEST_POOL,
+      ts: new Date(start.getTime() + offsetMin * 60_000),
+      timeframe: "5m",
+      open: 0.001,
+      high: 0.0012,
+      // Der Tiefstkurs liegt unter jedem Messpunkt: Genau diesen Einbruch würde
+      // eine Stichprobe verpassen.
+      low: 0.0004,
+      close: 0.0009,
+      volumeUsd: 2_000 * faktor,
+      feesUsd: 30 * faktor,
+      protocolFeesUsd: 3 * faktor,
+    };
+  });
 
   const written = await track.recordCandles(candles);
   assert(written === 3, `Kerzen geschrieben (${written})`);
@@ -465,6 +472,20 @@ async function checkHistory(
     `Protokollanteil je Kerze gemessen (${protocolFeePct})`,
   );
   assert(first.low === 0.0004, `Tiefstkurs erhalten (${first.low})`);
+  // Dieselbe Größe aus einem trägen Fenster. Ohne sie projizierte die
+  // EV-Prüfung des Rebalancings im Replay eine einzelne Fünf-Minuten-Kerze
+  // über Stunden — der Fehler, gegen den `poolVolume24hUsdSlow` gebaut wurde.
+  const slow = points.map((point) => point.volume24hUsdSlow);
+  assert(
+    slow.every((value) => value !== null && value !== undefined && value > 0),
+    `Träge Volumenrate je Kerze gesetzt (${slow.join(", ")})`,
+  );
+  // Gleitendes Mittel: Es glättet, statt einer einzelnen Kerze zu folgen.
+  const letzte = points[points.length - 1]!;
+  assert(
+    letzte.volume24hUsdSlow !== letzte.volume24hUsd,
+    `Träge Rate weicht von der Einzelkerze ab (${letzte.volume24hUsdSlow} vs. ${letzte.volume24hUsd})`,
+  );
   // Den TVL kennt die Historie nicht — er kommt aus der Aufzeichnung.
   assert(first.tvlUsd === 123_456, `TVL aus dem Messpunkt fortgetragen (${first.tvlUsd})`);
   assert(first.solPriceUsd === 180, `SOL-Kurs fortgetragen (${first.solPriceUsd})`);

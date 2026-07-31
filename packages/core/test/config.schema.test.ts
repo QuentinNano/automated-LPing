@@ -80,4 +80,39 @@ describe("BotConfigSchema", () => {
     raw.presets.degen.maxPositions = 20;
     expect(() => parseBotConfig(raw)).toThrowError(/maxOpenPositions/);
   });
+
+  it("lehnt ein binRange.max ab, das die zugelassene Volatilität nicht trägt", () => {
+    // Der Fehler, den das fängt: Die Herleitung läuft still in die Leitplanke,
+    // die Position ist dann zu eng ausgelegt — und zwar bevorzugt bei den
+    // volatilen Pools, also genau dort, wo die Breite den Unterschied macht.
+    const raw = loadDefaults() as {
+      presets: { balanced: { binRange: { max: number } } };
+    };
+    raw.presets.balanced.binRange.max = 60;
+    expect(() => parseBotConfig(raw)).toThrowError(ConfigValidationError);
+    expect(() => parseBotConfig(raw)).toThrowError(/Standardabweichung/);
+  });
+
+  it("prüft die Abdeckung nur, wo überhaupt hergeleitet wird", () => {
+    const raw = loadDefaults() as {
+      presets: { balanced: { binRange: { max: number; coverageSigmas?: number } } };
+    };
+    raw.presets.balanced.binRange.max = 60;
+    delete raw.presets.balanced.binRange.coverageSigmas;
+    expect(() => parseBotConfig(raw)).not.toThrow();
+  });
+
+  it("akzeptiert dieselbe Grenze, wenn das Volatilitätsband dazu passt", () => {
+    const raw = loadDefaults() as {
+      presets: {
+        balanced: {
+          binRange: { max: number };
+          volatilityBoundsPctDaily: { max: number };
+        };
+      };
+    };
+    raw.presets.balanced.binRange.max = 60;
+    raw.presets.balanced.volatilityBoundsPctDaily.max = 20;
+    expect(() => parseBotConfig(raw)).not.toThrow();
+  });
 });

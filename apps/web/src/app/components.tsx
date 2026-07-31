@@ -30,6 +30,37 @@ export function Usd({ value }: { value: number | undefined }) {
 }
 
 /**
+ * Hinweis, dass die Range-Breite nicht der Volatilität folgt, sondern an eine
+ * Leitplanke gestoßen ist.
+ *
+ * Ohne diesen Ausweis sieht eine geklemmte Position aus wie jede andere — und
+ * geklemmt wird bevorzugt bei volatilen Pools, also gerade dort, wo die
+ * hergeleitete Breite den größten Unterschied macht. `max` heißt: zu eng für
+ * den Markt, `min` heißt: weiter als nötig, also unnötig verdünnt.
+ */
+export function BinWidthNote({
+  clamped,
+  derived,
+}: {
+  clamped: "min" | "max" | null;
+  derived: number | null;
+}) {
+  if (clamped === null) return null;
+  const title =
+    derived === null
+      ? "Bin-Zahl an der Leitplanke"
+      : clamped === "max"
+        ? `Volatilität verlangt ${derived} Bins — binRange.max begrenzt darunter, die Range ist zu eng`
+        : `Volatilität verlangt nur ${derived} Bins — binRange.min hält sie breiter, die Liquidität ist verdünnt`;
+  return (
+    <span className="neg" title={title}>
+      {" "}
+      ⚠ {clamped === "max" ? "zu eng (max)" : "zu weit (min)"}
+    </span>
+  );
+}
+
+/**
  * Bin-Range mit Preis-Marker: zeigt auf einen Blick, wo der aktuelle Preis
  * innerhalb der Position liegt — die wichtigste Größe beim DLMM-LPing, denn
  * nur innerhalb der Range verdient die Position Gebühren.

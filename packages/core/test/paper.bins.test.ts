@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { applyPriceMove, binIdFromPrice, binPrice, openBins, strategyWeights, totalsOf } from "@lping/core";
+import {
+  applyPriceMove,
+  binIdFromPrice,
+  binPrice,
+  binsForCoverage,
+  coverageHorizonHours,
+  deriveBinWidth,
+  inRangeShare,
+  openBins,
+  strategyWeights,
+  totalsOf,
+} from "@lping/core";
 
 describe("Bin-Mathematik", () => {
   it("binPrice folgt (1 + binStep/10000)^i", () => {
@@ -33,6 +44,164 @@ describe("Bin-Mathematik", () => {
     const bidask = strategyWeights(21, "BidAsk");
     expect(bidask[0]!).toBeGreaterThan(bidask[10]!);
     expect(bidask[20]!).toBeGreaterThan(bidask[10]!);
+  });
+
+  it("einseitige Gewichte sind monoton — kein zweiter Schwerpunkt am Preis", () => {
+    // Der Fehler, den das verhindert: Über den Index gerechnet erzeugte die
+    // V-Form von BidAsk auf einer einseitigen Leiter Schwerpunkte an *beiden*
+    // Enden — einen davon direkt unter dem Preis, wo eine Kauforder-Leiter
+    // gerade nichts stapeln will. Die mittlere Tiefe blieb leer.
+    const bidask = strategyWeights(21, "BidAsk", "quote_only");
+    for (let i = 1; i < bidask.length; i++) {
+      // Index 0 = fernster Bin, Index 20 = direkt unter dem Preis.
+      expect(bidask[i]!).toBeLessThan(bidask[i - 1]!);
+    }
+
+    const curve = strategyWeights(21, "Curve", "quote_only");
+    for (let i = 1; i < curve.length; i++) {
+      expect(curve[i]!).toBeGreaterThan(curve[i - 1]!);
+    }
+
+    expect(strategyWeights(21, "Spot", "quote_only")).toEqual(
+      strategyWeights(21, "Spot", "balanced"),
+    );
+  });
+
+  it("zweiseitige Gewichte bleiben unverändert", () => {
+    for (const strategy of ["Spot", "Curve", "BidAsk"] as const) {
+      expect(strategyWeights(21, strategy, "balanced")).toEqual(
+        strategyWeights(21, strategy),
+      );
+    }
+  });
+});
+
+describe("deriveBinWidth", () => {
+  const binRange = { min: 10, max: 400, coverageSigmas: 1.5 };
+
+  it("deckt bei quote_only dieselbe Sigma-Zahl ab wie balanced je Richtung", () => {
+    // Vorher bekam eine einseitige Position die *zweiseitige* Spanne und damit
+    // die doppelte Tiefe: 1,5 konfigurierte Sigmas wurden zu 3 gemessenen.
+    const zweiseitig = deriveBinWidth({
+      binRange,
+      binStep: 100,
+      horizonHours: 24,
+      volatilityPctDaily: 60,
+      sided: "balanced",
+    });
+    const einseitig = deriveBinWidth({
+      binRange,
+      binStep: 100,
+      horizonHours: 24,
+      volatilityPctDaily: 60,
+      sided: "quote_only",
+    });
+    // Auf eine Bin genau: beide runden einmal, nur an verschiedenen Stellen.
+    expect(Math.abs(einseitig.bins - zweiseitig.bins / 2)).toBeLessThanOrEqual(1);
+
+    // Und die Tiefe entspricht dann tatsächlich coverageSigmas.
+    const opened = openBins({
+      price: 1,
+      binStep: 100,
+      binCount: einseitig.bins,
+      strategy: "Spot",
+      sided: "quote_only",
+      depositSol: 1,
+    });
+    const tiefeInSigma =
+      Math.abs(Math.log(binPrice(opened.minBinId, 100))) / (60 / 100);
+    expect(tiefeInSigma).toBeCloseTo(1.5, 1);
+  });
+
+  it("weist aus, an welche Leitplanke die Herleitung gestoßen ist", () => {
+    const eng = deriveBinWidth({
+      binRange: { min: 10, max: 40, coverageSigmas: 1.5 },
+      binStep: 20,
+      horizonHours: 24,
+      volatilityPctDaily: 120,
+      sided: "balanced",
+    });
+    expect(eng.clamped).toBe("max");
+    expect(eng.bins).toBe(40);
+    expect(eng.derived).toBeGreaterThan(40);
+
+    const weit = deriveBinWidth({
+      binRange: { min: 200, max: 400, coverageSigmas: 1.5 },
+      binStep: 400,
+      horizonHours: 1,
+      volatilityPctDaily: 5,
+      sided: "balanced",
+    });
+    expect(weit.clamped).toBe("min");
+    expect(weit.bins).toBe(200);
+
+    const passend = deriveBinWidth({
+      binRange,
+      binStep: 100,
+      horizonHours: 24,
+      volatilityPctDaily: 60,
+      sided: "balanced",
+    });
+    expect(passend.clamped).toBeNull();
+    expect(passend.bins).toBe(passend.derived);
+  });
+
+  it("fällt ohne Volatilitätsschätzung auf die Mitte zurück und meldet keine Klemmung", () => {
+    const ohne = deriveBinWidth({
+      binRange,
+      binStep: 100,
+      horizonHours: 24,
+      volatilityPctDaily: null,
+      sided: "balanced",
+    });
+    expect(ohne.bins).toBe(205);
+    expect(ohne.derived).toBeNull();
+    expect(ohne.clamped).toBeNull();
+  });
+
+  it("binsForCoverage ist die Umkehrung von deriveBinWidth", () => {
+    const width = deriveBinWidth({
+      binRange: { min: 1, max: 1400, coverageSigmas: 2 },
+      binStep: 25,
+      horizonHours: 6,
+      volatilityPctDaily: 80,
+      sided: "balanced",
+    });
+    expect(
+      binsForCoverage({
+        sigmas: 2,
+        volatilityPctDaily: 80,
+        binStep: 25,
+        horizonHours: 6,
+        sided: "balanced",
+      }),
+    ).toBe(width.derived);
+  });
+});
+
+describe("coverageHorizonHours", () => {
+  it("nimmt den Cooldown, wenn rebalanciert wird — sonst die Haltedauer", () => {
+    expect(
+      coverageHorizonHours({
+        rebalance: { enabled: true, cooldownMin: 120 },
+        maxHoldHours: 96,
+      }),
+    ).toBe(2);
+    expect(
+      coverageHorizonHours({
+        rebalance: { enabled: false, cooldownMin: 120 },
+        maxHoldHours: 6,
+      }),
+    ).toBe(6);
+  });
+
+  it("deckelt bei 24 Stunden — √Horizont sonst eine Range, die nichts mehr verdient", () => {
+    expect(
+      coverageHorizonHours({
+        rebalance: { enabled: false, cooldownMin: 0 },
+        maxHoldHours: 336,
+      }),
+    ).toBe(24);
   });
 });
 
@@ -139,5 +308,42 @@ describe("applyPriceMove", () => {
     const moved = applyPriceMove([bin], bin.price * 0.999);
     const after = moved[0]!;
     expect(after.token * bin.price).toBeCloseTo(bin.sol, 9);
+  });
+});
+
+describe("inRangeShare", () => {
+  const bins = openBins({
+    price: 1,
+    binStep: 100,
+    binCount: 20,
+    strategy: "Spot",
+    sided: "balanced",
+    depositSol: 1,
+  }).bins;
+  const unten = bins[0]!.price;
+  const oben = bins[bins.length - 1]!.price;
+
+  it("ohne Extrema ist es die frühere Ja/Nein-Frage", () => {
+    expect(inRangeShare(bins, 1)).toBe(1);
+    expect(inRangeShare(bins, oben * 2)).toBe(0);
+    expect(inRangeShare(bins, unten / 2)).toBe(0);
+  });
+
+  it("misst den Überlappungsanteil, wenn das Intervall die Range verlässt", () => {
+    // Vom geometrischen Mittelpunkt der Range bis ebenso weit über ihren
+    // oberen Rand hinaus: genau die Hälfte der log-Spanne liegt drinnen.
+    const mitte = Math.sqrt(unten * oben);
+    const share = inRangeShare(bins, oben, mitte, (oben * oben) / mitte);
+    expect(share).toBeCloseTo(0.5, 9);
+
+    // Vollständig innerhalb → 1, vollständig außerhalb → 0.
+    expect(inRangeShare(bins, 1, unten, oben)).toBeCloseTo(1, 9);
+    expect(inRangeShare(bins, oben * 3, oben * 2, oben * 4)).toBe(0);
+  });
+
+  it("ist monoton: ein weiterer Ausschlag kann den Anteil nur senken", () => {
+    const eng = inRangeShare(bins, 1, 0.99, 1.01);
+    const weit = inRangeShare(bins, 1, unten / 2, oben * 2);
+    expect(weit).toBeLessThan(eng);
   });
 });

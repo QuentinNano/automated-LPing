@@ -3,10 +3,13 @@ import {
   activeBinValueSol,
   applyPriceMove,
   binIdFromPrice,
-  deriveBinCount,
+  coverageHorizonHours,
+  deriveBinWidth,
+  inRangeShare,
   isInRange,
   recenterBins,
   totalsOf,
+  type BinWidth,
 } from "./bins";
 import { evaluatePoolExit, poolFeeRatePctPerDay, recordObservation } from "./poolHealth";
 import type {
@@ -39,12 +42,12 @@ import type {
  */
 
 /**
- * Bin-Zahl einer Position dieses Presets.
+ * Bin-Breite einer Position dieses Presets, samt Herkunft.
  *
  * Der Horizont ist **die Zeit bis zur nächsten Korrekturmöglichkeit**, nicht die
- * Haltedauer. Eine Position, die rebalanciert, muss ihre Range nur bis zum
- * Ablauf des Cooldowns tragen — danach kann sie nachzentrieren. Eine ohne
- * Rebalancing muss die gesamte Haltedauer überstehen.
+ * Haltedauer (`coverageHorizonHours`). Eine Position, die rebalanciert, muss
+ * ihre Range nur bis zum Ablauf des Cooldowns tragen — danach kann sie
+ * nachzentrieren. Eine ohne Rebalancing muss die gesamte Haltedauer überstehen.
  *
  * Der Unterschied ist groß: Die Breite wächst mit √Horizont, und über 96 Stunden
  * statt 2 wäre sie siebenmal so weit. Eine solche Range hält den Preis zwar
@@ -52,20 +55,17 @@ import type {
  * kaum noch etwas liegt — und nur der verdient. Genau diese Spannung ist das
  * LP-Dilemma; sie lässt sich nicht auflösen, nur bewusst einstellen.
  */
-function binCountFor(
+function binWidthFor(
   preset: PresetConfig,
   binStep: number,
   volatilityPctDaily: number | null | undefined,
-): number {
-  const horizonHours = preset.rebalance.enabled
-    ? Math.max(preset.rebalance.cooldownMin / 60, 1)
-    : preset.maxHoldHours;
-
-  return deriveBinCount({
+): BinWidth {
+  return deriveBinWidth({
     binRange: preset.binRange,
     binStep,
-    horizonHours: Math.min(horizonHours, 24),
+    horizonHours: coverageHorizonHours(preset),
     volatilityPctDaily,
+    sided: preset.strategy.sided,
   });
 }
 
@@ -97,12 +97,12 @@ export interface OpenPaperPositionParams {
 
 export function openPaperPosition(params: OpenPaperPositionParams): PaperPositionState {
   const { preset, global, binStep, price, depositSol, at } = params;
-  const binCount = binCountFor(preset, binStep, params.volatilityPctDaily);
+  const width = binWidthFor(preset, binStep, params.volatilityPctDaily);
 
   const opened = recenterBins({
     price,
     binStep,
-    binCount,
+    binCount: width.bins,
     strategy: preset.strategy.type,
     sided: preset.strategy.sided,
     depositSol,
@@ -143,6 +143,8 @@ export function openPaperPosition(params: OpenPaperPositionParams): PaperPositio
     rebalanceTimesMs: [],
     entryFeeRatePctPerDay: params.feeRatePctPerDay ?? 0,
     poolHistory: [],
+    binWidthDerived: width.derived,
+    binWidthClamped: width.clamped,
   };
 }
 
@@ -170,6 +172,11 @@ export function tickPaperPosition(
 ): PaperTickResult {
   const nowMs = tick.at.getTime();
   const elapsedMs = Math.max(0, nowMs - state.lastTickMs);
+  // Extrema des Intervalls, auf den Schlusskurs eingeklammert: Eine Kerze, deren
+  // Hoch unter ihrem Schluss läge, wäre widersprüchlich und darf das Ergebnis
+  // nicht verschieben.
+  const priceLow = Math.min(tick.priceLow ?? tick.priceInSol, tick.priceInSol);
+  const priceHigh = Math.max(tick.priceHigh ?? tick.priceInSol, tick.priceInSol);
 
   const next: PaperPositionState = {
     ...state,
@@ -179,9 +186,13 @@ export function tickPaperPosition(
     msTotal: state.msTotal + elapsedMs,
   };
 
-  const inRange = isInRange(next.bins, tick.priceInSol);
-  if (inRange) next.msInRange += elapsedMs;
-  if (rangeIsReached(next, tick.priceInSol)) next.rangeReached = true;
+  // Anteilig statt ja/nein: Wo die Kerze ihre Spanne mitbringt, wird die Zeit in
+  // Range gemessen und nicht am Intervallende abgetastet.
+  next.msInRange += elapsedMs * inRangeShare(next.bins, tick.priceInSol, priceLow, priceHigh);
+  // Für "hat der Markt die Range erreicht?" zählt das Tief: Eine einseitige
+  // Position wird von einer Docht-Bewegung genauso befüllt wie von einem
+  // Schlusskurs — sie hat den Token dann tatsächlich gekauft.
+  if (rangeIsReached(next, priceLow)) next.rangeReached = true;
 
   // --- Fee-Akkrual -------------------------------------------------------
   if (elapsedMs > 0) {
@@ -216,6 +227,8 @@ export function tickPaperPosition(
     {
       atMs: nowMs,
       priceInSol: tick.priceInSol,
+      ...(priceHigh > tick.priceInSol ? { priceHigh } : {}),
+      ...(priceLow < tick.priceInSol ? { priceLow } : {}),
       tvlUsd: tick.poolTvlUsd,
       feeRatePctPerDay: poolFeeRatePctPerDay(
         tick.poolVolume24hUsd,
@@ -230,18 +243,59 @@ export function tickPaperPosition(
   // --- Rebalancing -------------------------------------------------------
   // Der geordnete Exit hat Vorrang: nie in einen fallenden Preis nachzentrieren,
   // wenn die Position ohnehin geschlossen gehört (KONZEPT.md 8.2).
-  const exitBeforeRebalance = evaluateExit(
-    next,
-    valuePosition(next, tick.priceInSol),
-    preset,
-    nowMs,
-  );
+  const exitBeforeRebalance = decideExit(state, next, preset, nowMs, tick.priceInSol, priceLow);
   if (exitBeforeRebalance === null && shouldRebalance(next, tick, preset, global, nowMs)) {
     applyRebalance(next, tick, preset, global, nowMs);
   }
 
-  const valuation = valuePosition(next, tick.priceInSol);
-  return { state: next, valuation, closeReason: evaluateExit(next, valuation, preset, nowMs) };
+  return (
+    decideExit(state, next, preset, nowMs, tick.priceInSol, priceLow) ?? {
+      state: next,
+      valuation: valuePosition(next, tick.priceInSol),
+      closeReason: null,
+    }
+  );
+}
+
+/**
+ * Ausstiegsentscheidung über das gesamte Intervall, nicht nur an seinem Ende.
+ *
+ * Zuerst am Schlusskurs — der Normalfall. Löst dort nichts aus, wird zusätzlich
+ * am **Tief** des Intervalls geprüft. Der Grund ist kein Modelldetail: Ein
+ * Stop-Loss ist eine Auslösung, kein Endstandsvergleich. Eine Position, die
+ * zwischen zwei Messpunkten unter die Schwelle fällt und sich erholt, wurde in
+ * Wahrheit ausgestoppt — solange die Engine nur Schlusskurse sah, löste ihr
+ * einziger Notausgang systematisch zu selten aus.
+ *
+ * Löst der Ausstieg erst am Tief aus, wird die Position **dort** bewertet: Sie
+ * ist dort ausgestiegen, nicht am freundlicheren Schlusskurs. Die Bins dafür
+ * entstehen aus dem Bestand **vor** dem Tick — der Weg führte vom letzten Preis
+ * zum Tief, nicht vom Schlusskurs rückwärts.
+ *
+ * `null` heißt: kein Ausstieg, weder am Schluss noch am Tief.
+ */
+function decideExit(
+  before: PaperPositionState,
+  next: PaperPositionState,
+  preset: PresetConfig,
+  nowMs: number,
+  closePrice: number,
+  priceLow: number,
+): PaperTickResult | null {
+  const valuation = valuePosition(next, closePrice);
+  const atClose = evaluateExit(next, valuation, preset, nowMs);
+  if (atClose !== null) return { state: next, valuation, closeReason: atClose };
+
+  if (priceLow >= closePrice) return null;
+
+  const atLow: PaperPositionState = {
+    ...next,
+    bins: applyPriceMove(before.bins, priceLow),
+    lastPrice: priceLow,
+  };
+  const lowValuation = valuePosition(atLow, priceLow);
+  const reason = evaluateExit(atLow, lowValuation, preset, nowMs);
+  return reason === null ? null : { state: atLow, valuation: lowValuation, closeReason: reason };
 }
 
 /**
@@ -423,7 +477,7 @@ function recenteredBins(
   // Dieselbe Breite wie beim Eröffnen: Ein Rebalance zentriert nach, er legt die
   // Position nicht neu aus.
   const binCount =
-    state.bins.length > 0 ? state.bins.length : binCountFor(preset, state.binStep, null);
+    state.bins.length > 0 ? state.bins.length : binWidthFor(preset, state.binStep, null).bins;
   const target = recenterBins({
     price: tick.priceInSol,
     binStep: state.binStep,

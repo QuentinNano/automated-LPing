@@ -143,9 +143,19 @@ export async function openFromScan(
       openedAt: now,
     });
     opened++;
+    // Die Klemmung gehört ins Protokoll, nicht nur in den Zustand: Eine Range
+    // an der Leitplanke ist nicht die Range, die die Volatilität verlangt, und
+    // das ist beim Öffnen die einzige Gelegenheit, es zu bemerken.
+    const clampNote =
+      state.binWidthClamped === "max"
+        ? ` ⚠ Breite an binRange.max geklemmt (nötig: ${state.binWidthDerived})`
+        : state.binWidthClamped === "min"
+          ? ` ⚠ Breite an binRange.min geklemmt (nötig: ${state.binWidthDerived})`
+          : "";
     log(
       `+ ${row.preset}: ${row.pool.name ?? row.pool.poolAddress.slice(0, 10)} ` +
-        `${depositSol.toFixed(3)} SOL, Bins ${state.minBinId}…${state.maxBinId}, Score ${row.screening.score.total}`,
+        `${depositSol.toFixed(3)} SOL, Bins ${state.minBinId}…${state.maxBinId}, Score ${row.screening.score.total}` +
+        clampNote,
     );
   }
 

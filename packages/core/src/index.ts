@@ -131,12 +131,18 @@ export {
   binPrice,
   binIdFromPrice,
   deriveBinCount,
+  deriveBinWidth,
+  binsForCoverage,
+  coverageHorizonHours,
   strategyWeights,
   openBins,
   applyPriceMove,
+  activeBinValueSol,
+  inRangeShare,
   totalsOf,
   isInRange,
 } from "./paper/bins";
+export type { BinWidth, DeriveBinWidthParams } from "./paper/bins";
 export {
   openPaperPosition,
   tickPaperPosition,
@@ -164,10 +170,11 @@ export {
   deployedCapitalSol,
   fixedCostSol,
   assessSize,
+  assessSizes,
   RENT_BINDING_SOL,
   BIN_ARRAY_INIT_SOL,
 } from "./paper/sizing";
-export type { SizeViability } from "./paper/sizing";
+export type { SizeViability, SizeWarning } from "./paper/sizing";
 export {
   realizedVolatilityPctDaily,
   estimateVolatilityPctDaily,

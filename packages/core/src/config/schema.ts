@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { binsForCoverage, coverageHorizonHours } from "../paper/bins";
 
 /**
  * Laufzeit-Konfiguration des Bots (KONZEPT.md Abschnitt 14).
@@ -318,6 +319,42 @@ export const PresetConfigSchema = z
         path: ["compound", "enabled"],
         message: "Compounding erfordert convertToSolPct < 100 (es bleibt sonst nichts zum Reinvestieren)",
       });
+    }
+
+    // Trägt `binRange.max` die zugelassene Volatilität überhaupt?
+    //
+    // Die Leitplanke darf begrenzen, was Kosten und Kapitalbindung tragen — sie
+    // darf die Herleitung aber nicht ersetzen. Deckt sie am oberen Rand des
+    // erlaubten Volatilitätsbands nicht einmal **eine** Standardabweichung ab,
+    // ist die Position dort strukturell zu eng: Sie verlässt die Range binnen
+    // Stunden, verdient nichts mehr und trägt trotzdem den vollen Impermanent
+    // Loss. Genau dieser Fall lief bisher lautlos in die Klemmung.
+    //
+    // 1σ ist bewusst eine Untergrenze und nicht `coverageSigmas`: Die volle
+    // Abdeckung am Extremrand zu verlangen, erzwänge Ranges, deren Bin-Arrays
+    // teurer sind als der Nutzen. Der schmalste zugelassene Bin Step ist der
+    // ungünstigste Fall — je feiner die Bins, desto mehr braucht dieselbe
+    // Preisspanne.
+    if (val.binRange.coverageSigmas !== undefined) {
+      const needed = binsForCoverage({
+        sigmas: 1,
+        volatilityPctDaily: val.volatilityBoundsPctDaily.max,
+        binStep: val.discovery.minBinStep,
+        horizonHours: coverageHorizonHours(val),
+        sided: val.strategy.sided,
+      });
+      if (needed !== null && needed > val.binRange.max) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["binRange", "max"],
+          message:
+            `binRange.max ${val.binRange.max} deckt bei ` +
+            `volatilityBoundsPctDaily.max ${val.volatilityBoundsPctDaily.max} %/Tag und ` +
+            `discovery.minBinStep ${val.discovery.minBinStep} keine volle Standardabweichung ab ` +
+            `(nötig: ${needed} Bins). Entweder binRange.max anheben, ` +
+            `volatilityBoundsPctDaily.max senken oder discovery.minBinStep erhöhen`,
+        });
+      }
     }
   });
 

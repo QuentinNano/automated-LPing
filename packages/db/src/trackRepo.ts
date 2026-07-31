@@ -93,6 +93,59 @@ function decimal(value: Prisma.Decimal | null): number | null {
   return value === null ? null : Number(value);
 }
 
+/** Fenster des gleitenden Mittels, das die trägen Volumenraten bildet. */
+const SLOW_VOLUME_WINDOW_HOURS = 24;
+
+/**
+ * Gleitende 24-Stunden-Rate über eine aufsteigend sortierte Mengenreihe.
+ *
+ * Je Punkt: Summe der Mengen der zurückliegenden 24 Stunden, hochgerechnet auf
+ * den vollen Tag. Am Anfang der Reihe deckt das Fenster weniger ab — dann wird
+ * über den **tatsächlich** abgedeckten Zeitraum hochgerechnet statt über 24
+ * Stunden, sonst sähe der Beginn jeder Zeitreihe systematisch ruhiger aus, als
+ * er war.
+ *
+ * `null` an Stellen, an denen keine einzige Menge belegt ist — eine erfundene
+ * Null wäre hier schlimmer als keine Angabe, weil die Projektion sie als
+ * "kein Volumen" lesen würde.
+ */
+export function trailingDailyRate(
+  points: { ts: Date; value: number | null }[],
+  intervalMs: number,
+): (number | null)[] {
+  const windowMs = SLOW_VOLUME_WINDOW_HOURS * 3_600_000;
+  const result: (number | null)[] = [];
+
+  let start = 0;
+  let sum = 0;
+  let count = 0;
+
+  for (let i = 0; i < points.length; i++) {
+    const current = points[i]!;
+    const value = current.value;
+    if (value !== null && Number.isFinite(value)) {
+      sum += value;
+      count++;
+    }
+    // Alles aus dem Fenster schieben, was älter als 24 Stunden ist.
+    while (start < i && current.ts.getTime() - points[start]!.ts.getTime() > windowMs) {
+      const dropped = points[start]!.value;
+      if (dropped !== null && Number.isFinite(dropped)) {
+        sum -= dropped;
+        count--;
+      }
+      start++;
+    }
+
+    // Jede belegte Kerze deckt `intervalMs` ab. Über die tatsächlich belegte
+    // Zeit hochzurechnen statt über volle 24 Stunden ist der Punkt: Sonst sähe
+    // der Beginn jeder Zeitreihe systematisch ruhiger aus, als er war.
+    result.push(count === 0 ? null : (sum * 86_400_000) / (count * intervalMs));
+  }
+
+  return result;
+}
+
 /**
  * Zeitfenster-Kennzahlen eines Messpunkts als JSON.
  *
@@ -550,13 +603,17 @@ export class TrackRepo {
     ]);
 
     const perDay = 1440 / TIMEFRAME_MINUTES[timeframe];
+    const slowVolume = trailingDailyRate(
+      candles.map((candle) => ({ ts: candle.ts, value: decimal(candle.volumeUsd) })),
+      TIMEFRAME_MINUTES[timeframe] * 60_000,
+    );
 
     let index = 0;
     let tvlUsd: number | null = null;
     let solPriceUsd: number | null = null;
     let carriedAtMs = Number.NEGATIVE_INFINITY;
 
-    return candles.map((candle) => {
+    return candles.map((candle, position) => {
       const tsMs = candle.ts.getTime();
       // Alle Messpunkte bis zu dieser Kerze einarbeiten (beide Listen sind
       // aufsteigend sortiert, also genügt ein Durchlauf über beide).
@@ -585,6 +642,9 @@ export class TrackRepo {
         tvlUsd: stale ? null : tvlUsd,
         solPriceUsd: stale ? null : solPriceUsd,
         volume24hUsd: volume === null ? null : volume * perDay,
+        // Dieselbe Größe aus einem trägen Fenster — die Projektion des
+        // Rebalance-EV darf nicht auf einer einzelnen Kerze stehen.
+        volume24hUsdSlow: slowVolume[position] ?? null,
         fees24hUsd: fees === null ? null : fees * perDay,
         protocolFeePct:
           fees !== null && fees > 0 && protocolFees !== null

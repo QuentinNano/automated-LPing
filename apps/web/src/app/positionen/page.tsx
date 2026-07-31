@@ -1,5 +1,5 @@
 import { currentConfig, dbAvailable, listPositions } from "@/lib/data";
-import { DbMissing, Notice, Num, RangeBar, Sol } from "../components";
+import { BinWidthNote, DbMissing, Notice, Num, RangeBar, Sol } from "../components";
 
 export const dynamic = "force-dynamic";
 
@@ -78,6 +78,10 @@ export default async function PositionsPage() {
                       <td className="muted">
                         {p.minBinId ?? "–"}…{p.maxBinId ?? "–"}
                         {p.binStep !== null && <span className="muted"> ({p.binStep}bps)</span>}
+                        <BinWidthNote
+                          clamped={p.binWidthClamped}
+                          derived={p.binWidthDerived}
+                        />
                       </td>
                       <td>
                         <RangeBar

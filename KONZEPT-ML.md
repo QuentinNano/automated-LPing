@@ -242,8 +242,9 @@ Positionslogik** — sie ruft `openPaperPosition`, `tickPaperPosition` und
 | Tick-Reader aus der Datenbank | ✅ `loadSeries()` — ein Pfad für Replay **und** Labels |
 | Einstiege an beliebigen Zeitpunkten | ✅ `replayEntries` mit einstellbarem Abstand |
 | Determinismus | ✅ keine Wanduhr, kein Zufall; durch Tests festgehalten |
-| Gleichheit Replay ↔ Live | ✅ beide Wege bauen ihren Tick an derselben Stelle, ein Test hält sie aneinander |
-| `high`/`low` für Zeit-in-Range | offen (Abschnitt 5.3) — bei den Labels bereits genutzt |
+| Gleichheit Replay ↔ Live | ✅ beide Wege bauen ihren Tick an derselben Stelle; der Test vergleicht **alle** Tick-Felder und führt die zulässigen Abweichungen mit Begründung auf |
+| `high`/`low` für Zeit-in-Range | ✅ Überlappungsanteil statt Abtastung (Abschnitt 5.3); offen bleibt allein der Bin-Zustand |
+| Range-Breite im Replay | ✅ aus `realizedVolatilityPctDaily` über ein **rückwärts** gerichtetes Fenster — vorher fiel der Replay auf die Mitte von `binRange` zurück und simulierte damit eine andere Strategie als der Live-Pfad |
 
 **Nicht verhandelbar:** Replay und Live-Betrieb nutzen denselben Codepfad. Gäbe
 es zwei Implementierungen, optimierte man gegen die eine und handelte mit der
@@ -298,8 +299,25 @@ bestraft, die sie nicht überlebt hätte. `high`/`low` je Kerze machen aus einer
 Stichprobe ein Intervall.
 
 Bei den **Labels** ist das umgesetzt: `maxDrawdownPct` nutzt `low`, wo es
-vorliegt, und misst den Einbruch, statt ihn zu verpassen. In der Engine steht es
-noch aus.
+vorliegt, und misst den Einbruch, statt ihn zu verpassen.
+
+**In der Engine inzwischen ebenfalls**, an den drei Stellen, an denen ein
+Intervall etwas anderes aussagt als sein Endpunkt:
+
+| Größe | vorher | jetzt |
+|---|---|---|
+| Zeit in Range | ja/nein am Intervallende | **Überlappungsanteil** von [Tief, Hoch] mit der Range, in log-Preisen |
+| Stop-Loss und Preissturz | nur am Schlusskurs | zusätzlich am **Tief**; löst der Ausstieg erst dort aus, wird die Position auch dort bewertet |
+| „Range erreicht" (einseitig) | nur am Schlusskurs | auch per Docht — eine Leiter, die der Preis kurz berührt hat, **hat** gekauft |
+
+Nicht umgesetzt und bewusst offen: der **Bin-Zustand** folgt weiter dem
+Schlusskurs. Ob der Preis innerhalb einer Kerze erst zum Hoch und dann zum Tief
+lief oder umgekehrt, steht nirgends — und die beiden Reihenfolgen ergeben
+verschiedene Bestände. Eine Reihenfolge zu raten hieße, eine Verzerrung
+unbekannter Richtung einzubauen; die drei Größen oben haben dagegen eine
+eindeutige Lesart. Der verbleibende Fehler unterschätzt damit weiterhin
+Bin-Überquerungen, also **beides**: realisierten Impermanent Loss und
+Gebührenanfall.
 
 ### 5.4 Zensierte Positionen zählen anders
 
@@ -570,7 +588,7 @@ ihre Variation nicht stabil ist, ist ein Ergebnis über den Simulator und nicht
 | Meilenstein | Inhalt | Stand |
 |---|---|---|
 | **M1 — Aufzeichnung** | `tracked_pools`, `candidate_features`, `candidate_outcomes`, `pool_snapshots`, `pool_history_candles`; `track`- und `backfill`-Kommando; Merkmalsschema v2 mit allen Zeitfenstern, Gebührenstruktur und Organic Score; Sammelabruf über `filter_by`; Prüfbericht mit Lücken- und Rückstandsüberwachung | ✅ |
-| **M2 — Replay** | `loadSeries()` als ein Lesepfad für Replay und Labels; Replay über dieselbe Paper-Engine; Einstiege an beliebigen Zeitpunkten; Determinismus; Gleichheitstest gegen den Live-Pfad; `replay`-Kommando mit Preset-Vergleich | ✅ (offen: `high`/`low` für Zeit-in-Range) |
+| **M2 — Replay** | `loadSeries()` als ein Lesepfad für Replay und Labels; Replay über dieselbe Paper-Engine; Einstiege an beliebigen Zeitpunkten; Determinismus; feldweise vollständiger Gleichheitstest gegen den Live-Pfad; Range-Breite und träges Volumenfenster auch im Replay; `high`/`low` für Zeit-in-Range und Ausstieg; `replay`-Kommando mit Preset-Vergleich | ✅ |
 | **M3 — Sensitivität** | Einzelparameter-Analyse **inklusive der Modellannahmen** (6.1), Auswahl der 5–10 relevanten, Bericht | **teilweise** — `pnpm stresstest` fährt Modellannahmen, Strategie-Stellschrauben, Marktbedingungen und eine Regime-Landkarte auf synthetischen Pfaden. Offen: dieselbe Analyse auf den **aufgezeichneten** Verläufen |
 | **M4 — Suche** | Zufallssuche und Verfeinerung, Zielfunktion, Plateau-Bewertung | offen |
 | **M5 — Validierung** | Vorwärts-Testen, Sperrzonen, Mehrfachtestkorrektur, Zufallsvergleich | offen, mit M4 |

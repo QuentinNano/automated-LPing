@@ -1,7 +1,12 @@
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { config as loadEnv } from "dotenv";
-import { ConfigValidationError, type AdapterHealth, type BotConfig } from "@lping/core";
+import {
+  ConfigValidationError,
+  assessSizes,
+  type AdapterHealth,
+  type BotConfig,
+} from "@lping/core";
 import {
   AdapterError,
   DexScreenerAdapter,
@@ -116,6 +121,17 @@ function cmdValidate(): number {
         `Halten max ${preset.maxHoldHours}h`,
     );
   }
+  // Trägt jede Positionsgröße ihre eigenen On-Chain-Fixkosten? Die Prüfung gab
+  // es als Funktion schon, nur rief sie niemand auf — und eine Position, die
+  // vor dem ersten Tick im Rückstand ist, fällt sonst nirgends auf.
+  const sizeWarnings = assessSizes(config.presets, config.global);
+  if (sizeWarnings.length > 0) {
+    console.warn("\n⚠ Positionsgrößen, die ihre On-Chain-Fixkosten kaum tragen:");
+    for (const warning of sizeWarnings) {
+      console.warn(`  ${warning.preset.padEnd(12)}: ${warning.reason}`);
+    }
+  }
+
   if (!config.global.paperTrading) {
     console.warn("\n⚠ paperTrading ist deaktiviert — dieser Stand darf noch nicht live handeln (Phase 1)!");
   }

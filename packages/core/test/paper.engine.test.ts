@@ -492,3 +492,101 @@ describe("Gebührenmodell", () => {
     expect(fees(200)).toBeGreaterThan(fees(20));
   });
 });
+
+describe("Kerzen-Extrema statt Schlusskurs", () => {
+  const balanced = config.presets["balanced"]!;
+
+  function openBalanced(price = 1): PaperPositionState {
+    return openPaperPosition({
+      preset: balanced,
+      global: config.global,
+      binStep: 50,
+      price,
+      depositSol: 3,
+      feePct: 1,
+      volatilityPctDaily: 40,
+      at: T0,
+    });
+  }
+
+  it("zählt nur den Anteil des Intervalls, der in der Range lag", () => {
+    const state = openBalanced();
+    const oben = state.bins[state.bins.length - 1]!.price;
+
+    // Schlusskurs in der Range, das Hoch weit darüber: Die Position war einen
+    // Teil des Intervalls draußen. Über Schlusskurse gemessen zählte sie voll.
+    const mitDocht = tickPaperPosition(
+      state,
+      tick({ priceInSol: 1, priceLow: 1, priceHigh: oben * 1.5 }),
+      balanced,
+      config.global,
+    );
+    const ohneDocht = tickPaperPosition(state, tick({ priceInSol: 1 }), balanced, config.global);
+
+    expect(ohneDocht.valuation.timeInRangePct).toBeCloseTo(100, 6);
+    expect(mitDocht.valuation.timeInRangePct).toBeLessThan(100);
+    expect(mitDocht.valuation.timeInRangePct).toBeGreaterThan(0);
+  });
+
+  it("ohne Extrema bleibt das Verhalten exakt das frühere", () => {
+    const state = openBalanced();
+    const ohne = tickPaperPosition(state, tick({ priceInSol: 0.97 }), balanced, config.global);
+    const gleich = tickPaperPosition(
+      state,
+      tick({ priceInSol: 0.97, priceLow: 0.97, priceHigh: 0.97 }),
+      balanced,
+      config.global,
+    );
+    expect(gleich.valuation.timeInRangePct).toBeCloseTo(ohne.valuation.timeInRangePct, 12);
+    expect(gleich.valuation.pnlSol).toBeCloseTo(ohne.valuation.pnlSol, 12);
+  });
+
+  it("stoppt am Tief des Intervalls aus, auch wenn der Schlusskurs sich erholt hat", () => {
+    // Ein Stop-Loss ist eine Auslösung, kein Endstandsvergleich. Über
+    // Schlusskurse gemessen überlebte eine Position, die zwischendurch tief
+    // unter der Schwelle lag — der einzige Notausgang löste zu selten aus.
+    const state = openBalanced();
+
+    const nurSchluss = tickPaperPosition(
+      state,
+      tick({ priceInSol: 0.99 }),
+      balanced,
+      config.global,
+    );
+    expect(nurSchluss.closeReason).toBeNull();
+
+    const mitTief = tickPaperPosition(
+      state,
+      tick({ priceInSol: 0.99, priceHigh: 1, priceLow: 0.35 }),
+      balanced,
+      config.global,
+    );
+    expect(mitTief.closeReason).not.toBeNull();
+    // Bewertet wird dort, wo ausgestiegen wurde — nicht am freundlicheren Schluss.
+    expect(mitTief.valuation.pnlPct).toBeLessThan(nurSchluss.valuation.pnlPct);
+    expect(mitTief.state.lastPrice).toBe(0.35);
+  });
+
+  it("eine einseitige Position gilt als befüllt, wenn der Docht die Range erreicht", () => {
+    const degenState = openDegen();
+    const oben = degenState.bins[degenState.bins.length - 1]!.price;
+
+    const nurSchluss = tickPaperPosition(
+      degenState,
+      tick({ priceInSol: oben * 1.02 }),
+      config.presets["degen"]!,
+      config.global,
+    );
+    expect(nurSchluss.state.rangeReached).toBe(false);
+
+    // Der Preis fiel innerhalb des Intervalls in die Leiter und erholte sich.
+    // Die Position hat den Token dann tatsächlich gekauft.
+    const mitDocht = tickPaperPosition(
+      degenState,
+      tick({ priceInSol: oben * 1.02, priceHigh: oben * 1.02, priceLow: oben * 0.98 }),
+      config.presets["degen"]!,
+      config.global,
+    );
+    expect(mitDocht.state.rangeReached).toBe(true);
+  });
+});
