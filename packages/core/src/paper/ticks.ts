@@ -1,6 +1,7 @@
 import { poolPriceInSol } from "../screening/aggregate";
 import { effectiveFeePct, type TrackPoint } from "../ml/outcomes";
-import type { PoolMetrics } from "../domain/types";
+import { WSOL_MINT } from "../domain/constants";
+import { feeCurrencyOf, type CollectFeeMode, type PoolMetrics } from "../domain/types";
 import type { MarketTick } from "./types";
 
 /**
@@ -138,6 +139,37 @@ function extremesInSol(
 export interface TickPool {
   mintX: string;
   mintY: string;
+  /**
+   * `collect_fee_mode` des Pools. Bestimmt zusammen mit den Mints, ob geclaimte
+   * Gebühren noch einen Swap brauchen — bei `only_y` mit SOL als Token Y
+   * entfallen Konvertierungskosten vollständig.
+   */
+  collectFeeMode?: CollectFeeMode;
+  /**
+   * Reward-Mints des Pools. Leer heißt seit `lb_clmm` 0.12.0: Limit-Order-Pool,
+   * und dort zweigt Order-Liquidität einen Teil der Gebühr ab.
+   */
+  rewardMints?: string[];
+  hasFarm?: boolean;
+}
+
+/**
+ * Betreibt der Pool Liquidity Mining?
+ *
+ * Seit `lb_clmm` 0.12.0 ist das gleichbedeutend mit „unterstützt **keine** Limit
+ * Orders": Bestehende Pools ohne initialisierte Rewards wurden unumkehrbar zu
+ * Limit-Order-Pools, alle mit Rewards blieben Liquidity-Mining-Pools.
+ *
+ * `undefined`, wenn die Quelle nichts dazu sagt — dann wird der ungünstige Fall
+ * angenommen und der Limit-Order-Abschlag greift.
+ */
+function liquidityMiningOf(pool: {
+  rewardMints?: string[];
+  hasFarm?: boolean;
+}): boolean | undefined {
+  if (pool.hasFarm === true) return true;
+  if (pool.rewardMints === undefined) return pool.hasFarm;
+  return pool.rewardMints.length > 0;
 }
 
 /**
@@ -162,7 +194,30 @@ export function marketTickFromPool(
     poolFeePct: poolFeePct(pool),
     solPriceUsd: context.solPriceUsd,
     ...(pool.protocolFeePct !== undefined ? { protocolFeePct: pool.protocolFeePct } : {}),
+    ...poolEconomics(pool),
     at: context.at,
+  };
+}
+
+/**
+ * Pool-Eigenschaften, die weder Preis noch Volumen sind, aber über Kosten und
+ * Ertrag mitentscheiden: Gebührenwährung und Pooltyp.
+ *
+ * Eine Stelle für beide Tick-Pfade — sonst kennt der Live-Betrieb Größen, die
+ * dem Replay fehlen, und die Simulation bewertet in beiden Welten anders.
+ */
+function poolEconomics(pool: {
+  mintX: string;
+  mintY: string;
+  collectFeeMode?: CollectFeeMode;
+  rewardMints?: string[];
+  hasFarm?: boolean;
+}): { feeCurrency?: "quote" | "base" | "mixed"; liquidityMining?: boolean } {
+  const feeCurrency = feeCurrencyOf(pool, WSOL_MINT);
+  const liquidityMining = liquidityMiningOf(pool);
+  return {
+    ...(feeCurrency !== null ? { feeCurrency } : {}),
+    ...(liquidityMining !== undefined ? { liquidityMining } : {}),
   };
 }
 
@@ -199,6 +254,7 @@ export function marketTickFromPoint(point: TrackPoint, pool: TickPool): MarketTi
     poolFeePct: feePct ?? 0,
     solPriceUsd: point.solPriceUsd ?? 0,
     ...(protocolFeePct !== undefined && protocolFeePct !== null ? { protocolFeePct } : {}),
+    ...poolEconomics(pool),
     at: point.ts,
   };
 }

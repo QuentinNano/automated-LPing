@@ -4,7 +4,7 @@ export { PrismaConfigStore } from "./configStore";
 export { ScanRepo } from "./scanRepo";
 export type { RecordedCandidate, ScanRecordInput } from "./scanRepo";
 export { TrackRepo, snapshotDataOf, trailingDailyRate } from "./trackRepo";
-export type { RecordFeatureInput, DuePool, DatasetRow } from "./trackRepo";
+export type { RecordFeatureInput, DuePool, DatasetRow, ReplayPoolRow } from "./trackRepo";
 export { PaperRepo } from "./paperRepo";
 export type {
   OpenPaperPositionRecord,

@@ -38,6 +38,44 @@ export const PaperConfigSchema = z.object({
    */
   feeShareHaircutPct: pct(0, 90),
   /**
+   * Angenommener Anteil der Handelsgebühr, den **Limit-Order-Liquidität**
+   * abzweigt — auf Pools, die Limit Orders unterstützen.
+   *
+   * Seit `lb_clmm` 0.12.0 (Mainnet Mai 2026) ist jeder bestehende Pool **ohne
+   * Liquidity-Mining-Rewards** unumkehrbar ein Limit-Order-Pool. Das ist
+   * praktisch jeder Memecoin-Pool, den die Presets suchen. Dort teilt das
+   * Programm die Gebühr zuerst nach Liquiditätsquelle auf: Was Limit Orders
+   * gefüllt haben, geht je zur Hälfte an die Order-Steller und ans Protokoll —
+   * an Market-Maker-LPs davon nichts.
+   *
+   * Bewusst **getrennt** von `feeShareHaircutPct`: Beide senken den Ertrag,
+   * aber sie haben verschiedene Ursachen und verschiedene Messwege. In einem
+   * Sammel-Abschlag zusammengefasst ließe sich keiner von beiden je ersetzen.
+   * Dieser hier wird durch eine Auswertung der `/positions/.../historical`-
+   * Events messbar; der andere braucht den RPC-Adapter.
+   *
+   * Der Startwert ist eine Annahme, kein Messwert, und gehört deshalb in den
+   * Stresstest — nicht in eine Optimierung (KONZEPT-ML.md 6.1).
+   */
+  limitOrderShareHaircutPct: pct(0, 90).default(15),
+  /**
+   * Preisimpact eines Swaps je Anteil am Pool-TVL.
+   *
+   * Die Slippage war eine **Pauschale**: derselbe Prozentsatz, ob 0,1 oder 5
+   * SOL durch einen Pool gehen. Das ist gerade dort falsch, wo es weh tut — im
+   * Ausstieg aus einer Position, die für ihren Pool zu groß geworden ist, und
+   * damit genau im Verlust-Tail, den die Simulation abbilden soll.
+   *
+   * Modell: `Impact% = swapImpactFactor · (Swap-Wert / Pool-TVL) · 100`, additiv
+   * zur Grundslippage und gedeckelt durch `slippageCapPct` des Presets. Bei 0,5
+   * kostet ein Swap über 1 % des TVL zusätzlich 0,5 %.
+   *
+   * Ersetzbar durch eine Messung: Die Jupiter-Sellability-Prüfung ermittelt je
+   * Kandidat bereits einen Roundtrip-Verlust — bislang nur als Filter, nicht als
+   * Kalibrierung. `0` schaltet die Größenabhängigkeit ab.
+   */
+  swapImpactFactor: z.number().min(0).max(20).default(0.5),
+  /**
    * Angenommene Bin-Breite der **übrigen** LPs im Pool.
    *
    * Gebühren verdient nur der aktive Bin, und der Anteil daran ist

@@ -7,6 +7,7 @@ import {
   poolFeeRatePctPerDay,
   poolPriceInSol,
   positionSizeSol,
+  solPriceUsdOf,
   tickPaperPosition,
   valuePosition,
   volumeRate24hUsd,
@@ -71,6 +72,19 @@ export interface PaperDeps {
   now?: () => Date;
 }
 
+/**
+ * Pool-TVL in SOL — Bezugsgröße des größenabhängigen Preisimpacts.
+ *
+ * Der SOL-Kurs kommt aus den Token-Angaben, die die Pool-API ohnehin
+ * mitliefert. Fehlt eine der beiden Größen, bleibt es bei der Grundslippage:
+ * Eine unbekannte Bezugsgröße wird nicht geschätzt.
+ */
+function poolTvlSolOf(pool: PoolMetrics): number | null {
+  const solPriceUsd = solPriceUsdOf(pool);
+  if (solPriceUsd === null || pool.tvlUsd === undefined || pool.tvlUsd <= 0) return null;
+  return pool.tvlUsd / solPriceUsd;
+}
+
 export interface PaperCycleResult {
   opened: number;
   ticked: number;
@@ -128,6 +142,9 @@ export async function openFromScan(
       // Steuert die Range-Breite: Sie folgt der Bewegung des Marktes, nicht
       // einer festen Bin-Zahl (ANALYSE.md 6, Punkt 6).
       volatilityPctDaily: row.volatilityPctDaily,
+      // Bezugsgröße des Preisimpacts beim Einstiegs-Swap. Der SOL-Kurs steht
+      // in den Token-Angaben des Pools — kein zusätzlicher Abruf nötig.
+      poolTvlSol: poolTvlSolOf(row.pool),
       at: now,
     });
 
@@ -227,7 +244,12 @@ export async function tickOpenPositions(
       continue;
     }
 
-    const closeResult = closePaperPosition(result.state, tick.priceInSol, config.global);
+    // Der Ausstiegs-Swap ist der größte im Leben einer Position — seine
+    // Slippage hängt an ihrer Größe gegenüber dem Pool.
+    const closeResult = closePaperPosition(result.state, tick.priceInSol, config.global, {
+      preset,
+      poolTvlSol: tick.solPriceUsd > 0 ? tick.poolTvlUsd / tick.solPriceUsd : null,
+    });
     await deps.store.close({
       positionId: position.id,
       state: closeResult.state,

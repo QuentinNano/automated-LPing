@@ -138,11 +138,13 @@ export {
   openBins,
   applyPriceMove,
   activeBinValueSol,
+  crossedBins,
   inRangeShare,
+  MAX_BINS_PER_SWAP,
   totalsOf,
   isInRange,
 } from "./paper/bins";
-export type { BinWidth, DeriveBinWidthParams } from "./paper/bins";
+export type { BinWidth, DeriveBinWidthParams, CrossedBins } from "./paper/bins";
 export {
   openPaperPosition,
   tickPaperPosition,

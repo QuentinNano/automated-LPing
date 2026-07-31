@@ -3,6 +3,7 @@ import {
   closePaperPosition,
   openPaperPosition,
   tickPaperPosition,
+  totalsOf,
   valuePosition,
   type MarketTick,
   type PaperPositionState,
@@ -588,5 +589,143 @@ describe("Kerzen-Extrema statt Schlusskurs", () => {
       config.global,
     );
     expect(mitDocht.state.rangeReached).toBe(true);
+  });
+});
+
+describe("Limit-Order-Anteil, Gebührenwährung und größenabhängige Slippage", () => {
+  const balanced = config.presets["balanced"]!;
+
+  function open(overrides: Partial<Parameters<typeof openPaperPosition>[0]> = {}) {
+    return openPaperPosition({
+      preset: balanced,
+      global: config.global,
+      binStep: 50,
+      price: 1,
+      depositSol: 3,
+      feePct: 1,
+      volatilityPctDaily: 40,
+      at: T0,
+      ...overrides,
+    });
+  }
+
+  const earned = (s: PaperPositionState) => s.feesClaimedSol + s.feesUnclaimedSol;
+
+  it("zieht auf einem Limit-Order-Pool einen Teil der Gebühr ab", () => {
+    // Seit lb_clmm 0.12.0 ist ein Pool ohne Rewards ein Limit-Order-Pool. Was
+    // Order-Liquidität füllt, erreicht Market-Maker-LPs nicht.
+    const state = open();
+    const mining = tickPaperPosition(
+      state,
+      tick({ priceInSol: 0.98, liquidityMining: true }),
+      balanced,
+      config.global,
+    );
+    const limitOrder = tickPaperPosition(
+      state,
+      tick({ priceInSol: 0.98, liquidityMining: false }),
+      balanced,
+      config.global,
+    );
+
+    expect(earned(limitOrder.state)).toBeLessThan(earned(mining.state));
+    expect(earned(limitOrder.state)).toBeCloseTo(
+      earned(mining.state) * (1 - config.global.paper.limitOrderShareHaircutPct / 100),
+      12,
+    );
+  });
+
+  it("nimmt ohne Angabe zum Pooltyp den ungünstigen Fall an", () => {
+    const state = open();
+    const ohne = tickPaperPosition(state, tick({ priceInSol: 0.98 }), balanced, config.global);
+    const limitOrder = tickPaperPosition(
+      state,
+      tick({ priceInSol: 0.98, liquidityMining: false }),
+      balanced,
+      config.global,
+    );
+    expect(earned(ohne.state)).toBeCloseTo(earned(limitOrder.state), 12);
+  });
+
+  it("verdient in den überquerten Bins, nicht nur im aktiven", () => {
+    // Derselbe Schlusskurs, aber einmal mit einer Bewegung durch die eigenen
+    // Bins: Die Doku sagt, die am Swap beteiligten Bins verdienen.
+    const state = open();
+    const ruhig = tickPaperPosition(
+      state,
+      tick({ priceInSol: 1, priceLow: 1, priceHigh: 1 }),
+      balanced,
+      config.global,
+    );
+    const bewegt = tickPaperPosition(
+      state,
+      tick({ priceInSol: 1, priceLow: 0.9, priceHigh: 1.1 }),
+      balanced,
+      config.global,
+    );
+    expect(earned(bewegt.state)).toBeGreaterThan(earned(ruhig.state));
+  });
+
+  it("spart den Konvertierungs-Swap, wenn die Gebühr schon in SOL anfällt", () => {
+    // Claim-freudiges Preset, damit der Claim in diesem Tick überhaupt fällt —
+    // geprüft wird die Kostenrechnung, nicht die Claim-Schwelle.
+    const eifrig = {
+      ...balanced,
+      feeHarvest: { ...balanced.feeHarvest, minClaimValueSol: 0, claimCostFactor: 1 },
+    };
+    const state = open();
+    const at = new Date(T0.getTime() + 2 * 3_600_000);
+    const kosten = (feeCurrency: MarketTick["feeCurrency"]) =>
+      tickPaperPosition(state, tick({ priceInSol: 0.99, at, feeCurrency }), eifrig, config.global)
+        .state.costsSol;
+
+    // Ein Claim hat wirklich stattgefunden — sonst prüfte der Test nichts.
+    expect(
+      tickPaperPosition(state, tick({ priceInSol: 0.99, at }), eifrig, config.global).state
+        .feesClaimedSol,
+    ).toBeGreaterThan(0);
+
+    expect(kosten("quote")).toBeLessThan(kosten("mixed"));
+    expect(kosten("mixed")).toBeLessThan(kosten("base"));
+    // Ohne Angabe gilt der ungünstige Fall — das frühere Verhalten.
+    expect(kosten(undefined)).toBeCloseTo(kosten("base"), 12);
+  });
+
+  it("verlangt für den Ausstieg mehr Slippage, je größer die Position im Pool ist", () => {
+    const gross = open({ depositSol: 30 });
+    const moved = tickPaperPosition(gross, tick({ priceInSol: 0.9 }), balanced, config.global);
+
+    // Derselbe Ausstieg, einmal in einem tiefen und einmal in einem dünnen Pool.
+    const tief = closePaperPosition(moved.state, 0.9, config.global, {
+      preset: balanced,
+      poolTvlSol: 100_000,
+    });
+    const duenn = closePaperPosition(moved.state, 0.9, config.global, {
+      preset: balanced,
+      poolTvlSol: 300,
+    });
+    expect(duenn.state.costsSol).toBeGreaterThan(tief.state.costsSol);
+
+    // Der Deckel des Presets begrenzt die Näherung nach oben.
+    const winzig = closePaperPosition(moved.state, 0.9, config.global, {
+      preset: balanced,
+      poolTvlSol: 1,
+    });
+    const swapWert = totalsOf(moved.state.bins, 0.9).tokenAmount * 0.9;
+    const maxSwapKosten = (swapWert * balanced.slippageCapPct) / 100;
+    expect(winzig.state.costsSol - moved.state.costsSol).toBeLessThanOrEqual(
+      maxSwapKosten + config.global.paper.costs.priorityFeeSol * 2 + 1e-9,
+    );
+  });
+
+  it("bleibt ohne Kontext bei der Pauschale — das frühere Verhalten", () => {
+    const state = open();
+    const moved = tickPaperPosition(state, tick({ priceInSol: 0.9 }), balanced, config.global);
+    const ohne = closePaperPosition(moved.state, 0.9, config.global);
+    const ohneTvl = closePaperPosition(moved.state, 0.9, config.global, {
+      preset: balanced,
+      poolTvlSol: null,
+    });
+    expect(ohneTvl.state.costsSol).toBeCloseTo(ohne.state.costsSol, 12);
   });
 });

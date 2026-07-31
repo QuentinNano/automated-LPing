@@ -81,6 +81,24 @@ export interface RecordFeatureInput {
   capturedAt?: Date;
 }
 
+/**
+ * Stammdaten eines Pools für den Replay.
+ *
+ * Über Mints und Bin Step hinaus gehören die beiden Größen dazu, die über
+ * Kosten und Ertrag mitentscheiden und nicht in der Zeitreihe stehen:
+ * `collect_fee_mode` (kostet der Claim einen Swap?) und die Reward-Mints (ist
+ * es seit `lb_clmm` 0.12.0 ein Limit-Order-Pool?).
+ */
+export interface ReplayPoolRow {
+  poolAddress: string;
+  mintX: string;
+  mintY: string;
+  binStep: number;
+  collectFeeMode?: "input_only" | "only_y";
+  rewardMints?: string[];
+  hasFarm?: boolean;
+}
+
 export interface DuePool {
   poolAddress: string;
   tokenMint: string;
@@ -747,7 +765,7 @@ export class TrackRepo {
    */
   async replayPools(
     poolAddresses?: string[],
-  ): Promise<{ poolAddress: string; mintX: string; mintY: string; binStep: number }[]> {
+  ): Promise<ReplayPoolRow[]> {
     const rows = await this.prisma.poolCandidate.findMany({
       ...(poolAddresses !== undefined ? { where: { poolAddress: { in: poolAddresses } } } : {}),
       orderBy: { discoveredAt: "desc" },
@@ -756,12 +774,39 @@ export class TrackRepo {
     });
 
     return rows.flatMap((row) => {
-      const metrics = row.rawMetrics as { mintX?: unknown; mintY?: unknown; binStep?: unknown };
+      const metrics = row.rawMetrics as {
+        mintX?: unknown;
+        mintY?: unknown;
+        binStep?: unknown;
+        collectFeeMode?: unknown;
+        rewardMints?: unknown;
+        hasFarm?: unknown;
+      };
       const { mintX, mintY, binStep } = metrics;
       if (typeof mintX !== "string" || typeof mintY !== "string" || typeof binStep !== "number") {
         return [];
       }
-      return [{ poolAddress: row.poolAddress, mintX, mintY, binStep }];
+      // Gebührenwährung und Pooltyp gehören dazu: Ohne sie rechnet der Replay
+      // Konvertierungskosten, die es nicht gibt, und übersieht den
+      // Limit-Order-Abschlag, den es gibt.
+      const collectFeeMode =
+        metrics.collectFeeMode === "only_y" || metrics.collectFeeMode === "input_only"
+          ? metrics.collectFeeMode
+          : undefined;
+      const rewardMints = Array.isArray(metrics.rewardMints)
+        ? metrics.rewardMints.filter((mint): mint is string => typeof mint === "string")
+        : undefined;
+      return [
+        {
+          poolAddress: row.poolAddress,
+          mintX,
+          mintY,
+          binStep,
+          ...(collectFeeMode !== undefined ? { collectFeeMode } : {}),
+          ...(rewardMints !== undefined ? { rewardMints } : {}),
+          ...(typeof metrics.hasFarm === "boolean" ? { hasFarm: metrics.hasFarm } : {}),
+        },
+      ];
     });
   }
 

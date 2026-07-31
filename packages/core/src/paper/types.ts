@@ -146,6 +146,29 @@ export interface MarketTick {
    * angenommen — 0 wäre die einzige Annahme, die sicher falsch ist.
    */
   protocolFeePct?: number;
+  /**
+   * In welcher Währung die Gebühren dieses Pools anfallen (`collect_fee_mode`
+   * zusammen mit der Frage, auf welcher Seite SOL steht).
+   *
+   * Entscheidet über die **Konvertierungskosten beim Claim**: Fallen die
+   * Gebühren ohnehin in SOL an (`quote`), gibt es nichts zu tauschen und keine
+   * Slippage zu zahlen. Fallen sie im Memecoin an (`base`), muss alles durch
+   * einen Swap. `mixed` ist der `InputOnly`-Fall, bei dem die Gebühr der
+   * Handelsrichtung folgt.
+   *
+   * Fehlt die Angabe, wird der ungünstige Fall angenommen — die Gebühr also als
+   * konvertierungspflichtig behandelt. Das entspricht dem früheren Verhalten.
+   */
+  feeCurrency?: "quote" | "base" | "mixed";
+  /**
+   * Ob der Pool Liquidity Mining betreibt.
+   *
+   * Seit `lb_clmm` 0.12.0 ist das zugleich die Auskunft darüber, ob er Limit
+   * Orders unterstützt: Pools mit Rewards sind Liquidity-Mining-Pools, alle
+   * übrigen wurden unumkehrbar zu Limit-Order-Pools. Nur bei letzteren zweigt
+   * Order-Liquidität einen Teil der Gebühr ab.
+   */
+  liquidityMining?: boolean;
   solPriceUsd: number;
   at: Date;
 }

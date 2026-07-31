@@ -321,6 +321,7 @@ sie würden sonst ungeprüft live gehen:
 |---|---|
 | **Risk Manager nicht scharf:** Kill-Switch, globale Positions- und Exposure-Grenzen und Verlustlimits sind konfigurierbar, werden aber von keiner Logik durchgesetzt. (Die positionsbezogenen Notfall-Schwellen sind seit `exit.*` scharf — die portfolioweiten nicht) | KONZEPT.md 6.3, 9 |
 | **Keine On-Chain-Reads:** Authorities kommen nur von RugCheck; die Token-2022-Prüfung und die LP-Dominanz fehlen ganz | KONZEPT.md 5.1 |
-| **Exit-Slippage pauschal** statt größen- und liquiditätsabhängig — der Verlust-Tail der Simulation ist dadurch zu freundlich | KONZEPT.md 13 |
+| **Slippage-Impact geschätzt, nicht gemessen:** Die Größenabhängigkeit ist seit `swapImpactFactor` da, ihr Faktor ist aber eine Annahme. Die Jupiter-Roundtrip-Prüfung könnte ihn kalibrieren — sie filtert bislang nur | KONZEPT-ML.md 6.1 |
+| **Limit-Order-Anteil geschätzt:** Seit `lb_clmm` 0.12.0 zweigt Order-Liquidität einen Teil der Gebühr ab. Der Abschlag ist als eigene Annahme geführt, aber nicht gemessen | KONZEPT-ML.md 6.1 |
 | **Shadow-Tracking wird erfasst, aber nicht ausgewertet** (Filter-Güte) | KONZEPT.md 5.5 |
 | **Web-UI ohne Authentifizierung** | KONZEPT.md 11 |

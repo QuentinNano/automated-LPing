@@ -384,24 +384,72 @@ export function isInRange(bins: SimBin[], price: number): boolean {
 }
 
 /**
- * Liquiditätswert des **aktiven** Bins in SOL — der einzige Bin, der Gebühren
- * verdient.
+ * Liquiditätswert des **aktiven** Bins in SOL.
  *
- * Die DLMM-Doku definiert den Anteil am Gebührenfluss als
- * `eigene Liquidität in den berechtigten Bins / Gesamtliquidität dort`,
- * berechtigt ist der aktive Bin (bei Mehr-Bin-Swaps zusätzlich die überquerten,
- * bis zu 15). Der Liquiditätswert eines Bins ist `L = P·x + y` — bei unserer
- * Darstellung also genau sein SOL-Wert.
+ * Der Liquiditätswert eines Bins ist nach der DLMM-Doku `L = P·x + y` — bei
+ * unserer Darstellung also genau sein SOL-Wert, gerechnet zum **Bin-Preis**
+ * und nicht zum Marktpreis.
  *
- * Ist der aktive Bin nicht Teil der Position, ist der Wert 0: dann verdient sie
- * nichts, unabhängig davon, wie viel Kapital in den übrigen Bins liegt.
+ * Ist der aktive Bin nicht Teil der Position, ist der Wert 0.
  */
 export function activeBinValueSol(bins: SimBin[], price: number, binStep: number): number {
-  const activeId = binIdFromPrice(price, binStep);
+  return crossedBins(bins, price, price, binStep).valueSol;
+}
+
+/**
+ * Obergrenze der Bins, die ein einzelner Swap überqueren kann.
+ *
+ * Aus dem `lb_clmm`-Changelog 0.12.0: „max bins to swap in 1 instruction changes
+ * from 280 bins to 260 bins". Rein als Plausibilitätsgrenze geführt — eine
+ * Preisbewegung über mehr Bins entsteht aus mehreren Swaps, und jeder davon
+ * verteilt seine Gebühren auf die von *ihm* überquerten Bins.
+ */
+export const MAX_BINS_PER_SWAP = 260;
+
+export interface CrossedBins {
+  /** Summierter Liquiditätswert der eigenen Bins im überquerten Bereich. */
+  valueSol: number;
+  /** Wie viele Bins der Preis insgesamt berührt hat (auch fremde). */
+  binCount: number;
+}
+
+/**
+ * Eigene Liquidität in den Bins, die der Preis zwischen zwei Beobachtungen
+ * berührt hat — die Bins, die nach der Doku Gebühren verdienen.
+ *
+ * **Warum nicht nur der aktive Bin.** Die Doku ist eindeutig: *„DLMM calculates
+ * fees per bin, which means the bins that participate in the swap are the bins
+ * that earn fees"*, und der Anteil daran ist `eigene Liquidität in den
+ * berechtigten Bins / Gesamtliquidität dort`. Nur den aktiven Bin zu zählen
+ * unterschätzt den Ertrag genau dann, wenn der Preis läuft — also in den
+ * Phasen, in denen eine Position ihr Inventar dreht und den Impermanent Loss
+ * tatsächlich realisiert. Der Fehler wirkte damit einseitig gegen breite
+ * Positionen, und die Strategie ist inzwischen auf breite Positionen umgestellt.
+ *
+ * Das dokumentierte 15-Bin-Limit gilt für **Liquidity-Mining-Rewards**, nicht
+ * für Gebühren; für Gebühren nennt die Doku keine Grenze.
+ *
+ * Bei unverändertem Preis ist der berührte Bereich genau der aktive Bin — die
+ * Rechnung geht dann exakt in die frühere über.
+ */
+export function crossedBins(
+  bins: SimBin[],
+  fromPrice: number,
+  toPrice: number,
+  binStep: number,
+): CrossedBins {
+  if (!(fromPrice > 0) || !(toPrice > 0)) return { valueSol: 0, binCount: 0 };
+
+  const a = binIdFromPrice(fromPrice, binStep);
+  const b = binIdFromPrice(toPrice, binStep);
+  const lowId = Math.min(a, b);
+  const highId = Math.max(a, b);
+
+  let valueSol = 0;
   for (const bin of bins) {
-    if (bin.id === activeId) return bin.sol + bin.token * bin.price;
+    if (bin.id >= lowId && bin.id <= highId) valueSol += bin.sol + bin.token * bin.price;
   }
-  return 0;
+  return { valueSol, binCount: highId - lowId + 1 };
 }
 
 /**

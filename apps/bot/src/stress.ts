@@ -113,6 +113,7 @@ export function stressOnce(
     // Das Szenario kennt seine Volatilität exakt — genau der Fall, für den die
     // Range-Herleitung gebaut ist.
     volatilityPctDaily: scenario.sigmaPctDaily,
+    poolTvlSol: scenario.tvlUsd / scenario.solPriceUsd,
     at: EPOCH,
   });
 
@@ -131,6 +132,11 @@ export function stressOnce(
       poolVolume24hUsdSlow: volume24hUsd,
       poolFeePct: scenario.feePct,
       protocolFeePct: 10,
+      // Das Szenario ist bewusst der Regelfall seit lb_clmm 0.12.0: ein Pool
+      // ohne Rewards, also ein Limit-Order-Pool, dessen Gebühren im Input-Token
+      // anfallen. Wer die Annahmen einzeln bewegen will, nimmt die Sweeps.
+      liquidityMining: false,
+      feeCurrency: "mixed",
       solPriceUsd: scenario.solPriceUsd,
       at: new Date(EPOCH.getTime() + i * scenario.tickMinutes * 60_000),
     };
@@ -142,7 +148,10 @@ export function stressOnce(
     }
   }
 
-  const closed = closePaperPosition(state, price, global);
+  const closed = closePaperPosition(state, price, global, {
+    preset,
+    poolTvlSol: scenario.tvlUsd / scenario.solPriceUsd,
+  });
   return {
     pnlPct: closed.valuation.pnlPct,
     feesPct: ((closed.state.feesClaimedSol + closed.state.feesUnclaimedSol) / depositSol) * 100,
@@ -239,12 +248,49 @@ export function modelAssumptionSweeps(
         stressBatch(preset, withPaper({ feeShareHaircutPct: Number(value) }), scenario, runs),
     },
     {
-      label: "costs.swapSlippagePct (größter variabler Kostenposten)",
+      // Seit lb_clmm 0.12.0 der Regelfall bei Pools ohne Rewards. Wie viel der
+      // Handelsgebühr Order-Liquidität abzweigt, ist unbekannt — deshalb ist es
+      // eine Annahme und gehört hierher, nicht in eine Optimierung.
+      label: "limitOrderShareHaircutPct (Anteil, den Limit Orders abzweigen)",
+      values: [0, 15, 30, 50],
+      run: (value) =>
+        stressBatch(
+          preset,
+          withPaper({ limitOrderShareHaircutPct: Number(value) }),
+          scenario,
+          runs,
+        ),
+    },
+    {
+      label: "costs.swapSlippagePct (Grundslippage je Swap)",
       values: [0.1, 0.5, 1, 2],
       run: (value) =>
         stressBatch(
           preset,
           withPaper({ costs: { ...global.paper.costs, swapSlippagePct: Number(value) } }),
+          scenario,
+          runs,
+        ),
+    },
+    {
+      // Der Preisimpact wächst mit dem Anteil am Pool — er trifft den Ausstieg
+      // und damit den Verlust-Tail. 0 schaltet die Größenabhängigkeit ab und
+      // zeigt, wie freundlich das Modell ohne sie rechnet.
+      label: "swapImpactFactor (Preisimpact je Anteil am Pool-TVL)",
+      values: [0, 0.25, 0.5, 1, 2],
+      run: (value) =>
+        stressBatch(preset, withPaper({ swapImpactFactor: Number(value) }), scenario, runs),
+    },
+    {
+      // Nicht der größte Posten, aber der einzige, der in Stressphasen um
+      // Größenordnungen springt — und Stressphasen sind die, in denen die
+      // Ausstiege feuern.
+      label: "costs.priorityFeeSol (je Transaktion)",
+      values: [0.0001, 0.0005, 0.005, 0.02],
+      run: (value) =>
+        stressBatch(
+          preset,
+          withPaper({ costs: { ...global.paper.costs, priorityFeeSol: Number(value) } }),
           scenario,
           runs,
         ),

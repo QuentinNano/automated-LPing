@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeBinValueSol,
   applyPriceMove,
   binIdFromPrice,
   binPrice,
   binsForCoverage,
   coverageHorizonHours,
+  crossedBins,
   deriveBinWidth,
   inRangeShare,
   openBins,
@@ -345,5 +347,47 @@ describe("inRangeShare", () => {
     const eng = inRangeShare(bins, 1, 0.99, 1.01);
     const weit = inRangeShare(bins, 1, unten / 2, oben * 2);
     expect(weit).toBeLessThan(eng);
+  });
+});
+
+describe("crossedBins", () => {
+  const bins = openBins({
+    price: 1,
+    binStep: 100,
+    binCount: 21,
+    strategy: "Spot",
+    sided: "balanced",
+    depositSol: 21,
+  }).bins;
+
+  it("ist bei unverändertem Preis genau der aktive Bin", () => {
+    const crossed = crossedBins(bins, 1, 1, 100);
+    expect(crossed.binCount).toBe(1);
+    expect(crossed.valueSol).toBeCloseTo(activeBinValueSol(bins, 1, 100), 12);
+  });
+
+  it("summiert die eigene Liquidität über den berührten Bereich", () => {
+    const eng = crossedBins(bins, 1, 1, 100);
+    const weit = crossedBins(bins, 0.95, 1.05, 100);
+    expect(weit.binCount).toBeGreaterThan(eng.binCount);
+    expect(weit.valueSol).toBeGreaterThan(eng.valueSol);
+    // Mehr als der Gesamtbestand kann nicht berührt werden.
+    expect(weit.valueSol).toBeLessThanOrEqual(totalsOf(bins, 1).valueSol + 1e-9);
+  });
+
+  it("zählt auch die Bins, die dem Preis nicht mehr gehören", () => {
+    // Die Richtung ist gleichgültig: Berührt ist berührt.
+    const hoch = crossedBins(bins, 1, 1.05, 100);
+    const runter = crossedBins(bins, 1.05, 1, 100);
+    expect(runter.binCount).toBe(hoch.binCount);
+    expect(runter.valueSol).toBeCloseTo(hoch.valueSol, 12);
+  });
+
+  it("zählt fremde Bins mit, die uns nicht gehören", () => {
+    // Der Preis lief weit über die Position hinaus: binCount wächst, der eigene
+    // Wert nicht. Genau so verdünnt sich der Anteil am Gebührenfluss.
+    const weit = crossedBins(bins, 1, 3, 100);
+    expect(weit.binCount).toBeGreaterThan(bins.length);
+    expect(weit.valueSol).toBeLessThanOrEqual(totalsOf(bins, 1).valueSol + 1e-9);
   });
 });

@@ -62,6 +62,12 @@ export interface ReplayOptions {
  */
 const DEFAULT_VOLATILITY_LOOKBACK_HOURS = 24;
 
+/** Pool-TVL in SOL, sofern beide Bezugsgrößen belegt sind. */
+function poolTvlSolOf(tick: { poolTvlUsd: number; solPriceUsd: number }): number | null {
+  if (tick.poolTvlUsd <= 0 || tick.solPriceUsd <= 0) return null;
+  return tick.poolTvlUsd / tick.solPriceUsd;
+}
+
 /**
  * Volatilitätsschätzung zum Einstiegszeitpunkt aus den Punkten davor.
  *
@@ -156,12 +162,14 @@ export function replayPosition(
       entry.index,
       options.volatilityLookbackHours ?? DEFAULT_VOLATILITY_LOOKBACK_HOURS,
     ),
+    poolTvlSol: poolTvlSolOf(entry.tick),
     at: entry.tick.at,
   });
 
   let valuation = valuePosition(state, entry.tick.priceInSol);
   let closeReason: ReplayCloseReason = "end_of_series";
   let lastPrice = entry.tick.priceInSol;
+  let lastTvlSol = poolTvlSolOf(entry.tick);
   let exitAt = entry.tick.at;
   let ticks = 0;
 
@@ -173,6 +181,7 @@ export function replayPosition(
     state = result.state;
     valuation = result.valuation;
     lastPrice = tick.priceInSol;
+    lastTvlSol = poolTvlSolOf(tick);
     exitAt = tick.at;
     ticks++;
 
@@ -184,7 +193,12 @@ export function replayPosition(
 
   // Auch die zensierte Position wird geschlossen — sonst fehlten ihr die
   // Ausstiegskosten und sie sähe systematisch besser aus als eine beendete.
-  const closed = closePaperPosition(state, lastPrice, global);
+  // Der Ausstiegs-Swap kostet mehr, je größer die Position gegenüber dem Pool
+  // ist — ohne diesen Kontext bliebe es bei der Pauschale.
+  const closed = closePaperPosition(state, lastPrice, global, {
+    preset,
+    poolTvlSol: lastTvlSol,
+  });
 
   return {
     poolAddress: pool.poolAddress,

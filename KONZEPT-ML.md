@@ -359,10 +359,23 @@ hängt, ist keins:
 |---|---|
 | `poolLiquidityBins` | Skaliert den Gebührenanteil linear und entscheidet, ob sich Konzentration auszahlt. **Gemessen: Faktor 14 zwischen 10 und 140** — der Default steht deshalb auf dem konservativen 30 statt 70 |
 | `feeShareHaircutPct` | Pauschaler Sicherheitsabschlag auf den Gebührenanteil |
+| `limitOrderShareHaircutPct` | Was Limit-Order-Liquidität von der Handelsgebühr abzweigt. Seit `lb_clmm` 0.12.0 ist jeder Pool ohne Rewards ein Limit-Order-Pool — also praktisch jeder Zielpool. Messbar aus den `/positions/.../historical`-Events |
 | TVL-Forttragen (6 h) | Bestimmt, welche nachgeladenen Zeiträume überhaupt Gebühren buchen (5.2) |
-| `costs.swapSlippagePct` | Der größte variable Kostenposten, derzeit größenunabhängig |
+| `costs.swapSlippagePct` | Grundslippage je Swap, größenunabhängig |
+| `swapImpactFactor` | Preisimpact je Anteil am Pool-TVL. Trifft vor allem den Ausstiegs-Swap und damit den Verlust-Tail. Messbar über die Jupiter-Roundtrip-Prüfung, die heute nur filtert |
+| `costs.priorityFeeSol` | Nicht der größte Posten, aber der einzige, der in Stressphasen um Größenordnungen springt — und Stressphasen sind die, in denen die Ausstiege feuern |
 | `rebalance.projectionHours` | Über welchen Zeitraum der Zusatzertrag eines Rebalances gilt. Vorher implizit die gesamte Restlaufzeit — das öffnete das EV-Tor vollständig |
 | Abtastraster (`tickMinutes`) | Verschiebt Zeit-in-Range und Ergebnis um mehrere Prozentpunkte; die Richtung ist **nicht** offensichtlich und gehört gemessen |
+
+Eine Beobachtung aus der Messung, die gegen die Erwartung läuft: Gebühren in den
+**überquerten** Bins statt nur im aktiven zu verteilen, erhöht den Ertrag nicht
+durchgehend. Bei kleinen Bewegungen sinkt er sogar (−12 % bei ±5 %), weil eine
+Position, die breiter ist als die unterstellte Fremdverteilung, pro berührtem
+Bin weniger beisteuert als die Konkurrenz. Erst wenn der Preis über die eigene
+Range hinausläuft, dreht es (+57 % bei ±15 %). Die Richtung hängt damit am
+Verhältnis von Positionsbreite zu `poolLiquidityBins` — was beide Annahmen
+aneinanderkoppelt und ein weiteres Argument dafür ist, `poolLiquidityBins` zu
+**messen** statt zu schätzen.
 
 Die Sensitivitätsanalyse variiert sie wie jeden anderen Parameter. Anders als
 diese werden sie danach aber **nicht optimiert**, sondern auf dem konservativen
