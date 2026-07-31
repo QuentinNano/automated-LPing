@@ -209,6 +209,45 @@ export function feeCurrencyOf(
   return pool.mintY === quoteMint ? "quote" : "base";
 }
 
+/**
+ * Eine **reale** DLMM-Position eines beliebigen Wallets — die Messlatte.
+ *
+ * Bis hierher konnte sich die Simulation nur mit sich selbst vergleichen: Der
+ * Replay prüft, ob die Engine ihre eigenen Regeln konsistent anwendet, aber
+ * nicht, ob ihre Annahmen stimmen. `poolLiquidityBins`, `feeShareHaircutPct`
+ * und der Limit-Order-Abschlag sind gemeinsam ein Faktor unbekannter Größe auf
+ * der gesamten Ertragsseite, und kein noch so sauberer Replay findet ihn.
+ *
+ * Fremde, öffentlich abfragbare Positionen schließen die Lücke: Sie hatten eine
+ * bekannte Range, einen bekannten Einsatz und einen bekannten Gebührenertrag
+ * über einen bekannten Zeitraum. Dieselbe Zeit durch die eigene Engine zu
+ * schicken und die Gebühren zu vergleichen, ersetzt eine Schätzung durch eine
+ * Messung — ohne eigenes Kapital und ohne RPC-Zugang.
+ */
+export interface RealPosition {
+  positionAddress: string;
+  poolAddress: string;
+  status: "open" | "closed";
+  openedAt: Date | null;
+  closedAt: Date | null;
+  /** Einzahlung in SOL, sofern die Antwort sie SOL-denominiert liefert. */
+  depositSol: number | null;
+  /** Vereinnahmte Gebühren in SOL über die Lebensdauer der Position. */
+  feesSol: number | null;
+  /** Gesamt-PnL in SOL, wie die API ihn rechnet. */
+  pnlSol: number | null;
+  /** Bin-Range, sofern die Antwort sie mitliefert. */
+  minBinId?: number;
+  maxBinId?: number;
+}
+
+/** Ein Pool, in dem ein Wallet Positionen hält oder hielt. */
+export interface PortfolioPool {
+  poolAddress: string;
+  /** Adressen offener Positionen, sofern der Endpunkt sie ausweist. */
+  positionAddresses: string[];
+}
+
 /** Markt-Querschnitt eines Handelspaars (DexScreener). */
 export interface MarketPairSnapshot {
   pairAddress: string;

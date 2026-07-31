@@ -56,11 +56,11 @@ enum BlacklistKind {
 /// Shadow-Tracking (Filter-Kalibrierung) weiterverfolgt.
 model PoolCandidate {
   id              String          @id @default(cuid())
-  poolAddress String          @map("pool_address")
-  source      CandidateSource
+  poolAddress     String          @map("pool_address")
+  source          CandidateSource
   /// Preset-ID aus der Konfiguration (frei benennbar, z. B. "konservativ").
-  preset      String
-  status      LifecycleState  @default(DISCOVERED)
+  preset          String
+  status          LifecycleState  @default(DISCOVERED)
   score           Decimal?        @db.Decimal(6, 2)
   rawMetrics      Json            @map("raw_metrics")
   filterResult    Json?           @map("filter_result")
@@ -76,40 +76,40 @@ model PoolCandidate {
 }
 
 model Position {
-  id              String         @id @default(cuid())
-  candidateId     String?        @map("candidate_id")
-  candidate       PoolCandidate? @relation(fields: [candidateId], references: [id])
-  poolAddress     String         @map("pool_address")
+  id              String          @id @default(cuid())
+  candidateId     String?         @map("candidate_id")
+  candidate       PoolCandidate?  @relation(fields: [candidateId], references: [id])
+  poolAddress     String          @map("pool_address")
   /// On-Chain-Adresse des Positions-Accounts (nach OPENING bekannt).
-  positionPubkey  String?        @unique @map("position_pubkey")
+  positionPubkey  String?         @unique @map("position_pubkey")
   /// Preset-ID aus der Konfiguration (frei benennbar).
   preset          String
-  state           LifecycleState @default(OPENING)
-  strategyType    String         @map("strategy_type")
+  state           LifecycleState  @default(OPENING)
+  strategyType    String          @map("strategy_type")
   sided           String
-  minBinId        Int?           @map("min_bin_id")
-  maxBinId        Int?           @map("max_bin_id")
-  binStep         Int?           @map("bin_step")
-  mintX           String         @map("mint_x")
-  mintY           String         @map("mint_y")
-  depositSol      Decimal        @map("deposit_sol") @db.Decimal(20, 9)
-  currentValueSol Decimal?       @map("current_value_sol") @db.Decimal(20, 9)
-  realizedPnlSol  Decimal        @default(0) @map("realized_pnl_sol") @db.Decimal(20, 9)
-  feesEarnedSol   Decimal        @default(0) @map("fees_earned_sol") @db.Decimal(20, 9)
-  costsSol        Decimal        @default(0) @map("costs_sol") @db.Decimal(20, 9)
+  minBinId        Int?            @map("min_bin_id")
+  maxBinId        Int?            @map("max_bin_id")
+  binStep         Int?            @map("bin_step")
+  mintX           String          @map("mint_x")
+  mintY           String          @map("mint_y")
+  depositSol      Decimal         @map("deposit_sol") @db.Decimal(20, 9)
+  currentValueSol Decimal?        @map("current_value_sol") @db.Decimal(20, 9)
+  realizedPnlSol  Decimal         @default(0) @map("realized_pnl_sol") @db.Decimal(20, 9)
+  feesEarnedSol   Decimal         @default(0) @map("fees_earned_sol") @db.Decimal(20, 9)
+  costsSol        Decimal         @default(0) @map("costs_sol") @db.Decimal(20, 9)
   /// Wert bei reinem Halten (HODL-Benchmark) zum letzten Tick.
-  hodlValueSol    Decimal?       @map("hodl_value_sol") @db.Decimal(20, 9)
-  timeInRangePct  Decimal?       @map("time_in_range_pct") @db.Decimal(6, 2)
-  entryPrice      Decimal?       @map("entry_price") @db.Decimal(30, 15)
-  lastPrice       Decimal?       @map("last_price") @db.Decimal(30, 15)
-  closeReason     String?        @map("close_reason")
+  hodlValueSol    Decimal?        @map("hodl_value_sol") @db.Decimal(20, 9)
+  timeInRangePct  Decimal?        @map("time_in_range_pct") @db.Decimal(6, 2)
+  entryPrice      Decimal?        @map("entry_price") @db.Decimal(30, 15)
+  lastPrice       Decimal?        @map("last_price") @db.Decimal(30, 15)
+  closeReason     String?         @map("close_reason")
   /// Serialisierter Simulationszustand der Paper-Engine (PaperPositionState).
-  simState        Json?          @map("sim_state")
-  paper           Boolean        @default(true)
-  openedAt        DateTime?      @map("opened_at")
-  closedAt        DateTime?      @map("closed_at")
-  createdAt       DateTime       @default(now()) @map("created_at")
-  updatedAt       DateTime       @updatedAt @map("updated_at")
+  simState        Json?           @map("sim_state")
+  paper           Boolean         @default(true)
+  openedAt        DateTime?       @map("opened_at")
+  closedAt        DateTime?       @map("closed_at")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
   events          PositionEvent[]
   transactions    Transaction[]
   feeClaims       FeeClaim[]
@@ -177,15 +177,15 @@ model FeeClaim {
 /// die MarketTicks rekonstruiert, gegen die optimiert wird. Was hier nicht steht,
 /// kann der Replay nicht sehen — und nachträglich beschaffen lässt es sich nicht.
 model PoolSnapshot {
-  id           String   @id @default(cuid())
-  poolAddress  String   @map("pool_address")
-  ts           DateTime @default(now())
-  tvlUsd       Decimal? @map("tvl_usd") @db.Decimal(20, 2)
-  volume24hUsd Decimal? @map("volume_24h_usd") @db.Decimal(20, 2)
-  fees24hUsd   Decimal? @map("fees_24h_usd") @db.Decimal(20, 2)
-  feeTvl24hPct Decimal? @map("fee_tvl_24h_pct") @db.Decimal(10, 4)
-  priceNative  Decimal? @map("price_native") @db.Decimal(30, 15)
-  binStep      Int?     @map("bin_step")
+  id             String   @id @default(cuid())
+  poolAddress    String   @map("pool_address")
+  ts             DateTime @default(now())
+  tvlUsd         Decimal? @map("tvl_usd") @db.Decimal(20, 2)
+  volume24hUsd   Decimal? @map("volume_24h_usd") @db.Decimal(20, 2)
+  fees24hUsd     Decimal? @map("fees_24h_usd") @db.Decimal(20, 2)
+  feeTvl24hPct   Decimal? @map("fee_tvl_24h_pct") @db.Decimal(10, 4)
+  priceNative    Decimal? @map("price_native") @db.Decimal(30, 15)
+  binStep        Int?     @map("bin_step")
   /// Gesamtgebühr (Basis + Volatilitätsaufschlag) zum Messzeitpunkt, in %.
   /// Der Satz, mit dem Swaps tatsächlich belastet werden — bei volatilen Pools
   /// ein Mehrfaches der Basisgebühr.
@@ -321,4 +321,27 @@ model BlacklistEntry {
 
   @@unique([kind, address])
   @@map("blacklist")
+}
+
+/// Marktregime-Urteil eines Scan-Durchgangs.
+///
+/// Aufgezeichnet wird **unabhängig davon, ob das Tor blockiert** — und das ist
+/// der Punkt: Ein Tor, das nie gemessen wird, lässt sich nicht rechtfertigen.
+/// Erst diese Reihe zeigt, ob „ungünstig" tatsächlich schlechtere Ergebnisse
+/// vorhersagt, und erlaubt es, die Schwellen zu kalibrieren statt sie zu raten.
+model RegimeSnapshot {
+  id                     String   @id @default(cuid())
+  ts                     DateTime @default(now())
+  /// favourable | neutral | adverse | unknown
+  status                 String
+  /// Median des Verhältnisses Gebührenertrag zu Varianzverlust.
+  medianYieldPerVariance Decimal? @map("median_yield_per_variance") @db.Decimal(18, 6)
+  /// Wie viele Pools die Aussage tragen, und wie viele ausfielen.
+  sampled                Int
+  skipped                Int      @default(0)
+  /// Hat das Urteil den Einstieg tatsächlich verhindert?
+  blockedOpening         Boolean  @default(false) @map("blocked_opening")
+
+  @@index([ts])
+  @@map("regime_snapshots")
 }

@@ -381,6 +381,61 @@ Die Sensitivitätsanalyse variiert sie wie jeden anderen Parameter. Anders als
 diese werden sie danach aber **nicht optimiert**, sondern auf dem konservativen
 Ende festgesetzt. Einen Modellfehler zu „optimieren" heißt, ihn auszunutzen.
 
+### 6.1b Die Ausnahme: was sich messen lässt, wird gemessen
+
+Für drei dieser Annahmen — `poolLiquidityBins`, `feeShareHaircutPct` und
+`limitOrderShareHaircutPct` — gilt der Satz „konservativ festsetzen" nur so
+lange, wie sie unmessbar sind. Sie sind es nicht mehr.
+
+Die DLMM-Positions-Endpunkte sind **öffentlich**: `/portfolio` nennt die Pools
+eines Wallets, `/positions/{pool}/pnl` seine Positionen mit Zeitraum, Einsatz,
+Bin-Range und Gebührenertrag. Damit lässt sich jede fremde Position durch die
+eigene Engine schicken und der Gebührenertrag vergleichen —
+`pnpm --filter @lping/bot calibrate -- --wallet <Adresse>`.
+
+Was dabei herauskommt, ist **nicht** der Wert der drei Annahmen einzeln; aus
+einer Beobachtung sind sie nicht zu trennen. Was herauskommt, ist ihr Produkt,
+ausgedrückt als der `poolLiquidityBins`-Wert, der die Lücke schließt. Genau das
+ist die Größe, die zählt: Ob die Simulation um Faktor 3 zu großzügig oder zu
+streng rechnet, entscheidet über jede Aussage zur Profitabilität — welche der
+drei Annahmen den Fehler trägt, ist demgegenüber zweitrangig.
+
+Zwei Vorbehalte, die zum Verfahren gehören:
+
+1. **Der TVL wird fortgetragen.** Die Historien-Endpunkte liefern keinen TVL;
+   die Kalibrierung nimmt den heutigen. Ein Pool, dessen Liquidität sich seither
+   halbiert hat, verschiebt den Faktor um denselben Betrag. Deshalb sind kurze,
+   junge Zeiträume vorzuziehen und der Median über viele Positionen belastbarer
+   als jeder Einzelfall.
+2. **Ohne Bin-Range kein Fall.** Positionen, deren Antwort die Range nicht
+   ausweist, werden übersprungen statt geschätzt. Ein Vergleich auf geratener
+   Breite sähe aus wie eine Messung und wäre keine.
+
+### 6.1c Regime statt Auswahl: die vorgelagerte Frage
+
+Screening und Score beantworten „welcher Pool ist der beste?". Sie beantworten
+nicht „ist heute überhaupt einer gut genug?" — und aus einem Feld schlechter
+Kandidaten wählt der Score zuverlässig den besten schlechten aus und eröffnet
+ihn.
+
+Die Bedingung, unter der LPing trägt, ist dieselbe wie beim einzelnen Pool:
+Gebührenertrag über Varianzverlust. Über die Kandidaten eines Durchgangs
+aggregiert (Median, nicht Mittelwert — ein Ausreißer soll den Markt nicht
+drehen) ergibt sie ein Urteil über das **Regime**, und ein Tor davor wirkt auf
+alle Presets gleichzeitig. Das ist der billigste verfügbare Hebel: Er kostet
+keine Kalenderzeit, während jede Parametersuche erst einen Datensatz braucht
+und danach nur ein Preset verbessert.
+
+Bewertet wird das **ganze** Kandidatenfeld, auch das abgelehnte. Ein Urteil aus
+den Pools, die die Filter passiert haben, misst die Filter mit und wäre per
+Konstruktion immer freundlich.
+
+Die Schwellen (`adverseBelow`, `favourableAbove`) sind gesetzt, nicht gemessen.
+`regime_snapshots` zeichnet deshalb **jedes** Urteil auf, auch wenn es nicht
+blockiert hat: Erst diese Reihe zeigt, ob „ungünstig" tatsächlich schlechtere
+Ergebnisse vorhersagt — und damit, ob das Tor mehr nützt als es an Einstiegen
+kostet. Ein Tor, das nie gemessen wird, ist eine Behauptung.
+
 ### 6.1a Zwei Wege, zwei Fragen: Replay und Stresstest
 
 Der Replay läuft auf **aufgezeichneten** Verläufen und sagt, was passiert wäre.

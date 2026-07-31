@@ -88,6 +88,61 @@ export class ScanRepo {
     return { candidateId, created };
   }
 
+  /**
+   * Hält das Regime-Urteil eines Durchgangs fest.
+   *
+   * Geschrieben wird **immer**, auch wenn das Tor nicht blockiert hat. Nur so
+   * entsteht die Reihe, an der sich später prüfen lässt, ob „ungünstig"
+   * tatsächlich schlechtere Ergebnisse vorhersagt — und damit, ob das Tor
+   * seine Berechtigung hat oder nur Einstiege kostet.
+   */
+  async recordRegime(input: {
+    status: string;
+    medianYieldPerVariance: number | null;
+    sampled: number;
+    skipped: number;
+    blockedOpening: boolean;
+    at?: Date;
+  }): Promise<void> {
+    await this.prisma.regimeSnapshot.create({
+      data: {
+        ...(input.at !== undefined ? { ts: input.at } : {}),
+        status: input.status,
+        medianYieldPerVariance: input.medianYieldPerVariance,
+        sampled: input.sampled,
+        skipped: input.skipped,
+        blockedOpening: input.blockedOpening,
+      },
+    });
+  }
+
+  /**
+   * Verteilung der Regime-Urteile über einen Zeitraum.
+   *
+   * Die Grundlage der Kalibrierung: Wie oft war das Regime ungünstig, und wie
+   * oft hat das tatsächlich einen Einstieg verhindert?
+   */
+  async regimeHistory(since: Date): Promise<
+    { status: string; count: number; blocked: number }[]
+  > {
+    const rows = await this.prisma.regimeSnapshot.groupBy({
+      by: ["status"],
+      where: { ts: { gte: since } },
+      _count: { _all: true },
+    });
+    const blocked = await this.prisma.regimeSnapshot.groupBy({
+      by: ["status"],
+      where: { ts: { gte: since }, blockedOpening: true },
+      _count: { _all: true },
+    });
+    const blockedByStatus = new Map(blocked.map((row) => [row.status, row._count._all]));
+    return rows.map((row) => ({
+      status: row.status,
+      count: row._count._all,
+      blocked: blockedByStatus.get(row.status) ?? 0,
+    }));
+  }
+
   /** Kandidaten, deren Shadow-Tracking noch läuft (für spätere Auswertung). */
   async listShadowed(now: Date = new Date()) {
     return this.prisma.poolCandidate.findMany({

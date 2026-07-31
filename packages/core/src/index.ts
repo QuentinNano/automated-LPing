@@ -10,6 +10,7 @@ export {
   StrategyConfigSchema,
   PaperConfigSchema,
   ExitConfigSchema,
+  RegimeConfigSchema,
   KillSwitchSchema,
   parseBotConfig,
   ConfigValidationError,
@@ -21,6 +22,7 @@ export type {
   PresetKind,
   PaperConfig,
   ExitConfig,
+  RegimeConfig,
   KillSwitch,
 } from "./config/schema";
 
@@ -78,6 +80,8 @@ export type {
   PoolMetrics,
   PoolTokenInfo,
   PoolCandle,
+  RealPosition,
+  PortfolioPool,
   HistoryTimeframe,
   CollectFeeMode,
   MetricWindow,
@@ -103,6 +107,8 @@ export {
   solPriceUsdOf,
   priceDivergencePct,
 } from "./screening/aggregate";
+export { assessRegime, regimeBlocksOpening } from "./screening/regime";
+export type { RegimeObservation, RegimeVerdict, RegimeStatus } from "./screening/regime";
 export { runHardFilters } from "./screening/filters";
 export { computeScore } from "./screening/score";
 export { screenCandidate } from "./screening/screen";
@@ -204,5 +210,18 @@ export type {
   SnapshotWindows,
   TrackPoint,
 } from "./ml/outcomes";
+export {
+  calibrate,
+  calibrationPreset,
+  fitPoolLiquidityBins,
+  POOL_LIQUIDITY_BIN_GRID,
+} from "./calibrate/groundTruth";
+export type {
+  CalibrationInput,
+  CalibrationCase,
+  CalibrationResult,
+  SkippedCase,
+} from "./calibrate/groundTruth";
+
 export { evaluateTrackHealth, overallHealth } from "./ml/health";
 export type { HealthCheck, HealthStatus, TrackHealthInput } from "./ml/health";

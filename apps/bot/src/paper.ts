@@ -1,4 +1,5 @@
 import {
+  assessRegime,
   closePaperPosition,
   deployedCapitalSol,
   marketTickFromPool,
@@ -7,6 +8,7 @@ import {
   poolFeeRatePctPerDay,
   poolPriceInSol,
   positionSizeSol,
+  regimeBlocksOpening,
   solPriceUsdOf,
   tickPaperPosition,
   valuePosition,
@@ -17,6 +19,7 @@ import {
   type PoolMetrics,
   type PresetKind,
   type PresetPerformance,
+  type RegimeVerdict,
 } from "@lping/core";
 import type { ScanRow } from "./scan";
 
@@ -68,6 +71,15 @@ export interface PaperDeps {
   getPool(poolAddress: string): Promise<PoolMetrics>;
   /** SOL-Preis in USD (für die Umrechnung von TVL/Volumen). */
   getSolPriceUsd(): Promise<number>;
+  /**
+   * Hält das Regime-Urteil fest, falls eine Ablage vorhanden ist.
+   *
+   * Optional, weil die Beurteilung ohne Datenbank funktionieren muss. Ohne
+   * Aufzeichnung ließen sich die Schwellen aber nie kalibrieren: Erst die
+   * Historie zeigt, ob „ungünstig" tatsächlich schlechtere Ergebnisse
+   * vorhersagt — und das ist die einzige Rechtfertigung eines Tors.
+   */
+  recordRegime?: (verdict: RegimeVerdict, at: Date) => Promise<void>;
   log?: (line: string) => void;
   now?: () => Date;
 }
@@ -100,11 +112,39 @@ export async function openFromScan(
   deps: PaperDeps,
   config: BotConfig,
   rows: ScanRow[],
-): Promise<{ opened: number; notes: string[] }> {
+): Promise<{ opened: number; notes: string[]; regime: RegimeVerdict }> {
   const log = deps.log ?? (() => {});
   const now = (deps.now ?? (() => new Date()))();
   const notes: string[] = [];
   let opened = 0;
+
+  // Die Frage vor der Pool-Auswahl: Ist heute überhaupt einer gut genug?
+  //
+  // Bewertet wird das **ganze** Kandidatenfeld, nicht nur das angenommene:
+  // Ein Regime-Urteil aus den Pools, die die Filter passiert haben, misst die
+  // Filter mit — und wäre per Konstruktion immer freundlich.
+  const regime = assessRegime(
+    rows.map((row) => ({
+      poolAddress: row.pool.poolAddress,
+      feeRatePctPerDay: poolFeeRatePctPerDay(
+        volumeRate24hUsd(row.pool),
+        poolFeePct(row.pool),
+        row.pool.tvlUsd ?? 0,
+      ),
+      volatilityPctDaily: row.volatilityPctDaily,
+    })),
+    config.global.regime,
+  );
+  await deps.recordRegime?.(regime, now);
+  log(`Regime: ${regime.status} — ${regime.reason}`);
+
+  if (regimeBlocksOpening(regime, config.global.regime)) {
+    notes.push(
+      `Kein Einstieg: Das Regime ist ungünstig (${regime.reason}). ` +
+        `Bestehende Positionen laufen weiter, die Aufzeichnung ebenfalls.`,
+    );
+    return { opened, notes, regime };
+  }
 
   const accepted = rows.filter((row) => row.screening.verdict === "accepted");
   for (const row of accepted) {
@@ -176,7 +216,7 @@ export async function openFromScan(
     );
   }
 
-  return { opened, notes };
+  return { opened, notes, regime };
 }
 
 /** Aktualisiert alle offenen Positionen mit frischen Marktdaten. */

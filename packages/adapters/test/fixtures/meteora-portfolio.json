@@ -1,0 +1,13 @@
+{
+  "data": [
+    {
+      "pool_address": "PoolXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      "position_addresses": ["PosAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
+    },
+    {
+      "address": "PoolYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
+      "positions": [{ "address": "PosDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD" }]
+    },
+    { "token_x": "kein Pool ohne Adresse" }
+  ]
+}

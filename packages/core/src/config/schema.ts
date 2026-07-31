@@ -100,6 +100,45 @@ export const PaperConfigSchema = z.object({
 
 export type PaperConfig = z.infer<typeof PaperConfigSchema>;
 
+/**
+ * Marktregime-Tor: die Frage vor der Pool-Auswahl.
+ *
+ * Screening und Score beantworten „welcher Pool ist der beste?", nicht „ist
+ * heute überhaupt einer gut genug?". Aus einem Feld schlechter Kandidaten
+ * wählt der Score zuverlässig den besten schlechten aus — und eröffnet ihn.
+ *
+ * Gemessen wird das Verhältnis von Gebührenertrag zu erwartetem Varianzverlust
+ * über die Kandidaten eines Durchgangs. Die Schwellen sind Startwerte und
+ * gehören kalibriert, sobald `regime_snapshots` genug Historie trägt: Die
+ * Aufzeichnung läuft unabhängig davon, ob das Tor blockiert.
+ */
+export const RegimeConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  /**
+   * Unter diesem Median-Verhältnis gilt das Regime als ungünstig.
+   *
+   * 1,0 heißt wörtlich: Die Gebühren decken den erwarteten Varianzverlust
+   * gerade eben. Darunter verliert eine Position gegen schlichtes Halten,
+   * gleich welcher Pool es wird — Kosten und Zeit außerhalb der Range kommen
+   * dann noch obendrauf.
+   */
+  adverseBelow: z.number().min(0).max(100).default(1),
+  /** Ab diesem Median-Verhältnis gilt das Regime als günstig. */
+  favourableAbove: z.number().min(0).max(1_000).default(3),
+  /**
+   * Mindestzahl bewertbarer Pools für ein Urteil.
+   *
+   * Darunter lautet das Urteil `unknown` — und `unknown` blockiert nicht:
+   * Fehlende Messung ist kein Befund, und ein Tor, das ohne Daten schließt,
+   * verhindert genau die Aufzeichnung, aus der die Daten entstünden.
+   */
+  minPools: z.number().int().min(1).max(1_000).default(15),
+  /** Ob ein ungünstiges Regime das Eröffnen tatsächlich verhindert. */
+  blockOpening: z.boolean().default(true),
+});
+
+export type RegimeConfig = z.infer<typeof RegimeConfigSchema>;
+
 export const GlobalConfigSchema = z
   .object({
     /** Paper-Trading ist der sichere Default; Live erst nach Phase 1. */
@@ -112,6 +151,7 @@ export const GlobalConfigSchema = z
     hardLossLimitPct: pct(1, 80).default(10),
     priorityFeeCapLamports: z.number().int().min(0).max(1_000_000_000).default(2_000_000),
     profitSweepThresholdSol: z.number().min(0).default(5),
+    regime: RegimeConfigSchema.default({}),
     paper: PaperConfigSchema,
   })
   .superRefine((val, ctx) => {

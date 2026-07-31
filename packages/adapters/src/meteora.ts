@@ -8,6 +8,8 @@ import {
   type PoolCandle,
   type PoolMetrics,
   type PoolTokenInfo,
+  type PortfolioPool,
+  type RealPosition,
   type WindowedMetric,
 } from "@lping/core";
 import { AdapterError, TokenBucket, fetchJson, type FetchLike } from "./http";
@@ -104,6 +106,10 @@ interface MeteoraSource {
   /** Historien-Endpunkte — nur die aktuelle Schnittstelle hat sie. */
   ohlcvPath?: (address: string) => string;
   volumeHistoryPath?: (address: string) => string;
+  /** Positions-Endpunkte für die Ground-Truth-Kalibrierung. */
+  openPortfolioPath?: string;
+  closedPortfolioPath?: string;
+  positionPnlPath?: (poolAddress: string) => string;
 }
 
 /** Obergrenze der dokumentierten Schnittstelle für `page_size`. */
@@ -136,6 +142,9 @@ const SOURCES: MeteoraSource[] = [
     poolPath: (address) => `/pools/${address}`,
     ohlcvPath: (address) => `/pools/${address}/ohlcv`,
     volumeHistoryPath: (address) => `/pools/${address}/volume/history`,
+    openPortfolioPath: "/portfolio/open",
+    closedPortfolioPath: "/portfolio",
+    positionPnlPath: (poolAddress) => `/positions/${poolAddress}/pnl`,
     // Seiten sind 1-basiert. Sortierung und Filter sind serverseitig, damit die
     // Vorauswahl nicht davon abhängt, was in den ersten Seiten zufällig steht.
     listParams: ({ page = 0, limit = 50, sortBy, filterBy }) => ({
@@ -462,6 +471,100 @@ export class MeteoraAdapter {
     return items.filter(isRecord);
   }
 
+  /**
+   * Pools, in denen ein Wallet Positionen hält (`open`) oder hielt (`closed`).
+   *
+   * Einstiegspunkt der Ground-Truth-Kalibrierung: Von hier führt der Weg über
+   * `getPositions` zu den einzelnen Positionen mit ihrem Gebührenertrag.
+   *
+   * **Zum Feldnamen-Risiko.** Diese Endpunkte sind wie alle Meteora-APIs nicht
+   * formal versioniert, und ihre Antwortform ließ sich hier nicht gegen den
+   * Live-Dienst prüfen. Gelesen wird deshalb wie überall über Alias-Listen, und
+   * ein Datensatz ohne Pflichtangaben wird übersprungen statt den ganzen Abruf
+   * zu verwerfen. `pnpm --filter @lping/bot api:check` zeigt im Zweifel, was
+   * tatsächlich ankommt.
+   */
+  async getPortfolio(
+    wallet: string,
+    options: { status?: "open" | "closed"; page?: number; pageSize?: number } = {},
+  ): Promise<PortfolioPool[]> {
+    const status = options.status ?? "open";
+    const source = this.sources.find((candidate) =>
+      status === "open" ? candidate.openPortfolioPath : candidate.closedPortfolioPath,
+    );
+    const path = status === "open" ? source?.openPortfolioPath : source?.closedPortfolioPath;
+    if (source === undefined || path === undefined) {
+      throw new AdapterError("Keine Schnittstelle mit Portfolio-Endpunkt", "validation", {
+        url: "portfolio",
+      });
+    }
+
+    const url = `${source.baseUrl}${path}`;
+    const payload = await fetchJson(url, {
+      schema: z.unknown(),
+      searchParams: {
+        user: wallet,
+        page: options.page ?? 1,
+        ...(options.pageSize !== undefined ? { page_size: options.pageSize } : {}),
+      },
+      ...this.requestOptions(),
+    });
+
+    return unwrapList(payload, url)
+      .items.filter(isRecord)
+      .flatMap((raw) => {
+        const scopes = scopesOf(raw);
+        const poolAddress = pickString(scopes, [
+          "pool_address",
+          "address",
+          "lb_pair",
+          "lbPair",
+          "pair_address",
+        ]);
+        if (poolAddress === undefined) return [];
+        return [{ poolAddress, positionAddresses: positionAddressesOf(raw) }];
+      });
+  }
+
+  /**
+   * Positionen eines Wallets in einem Pool, samt PnL und Gebührenertrag.
+   *
+   * Geschlossene Positionen sind die wertvolleren: Sie haben einen Anfang, ein
+   * Ende und einen abgeschlossenen Gebührenertrag — genau die drei Angaben, die
+   * ein Replay derselben Zeitspanne braucht, um vergleichbar zu sein.
+   */
+  async getPositions(
+    poolAddress: string,
+    wallet: string,
+    options: { status?: "open" | "closed"; page?: number } = {},
+  ): Promise<RealPosition[]> {
+    const source = this.sources.find((candidate) => candidate.positionPnlPath !== undefined);
+    const path = source?.positionPnlPath;
+    if (source === undefined || path === undefined) {
+      throw new AdapterError("Keine Schnittstelle mit Positions-PnL", "validation", {
+        url: "positions/pnl",
+      });
+    }
+
+    const url = `${source.baseUrl}${path(poolAddress)}`;
+    const payload = await fetchJson(url, {
+      schema: z.unknown(),
+      searchParams: {
+        user: wallet,
+        page: options.page ?? 1,
+        ...(options.status !== undefined ? { status: options.status } : {}),
+      },
+      ...this.requestOptions(),
+    });
+
+    return unwrapList(payload, url)
+      .items.filter(isRecord)
+      .flatMap((raw) => {
+        const position = normalizeRealPosition(raw, poolAddress);
+        return position === null ? [] : [position];
+      });
+  }
+
   async health(): Promise<AdapterHealth> {
     const started = Date.now();
     try {
@@ -481,6 +584,100 @@ export class MeteoraAdapter {
       };
     }
   }
+}
+
+/** Positionsadressen eines Portfolio-Eintrags, in beliebiger Verpackung. */
+function positionAddressesOf(raw: Record<string, unknown>): string[] {
+  for (const key of ["position_addresses", "positions", "position_pubkeys", "positionAddresses"]) {
+    const value = raw[key];
+    if (!Array.isArray(value)) continue;
+    const addresses = value.flatMap((entry) => {
+      if (typeof entry === "string") return [entry];
+      if (isRecord(entry)) {
+        const nested = pickString([entry], ["address", "position_address", "pubkey"]);
+        return nested === undefined ? [] : [nested];
+      }
+      return [];
+    });
+    if (addresses.length > 0) return addresses;
+  }
+  return [];
+}
+
+/**
+ * Eine reale Position aus einer PnL-Antwort.
+ *
+ * `null`, wenn weder Adresse noch Zeitraum lesbar sind — ohne beides lässt sich
+ * kein Replay derselben Zeitspanne bauen, und ein Datensatz, den man nicht
+ * vergleichen kann, gehört nicht in die Kalibrierung.
+ *
+ * Die SOL-Beträge werden **nur** aus SOL-denominierten Feldern gelesen, nie aus
+ * USD umgerechnet: Der SOL-Kurs zum Zeitpunkt der Position ist hier nicht
+ * bekannt, und mit dem heutigen umzurechnen verschöbe jede ältere Messung.
+ */
+export function normalizeRealPosition(
+  raw: unknown,
+  poolAddress: string,
+): RealPosition | null {
+  if (!isRecord(raw)) return null;
+  const scopes = scopesOf(raw);
+
+  const positionAddress = pickString(scopes, [
+    "position_address",
+    "address",
+    "position",
+    "pubkey",
+  ]);
+  const openedAt = positionTimestamp(scopes, ["opened_at", "open_time", "created_at", "start_time"]);
+  const closedAt = positionTimestamp(scopes, ["closed_at", "close_time", "end_time"]);
+  if (positionAddress === undefined || openedAt === null) return null;
+
+  const rawStatus = pickString(scopes, ["status", "state"])?.toLowerCase();
+  const status: RealPosition["status"] =
+    rawStatus === "closed" || (rawStatus === undefined && closedAt !== null) ? "closed" : "open";
+
+  return {
+    positionAddress,
+    poolAddress: pickString(scopes, ["pool_address", "lb_pair", "lbPair"]) ?? poolAddress,
+    status,
+    openedAt,
+    closedAt,
+    depositSol: nullableNumber(
+      pickNumber(scopes, ["total_deposit_sol", "deposits_sol", "deposit_sol", "total_deposits_sol"]),
+    ),
+    feesSol: nullableNumber(
+      pickNumber(scopes, ["total_fees_sol", "fees_sol", "fee_earned_sol", "claimed_fee_sol"]),
+    ),
+    pnlSol: nullableNumber(pickNumber(scopes, ["pnl_sol", "total_pnl_sol", "net_pnl_sol"])),
+    ...(pickInt(scopes, ["lower_bin_id", "min_bin_id", "lowerBinId"]) !== undefined
+      ? { minBinId: pickInt(scopes, ["lower_bin_id", "min_bin_id", "lowerBinId"])! }
+      : {}),
+    ...(pickInt(scopes, ["upper_bin_id", "max_bin_id", "upperBinId"]) !== undefined
+      ? { maxBinId: pickInt(scopes, ["upper_bin_id", "max_bin_id", "upperBinId"])! }
+      : {}),
+  };
+}
+
+/** Ganzzahl aus einem der Container — Bin-IDs dürfen negativ sein. */
+function pickInt(scopes: Record<string, unknown>[], keys: string[]): number | undefined {
+  const value = pickNumber(scopes, keys);
+  return value === undefined || !Number.isFinite(value) ? undefined : Math.round(value);
+}
+
+/** Zeitstempel einer Position: Epoch-Sekunden oder ISO-Text. */
+function positionTimestamp(
+  scopes: Record<string, unknown>[],
+  keys: string[],
+): Date | null {
+  const numeric = pickNumber(scopes, keys);
+  if (numeric !== undefined && numeric > 0) return fromEpoch(numeric);
+
+  const text = pickString(scopes, keys);
+  if (text !== undefined) {
+    const parsed = new Date(text);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return null;
 }
 
 /** Envelope einer Listenantwort auspacken (nacktes Array oder `{data|pairs|…}`). */
