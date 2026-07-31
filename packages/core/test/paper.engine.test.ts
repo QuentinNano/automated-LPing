@@ -49,6 +49,14 @@ function openKonservativ(price = 1): PaperPositionState {
   });
 }
 
+/**
+ * Einstiegskosten einer Position ohne Swap: eine Transaktion plus der
+ * Erwartungswert der Bin-Array-Initialisierung.
+ */
+const expectedOpenCostSol =
+  config.global.paper.costs.priorityFeeSol +
+  config.global.paper.costs.binArrayInitSol * config.global.paper.binArrayInitProbability;
+
 describe("openPaperPosition", () => {
   it("Degen (quote_only) startet zu 100 % in SOL und ohne Swap-Kosten", () => {
     const state = openDegen();
@@ -58,7 +66,12 @@ describe("openPaperPosition", () => {
     expect(state.entryTokenShare).toBe(0);
     // Nur eine Transaktion (Open), kein Swap.
     expect(state.txCount).toBe(1);
-    expect(state.costsSol).toBeCloseTo(config.global.paper.costs.priorityFeeSol);
+    // Priority Fee plus die **erwartete** Bin-Array-Initialisierung. Letztere
+    // fällt nicht sicher an, sondern nur bei erstmalig belegtem Preisbereich —
+    // gebucht wird deshalb ihr Erwartungswert. Ohne sie unterschätzte die
+    // Simulation die Einstiegskosten gerade bei kleinen Einsätzen erheblich:
+    // Bei 1 SOL sind 0,075 SOL 7,5 Prozentpunkte Rendite.
+    expect(state.costsSol).toBeCloseTo(expectedOpenCostSol);
   });
 
   it("Konservativ (balanced) hält beide Seiten und zahlt Swap-Kosten", () => {
@@ -71,10 +84,36 @@ describe("openPaperPosition", () => {
     expect(state.txCount).toBe(2);
   });
 
+  it("bucht die Bin-Array-Initialisierung als Erwartungswert, nicht als Konstante", () => {
+    const scale = (binArrayInitProbability: number) =>
+      openPaperPosition({
+        preset: config.presets["degen"]!,
+        global: {
+          ...config.global,
+          paper: { ...config.global.paper, binArrayInitProbability },
+        },
+        binStep: 100,
+        price: 1,
+        depositSol: 1,
+        feePct: 1,
+        at: T0,
+      }).costsSol;
+
+    const priorityFeeSol = config.global.paper.costs.priorityFeeSol;
+    // 0 reproduziert exakt das frühere Verhalten — die Kosten sind abschaltbar,
+    // nicht eingebacken.
+    expect(scale(0)).toBeCloseTo(priorityFeeSol);
+    // Der Aufschlag skaliert linear mit der Wahrscheinlichkeit.
+    expect(scale(1) - priorityFeeSol).toBeCloseTo(config.global.paper.costs.binArrayInitSol);
+    expect(scale(0.5) - priorityFeeSol).toBeCloseTo(
+      (scale(1) - priorityFeeSol) / 2,
+    );
+  });
+
   it("Position startet leicht negativ (Einstiegskosten sind sofort real)", () => {
     const valuation = valuePosition(openDegen(), 1);
     expect(valuation.pnlSol).toBeLessThan(0);
-    expect(valuation.pnlSol).toBeCloseTo(-config.global.paper.costs.priorityFeeSol, 6);
+    expect(valuation.pnlSol).toBeCloseTo(-expectedOpenCostSol, 6);
   });
 });
 

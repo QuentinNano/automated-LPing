@@ -36,6 +36,25 @@ describe("BotConfigSchema", () => {
     expect(config.presets["experiment_a"]).toBeDefined();
   });
 
+  it("prüft die Summe der Presets erst gegen die Wallet-Grenzen, wenn live gehandelt wird", () => {
+    // Ausgeliefert: 4 + 5 + 5 = 14 Positionen gegen maxOpenPositions 10. Je
+    // Preset geprüft passierte das anstandslos — die globale Grenze war damit
+    // wirkungslos.
+    const raw = loadDefaults() as { global: Record<string, unknown> };
+    expect(() => parseBotConfig(raw)).not.toThrow();
+
+    raw.global["paperTrading"] = false;
+    expect(() => parseBotConfig(raw)).toThrowError(/maxOpenPositions ist 10/);
+  });
+
+  it("prüft live auch den Gesamteinsatz aller aktiven Presets", () => {
+    const raw = loadDefaults() as { global: Record<string, unknown> };
+    raw.global["paperTrading"] = false;
+    raw.global["maxOpenPositions"] = 20;
+    raw.global["maxTotalExposureSol"] = 10;
+    expect(() => parseBotConfig(raw)).toThrowError(/maxTotalExposureSol/);
+  });
+
   it("lehnt ungültige Preset-IDs ab", () => {
     const raw = loadDefaults() as { presets: Record<string, unknown> };
     raw.presets["Bad Name!"] = raw.presets["degen"];

@@ -183,6 +183,21 @@ zustandsabhängigen Regeln in `exit` (KONZEPT.md 6.2a).
 Ein weiteres Profil entsteht durch eine zusätzliche Datei in `config/` (etwa
 `degen_eng.json`) — sie erscheint automatisch in UI, Paper-Vergleich und Replay.
 
+**Die globalen Grenzen `maxOpenPositions` und `maxTotalExposureSol` beschreiben
+eine gemeinsame Wallet — im Paper-Betrieb gibt es die nicht.** Jedes Preset läuft
+dort mit eigenem virtuellem Kapital, und genau diese Unabhängigkeit ist die
+Grundlage des Vergleichs: Eine gemeinsame Obergrenze, die bindet, gäbe dem zuerst
+gescannten Preset seine Positionen und dem letzten keine — gemessen würde
+Reihenfolge statt Strategie. Deshalb greifen beide erst bei
+`paperTrading: false`, und dann sowohl in der Schema-Prüfung (gegen die **Summe**
+der aktiven Presets) als auch zur Laufzeit. Passt die Preset-Aufstellung nicht in
+die Live-Grenzen, sagt `pnpm --filter @lping/bot validate` das schon im
+Paper-Betrieb als Warnung — der Umstieg soll keine Überraschung sein.
+
+Der **Kill-Switch** ist davon ausgenommen und wirkt immer: `pause` verhindert
+neue Einstiege, `flatten` schließt zusätzlich alle offenen Positionen
+(Ausstiegsgrund `kill_switch`). „Nichts mehr tun" gilt auch für eine Simulation.
+
 ---
 
 ## Oberfläche
@@ -335,10 +350,11 @@ sie würden sonst ungeprüft live gehen:
 
 | Lücke | Betrifft |
 |---|---|
-| **Risk Manager nicht scharf:** Kill-Switch, globale Positions- und Exposure-Grenzen und Verlustlimits sind konfigurierbar, werden aber von keiner Logik durchgesetzt. (Die positionsbezogenen Notfall-Schwellen sind seit `exit.*` scharf — die portfolioweiten nicht) | KONZEPT.md 6.3, 9 |
+| **Verlustlimits nicht scharf:** `dailyLossLimitPct`, `hardLossLimitPct`, `minSolReserve`, `profitSweepThresholdSol` und `priorityFeeCapLamports` sind konfigurierbar, werden aber von keiner Logik durchgesetzt. Sie brauchen eine Bezugsgröße, die erst der Live-Betrieb liefert (Wallet-Stand, realisierter Tagesverlust). Kill-Switch sowie Positions- und Exposure-Grenzen sind seit F1 scharf | KONZEPT.md 6.3, 9 |
 | **Keine On-Chain-Reads:** Authorities kommen nur von RugCheck; die Token-2022-Prüfung und die LP-Dominanz fehlen ganz | KONZEPT.md 5.1 |
 | **Slippage-Impact geschätzt, nicht gemessen:** Die Größenabhängigkeit ist seit `swapImpactFactor` da, ihr Faktor ist aber eine Annahme. Die Jupiter-Roundtrip-Prüfung könnte ihn kalibrieren — sie filtert bislang nur | KONZEPT-ML.md 6.1 |
 | **Limit-Order-Anteil geschätzt:** Seit `lb_clmm` 0.12.0 zweigt Order-Liquidität einen Teil der Gebühr ab. Der Abschlag ist als eigene Annahme geführt, aber nicht gemessen | KONZEPT-ML.md 6.1 |
+| **Bin-Array-Initialisierung geschätzt:** Die Kosten werden seit F2 gebucht, aber als Erwartungswert über `binArrayInitProbability` — ob der Preisbereich tatsächlich neu ist, steht on-chain und wäre über den RPC-Adapter messbar | KONZEPT-ML.md 6.1 |
 | **Shadow-Tracking wird erfasst, aber nicht ausgewertet** (Filter-Güte) | KONZEPT.md 5.5 |
 | **Regime-Schwellen ungeprüft:** Das Tor blockiert bereits, seine Schwellen sind aber gesetzt und nicht kalibriert. `regime_snapshots` sammelt die Grundlage | KONZEPT-ML.md 6.1 |
 | **Web-UI ohne Authentifizierung** | KONZEPT.md 11 |

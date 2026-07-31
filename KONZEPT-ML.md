@@ -365,6 +365,7 @@ hängt, ist keins:
 | `swapImpactFactor` | Preisimpact je Anteil am Pool-TVL. Trifft vor allem den Ausstiegs-Swap und damit den Verlust-Tail. Messbar über die Jupiter-Roundtrip-Prüfung, die heute nur filtert |
 | `costs.priorityFeeSol` | Nicht der größte Posten, aber der einzige, der in Stressphasen um Größenordnungen springt — und Stressphasen sind die, in denen die Ausstiege feuern |
 | `rebalance.projectionHours` | Über welchen Zeitraum der Zusatzertrag eines Rebalances gilt. Vorher implizit die gesamte Restlaufzeit — das öffnete das EV-Tor vollständig |
+| `binArrayInitProbability` | Wie oft eine neue Position eine nicht erstattete Bin-Array-Initialisierung auslöst. Vorher implizit **null** — die Kosten waren in `assessSize` bekannt und wurden von der Engine nie gebucht. Wirkt asymmetrisch: 0,075 SOL sind bei 1 SOL Einsatz 7,5 Prozentpunkte, bei 5 SOL 1,5. Messbar über den RPC-Adapter, denn ob ein Bin-Array existiert, steht on-chain |
 | Abtastraster (`tickMinutes`) | Verschiebt Zeit-in-Range und Ergebnis um mehrere Prozentpunkte; die Richtung ist **nicht** offensichtlich und gehört gemessen |
 
 Eine Beobachtung aus der Messung, die gegen die Erwartung läuft: Gebühren in den

@@ -27,9 +27,11 @@ import type {
  *
  * Kostenmodell — bewusst NUR On-Chain-Kosten:
  * Priority Fees je Transaktion, Slippage je Swap (**größenabhängig**: Grundsatz
- * plus Preisimpact je Anteil am Pool-TVL, gedeckelt durch `slippageCapPct`) und
- * die Composition Fee beim Einzahlen in den aktiven Bin. Positions-Rent ist
- * erstattungsfähig und damit gebundenes Kapital, kein Aufwand.
+ * plus Preisimpact je Anteil am Pool-TVL, gedeckelt durch `slippageCapPct`), die
+ * Composition Fee beim Einzahlen in den aktiven Bin und die erwartete
+ * Bin-Array-Initialisierung beim Eröffnen. Positions-Rent ist
+ * erstattungsfähig und damit gebundenes Kapital, kein Aufwand — die
+ * Bin-Array-Initialisierung ist es ausdrücklich **nicht**.
  * Infrastrukturkosten (VPS, RPC-Tarife) bleiben außen vor: Sie sind monatlicher
  * Fixaufwand, keiner Position zurechenbar, und würden den Preset-Vergleich
  * verzerren statt ihn zu schärfen.
@@ -193,11 +195,20 @@ export function openPaperPosition(params: OpenPaperPositionParams): PaperPositio
   });
 
   // Kosten des Einstiegs: eine Transaktion, Swap-Kosten auf den Anteil, der in
-  // Token getauscht werden musste (bei quote_only entfällt der Swap), plus die
-  // Composition Fee auf den Anteil, der in den aktiven Bin geht.
+  // Token getauscht werden musste (bei quote_only entfällt der Swap), die
+  // Composition Fee auf den Anteil, der in den aktiven Bin geht, plus die
+  // erwartete Bin-Array-Initialisierung.
+  //
+  // Letztere ist der einzige Posten hier, der **nicht sicher** anfällt: Sie
+  // entsteht nur, wenn der gewählte Preisbereich noch nie Liquidität getragen
+  // hat. Gebucht wird deshalb ihr Erwartungswert. Sie ganz wegzulassen war die
+  // stillere, aber nicht die neutralere Annahme — sie behauptet eine
+  // Wahrscheinlichkeit von null für Kosten, vor denen `assessSize` an anderer
+  // Stelle ausdrücklich warnt.
   const costs = global.paper.costs;
   const openCost =
     costs.priorityFeeSol +
+    costs.binArrayInitSol * global.paper.binArrayInitProbability +
     swapCostSol({
       swapValueSol: opened.swappedSol,
       poolTvlSol: params.poolTvlSol ?? null,
